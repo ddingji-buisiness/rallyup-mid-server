@@ -1,3 +1,6 @@
-import socket
+from fastapi import FastAPI
+app = FastAPI()
 
-# print("hello world!")
+@app.get("/")
+def a():
+    return "Hello world"
