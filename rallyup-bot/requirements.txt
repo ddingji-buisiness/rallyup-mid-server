@@ -1,0 +1,14 @@
+aiohappyeyeballs @ file:///home/conda/feedstock_root/build_artifacts/aiohappyeyeballs_1741775197943/work
+aiohttp @ file:///home/conda/feedstock_root/build_artifacts/aiohttp_1752162594193/work
+aiosignal @ file:///home/conda/feedstock_root/build_artifacts/aiosignal_1751626463503/work
+aiosqlite @ file:///home/conda/feedstock_root/build_artifacts/aiosqlite_1734081128935/work
+async-timeout @ file:///home/conda/feedstock_root/build_artifacts/async-timeout_1733235340728/work
+attrs @ file:///home/conda/feedstock_root/build_artifacts/attrs_1741918516150/work
+discord.py @ file:///home/conda/feedstock_root/build_artifacts/discord.py_1691711949357/work
+frozenlist @ file:///home/conda/feedstock_root/build_artifacts/frozenlist_1752167153599/work
+idna @ file:///home/conda/feedstock_root/build_artifacts/idna_1733211830134/work
+multidict @ file:///home/conda/feedstock_root/build_artifacts/multidict_1751310568851/work
+propcache @ file:///home/conda/feedstock_root/build_artifacts/propcache_1744524929518/work
+python-dotenv @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_python-dotenv_1750789290/work
+typing_extensions @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_typing_extensions_1751643513/work
+yarl @ file:///home/conda/feedstock_root/build_artifacts/yarl_1749554844715/work
