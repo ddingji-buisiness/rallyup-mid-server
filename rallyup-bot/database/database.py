@@ -2,7 +2,9 @@ import aiosqlite
 import json
 from datetime import datetime
 from typing import List, Optional, Tuple
-from database.models import User, Match, Participant, UserMatchup
+
+import discord
+from database.models import ClanScrim, ClanTeam, User, Match, Participant, UserMatchup
 import uuid
 import asyncio
 
@@ -18,6 +20,9 @@ class DatabaseManager:
             await db.execute('PRAGMA cache_size=10000')
             await db.execute('PRAGMA temp_store=memory')
             await db.execute('PRAGMA busy_timeout=30000')
+
+            await self.initialize_clan_tables()
+            await self.initialize_server_settings_tables()
 
             # users 테이블
             await db.execute('''
@@ -38,6 +43,68 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # user_applications 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_applications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    entry_method TEXT NOT NULL,
+                    battle_tag TEXT NOT NULL,
+                    main_position TEXT NOT NULL,
+                    previous_season_tier TEXT NOT NULL,
+                    current_season_tier TEXT NOT NULL,
+                    highest_tier TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at TIMESTAMP,
+                    reviewed_by TEXT,
+                    admin_note TEXT,
+                    UNIQUE(guild_id, user_id)
+                )
+            ''')
+            
+            # registered_users 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS registered_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    entry_method TEXT NOT NULL,
+                    battle_tag TEXT NOT NULL,
+                    main_position TEXT NOT NULL,
+                    previous_season_tier TEXT NOT NULL,
+                    current_season_tier TEXT NOT NULL,
+                    highest_tier TEXT NOT NULL,
+                    approved_by TEXT NOT NULL,
+                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    UNIQUE(guild_id, user_id)
+                )
+            ''')
+
+            # 서버 관리자 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS server_admins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    added_by TEXT NOT NULL,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    UNIQUE(guild_id, user_id)
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_guild ON server_admins(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
+            
+            await db.commit()
             
             # matches 테이블
             await db.execute('''
@@ -150,8 +217,143 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_session_participants_session ON session_participants(session_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_session_participants_user ON session_participants(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_users_sessions ON users(total_sessions)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_applications_guild ON user_applications(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_applications_status ON user_applications(status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_registered_users_guild ON registered_users(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_guild ON server_admins(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
         
             await db.commit()
+
+    async def initialize_clan_tables(self):
+        """클랜전 관련 테이블 초기화"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 클랜 팀 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS clan_teams (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    clan_name TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, clan_name)
+                )
+            ''')
+            
+            # 클랜전 스크림 세션 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS clan_scrims (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    scrim_uuid TEXT NOT NULL UNIQUE,
+                    clan_a_name TEXT NOT NULL,
+                    clan_b_name TEXT NOT NULL,
+                    voice_channel_a TEXT NOT NULL,
+                    voice_channel_b TEXT NOT NULL,
+                    scrim_status TEXT DEFAULT 'active',
+                    started_by TEXT NOT NULL,
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TIMESTAMP,
+                    total_matches INTEGER DEFAULT 0,
+                    clan_a_wins INTEGER DEFAULT 0,
+                    clan_b_wins INTEGER DEFAULT 0,
+                    FOREIGN KEY (clan_a_name) REFERENCES clan_teams (clan_name),
+                    FOREIGN KEY (clan_b_name) REFERENCES clan_teams (clan_name)
+                )
+            ''')
+            
+            # 클랜전 개별 경기 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS clan_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scrim_id INTEGER NOT NULL,
+                    match_uuid TEXT NOT NULL UNIQUE,
+                    match_number INTEGER NOT NULL,
+                    map_name TEXT NOT NULL,
+                    map_type TEXT,
+                    winning_team TEXT NOT NULL,
+                    score_a INTEGER,
+                    score_b INTEGER,
+                    has_position_data BOOLEAN DEFAULT FALSE,
+                    has_composition_data BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (scrim_id) REFERENCES clan_scrims (id)
+                )
+            ''')
+            
+            # 클랜전 참가자 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS clan_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id INTEGER NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    clan_name TEXT NOT NULL,
+                    team_side TEXT NOT NULL,
+                    position TEXT,
+                    position_order INTEGER DEFAULT 0,
+                    won BOOLEAN NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (match_id) REFERENCES clan_matches (id)
+                )
+            ''')
+            
+            # 클랜전 팀 조합 테이블 (Optional)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS clan_compositions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id INTEGER NOT NULL,
+                    team_side TEXT NOT NULL,
+                    hero_1 TEXT,
+                    hero_2 TEXT,
+                    hero_3 TEXT,
+                    hero_4 TEXT,
+                    hero_5 TEXT,
+                    composition_type TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (match_id) REFERENCES clan_matches (id),
+                    UNIQUE(match_id, team_side)
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_teams_guild ON clan_teams(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_scrims_guild ON clan_scrims(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_scrims_status ON clan_scrims(scrim_status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_matches_scrim ON clan_matches(scrim_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_participants_match ON clan_participants(match_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_participants_user ON clan_participants(user_id)')
+            
+            await db.commit()
+
+    async def initialize_server_settings_tables(self):
+        """서버 설정 테이블 초기화"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 서버 설정 테이블 생성
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS server_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL UNIQUE,
+                    newbie_role_id TEXT,
+                    member_role_id TEXT,
+                    auto_role_change BOOLEAN DEFAULT FALSE,
+                    welcome_channel_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_settings_guild ON server_settings(guild_id)')
+            
+            await db.commit()
+            print("✅ Server settings tables initialized")
 
     async def _update_teammate_combinations_in_transaction(self, db, match_id: int):
         """팀메이트 조합 데이터 업데이트 (트랜잭션 내에서 실행)"""
@@ -823,3 +1025,897 @@ class DatabaseManager:
                 LIMIT 10
             '''.format(days), (guild_id,)) as cursor:
                 return await cursor.fetchall()
+
+    async def register_clan(self, guild_id: str, clan_name: str, created_by: str) -> bool:
+        """클랜 등록"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                await db.execute('''
+                    INSERT INTO clan_teams (guild_id, clan_name, created_by)
+                    VALUES (?, ?, ?)
+                ''', (guild_id, clan_name, created_by))
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                # 이미 등록된 클랜
+                return False
+
+    async def get_registered_clans(self, guild_id: str) -> List[ClanTeam]:
+        """등록된 클랜 목록 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM clan_teams 
+                WHERE guild_id = ? AND is_active = TRUE
+                ORDER BY created_at DESC
+            ''', (guild_id,)) as cursor:
+                rows = await cursor.fetchall()
+                
+                clans = []
+                for row in rows:
+                    clans.append(ClanTeam(
+                        id=row[0],
+                        guild_id=row[1],
+                        clan_name=row[2],
+                        created_by=row[3],
+                        is_active=bool(row[4]),
+                        created_at=datetime.fromisoformat(row[5]) if row[5] else None,
+                        updated_at=datetime.fromisoformat(row[6]) if row[6] else None
+                    ))
+                return clans
+
+    # 클랜전 세션 관리 메서드들
+    async def create_clan_scrim(self, guild_id: str, clan_a: str, clan_b: str,
+                            voice_channel_a: str, voice_channel_b: str, started_by: str) -> str:
+        """클랜전 스크림 세션 생성"""
+        scrim_uuid = str(uuid.uuid4())
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 스크림 세션 생성
+            cursor = await db.execute('''
+                INSERT INTO clan_scrims 
+                (guild_id, scrim_uuid, clan_a_name, clan_b_name, voice_channel_a, voice_channel_b, started_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (guild_id, scrim_uuid, clan_a, clan_b, voice_channel_a, voice_channel_b, started_by))
+            
+            await db.commit()
+            return scrim_uuid
+
+    async def get_active_clan_scrim(self, guild_id: str) -> Optional[ClanScrim]:
+        """활성 클랜전 스크림 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM clan_scrims 
+                WHERE guild_id = ? AND scrim_status = 'active'
+                ORDER BY started_at DESC
+                LIMIT 1
+            ''', (guild_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return ClanScrim(
+                        id=row[0],
+                        guild_id=row[1],
+                        scrim_uuid=row[2],
+                        clan_a_name=row[3],
+                        clan_b_name=row[4],
+                        voice_channel_a=row[5],
+                        voice_channel_b=row[6],
+                        scrim_status=row[7],
+                        started_by=row[8],
+                        started_at=datetime.fromisoformat(row[9]) if row[9] else None,
+                        ended_at=datetime.fromisoformat(row[10]) if row[10] else None,
+                        total_matches=row[11],
+                        clan_a_wins=row[12],
+                        clan_b_wins=row[13]
+                    )
+                return None
+
+    async def create_clan_match(self, guild_id: str, team_a_channel: str, team_b_channel: str,
+                            winning_channel: str, map_name: str, 
+                            team_a_members: List, team_b_members: List) -> str:
+        """클랜전 개별 경기 생성"""
+        match_uuid = str(uuid.uuid4())
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 활성 스크림 조회
+            scrim = await self.get_active_clan_scrim(guild_id)
+            if not scrim:
+                raise ValueError("진행 중인 클랜전 스크림이 없습니다")
+            
+            # 승리팀 결정
+            if winning_channel.lower() == team_a_channel.lower():
+                winning_team = "clan_a"
+                clan_a_win = True
+            else:
+                winning_team = "clan_b" 
+                clan_a_win = False
+            
+            # 경기 번호 결정
+            match_number = scrim.total_matches + 1
+            
+            # 경기 생성
+            cursor = await db.execute('''
+                INSERT INTO clan_matches 
+                (scrim_id, match_uuid, match_number, map_name, winning_team)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (scrim.id, match_uuid, match_number, map_name, winning_team))
+            
+            match_id = cursor.lastrowid
+            
+            # 참가자 등록 (A팀)
+            for i, member in enumerate(team_a_members):
+                await db.execute('''
+                    INSERT INTO clan_participants 
+                    (match_id, user_id, username, clan_name, team_side, position_order, won)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (match_id, str(member.id), member.display_name, scrim.clan_a_name, 
+                    "clan_a", i+1, clan_a_win))
+            
+            # 참가자 등록 (B팀)
+            for i, member in enumerate(team_b_members):
+                await db.execute('''
+                    INSERT INTO clan_participants 
+                    (match_id, user_id, username, clan_name, team_side, position_order, won)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (match_id, str(member.id), member.display_name, scrim.clan_b_name,
+                    "clan_b", i+1, not clan_a_win))
+            
+            # 스크림 통계 업데이트
+            if clan_a_win:
+                await db.execute('''
+                    UPDATE clan_scrims 
+                    SET total_matches = total_matches + 1, clan_a_wins = clan_a_wins + 1
+                    WHERE id = ?
+                ''', (scrim.id,))
+            else:
+                await db.execute('''
+                    UPDATE clan_scrims 
+                    SET total_matches = total_matches + 1, clan_b_wins = clan_b_wins + 1
+                    WHERE id = ?
+                ''', (scrim.id,))
+            
+            await db.commit()
+            return match_uuid
+
+    async def add_clan_position_data(self, match_uuid: str, team_side: str, position_data: dict):
+        """클랜전 경기에 포지션 정보 추가"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 매치 ID 찾기
+            async with db.execute(
+                'SELECT id FROM clan_matches WHERE match_uuid = ?', 
+                (match_uuid,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise ValueError(f"클랜전 경기를 찾을 수 없습니다: {match_uuid}")
+                
+                match_id = row[0]
+            
+            # 해당 팀의 참가자들 조회
+            async with db.execute('''
+                SELECT id, user_id, username, position_order 
+                FROM clan_participants 
+                WHERE match_id = ? AND team_side = ?
+                ORDER BY position_order
+            ''', (match_id, team_side)) as cursor:
+                participants = await cursor.fetchall()
+            
+            if len(participants) != 5:
+                raise ValueError(f"참가자가 5명이 아닙니다: {len(participants)}명")
+            
+            # 포지션 매핑 (입력된 사용자명을 실제 user_id와 매칭)
+            position_mapping = {
+                0: 'tank',    # 1번째 -> 탱커
+                1: 'dps1',    # 2번째 -> 딜러1  
+                2: 'dps2',    # 3번째 -> 딜러2
+                3: 'support1', # 4번째 -> 힐러1
+                4: 'support2'  # 5번째 -> 힐러2
+            }
+            
+            # 입력받은 포지션 데이터를 participant_id와 매칭
+            for i, (participant_id, user_id, username, position_order) in enumerate(participants):
+                position_key = position_mapping[i]
+                
+                # 해당 포지션에 배정된 사용자명과 현재 참가자 매칭
+                assigned_name = position_data.get(position_key, '').strip()
+                
+                if assigned_name == username or assigned_name == user_id:
+                    # 포지션 정보 업데이트
+                    position_name = position_key.replace('1', '').replace('2', '')  # dps1 -> dps
+                    if position_name == 'tank':
+                        position_name = '탱'
+                    elif position_name == 'dps':
+                        position_name = '딜' 
+                    elif position_name == 'support':
+                        position_name = '힐'
+                    
+                    await db.execute('''
+                        UPDATE clan_participants 
+                        SET position = ?
+                        WHERE id = ?
+                    ''', (position_name, participant_id))
+            
+            # 매치의 포지션 데이터 플래그 업데이트
+            await db.execute('''
+                UPDATE clan_matches 
+                SET has_position_data = TRUE 
+                WHERE id = ?
+            ''', (match_id,))
+            
+            await db.commit()
+
+    async def add_clan_composition_data(self, match_uuid: str, team_side: str, hero_composition: List[str]):
+        """클랜전 경기에 영웅 조합 정보 추가"""
+        if len(hero_composition) != 5:
+            raise ValueError(f"영웅은 정확히 5명이어야 합니다: {len(hero_composition)}명")
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 매치 ID 찾기
+            async with db.execute(
+                'SELECT id FROM clan_matches WHERE match_uuid = ?', 
+                (match_uuid,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise ValueError(f"클랜전 경기를 찾을 수 없습니다: {match_uuid}")
+                
+                match_id = row[0]
+            
+            # 조합 데이터 저장
+            await db.execute('''
+                INSERT OR REPLACE INTO clan_compositions 
+                (match_id, team_side, hero_1, hero_2, hero_3, hero_4, hero_5)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (match_id, team_side, *hero_composition))
+            
+            # 매치의 조합 데이터 플래그 업데이트
+            await db.execute('''
+                UPDATE clan_matches 
+                SET has_composition_data = TRUE 
+                WHERE id = ?
+            ''', (match_id,))
+            
+            await db.commit()
+
+    async def get_clan_match_by_uuid(self, match_uuid: str) -> Optional[dict]:
+        """UUID로 클랜전 경기 정보 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT cm.*, cs.clan_a_name, cs.clan_b_name, 
+                    cs.voice_channel_a, cs.voice_channel_b
+                FROM clan_matches cm
+                JOIN clan_scrims cs ON cm.scrim_id = cs.id
+                WHERE cm.match_uuid = ?
+            ''', (match_uuid,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+
+    async def end_clan_scrim(self, guild_id: str):
+        """클랜전 스크림 종료"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            await db.execute('''
+                UPDATE clan_scrims 
+                SET scrim_status = 'completed', ended_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ? AND scrim_status = 'active'
+            ''', (guild_id,))
+            
+            await db.commit()
+
+    async def find_recent_clan_match(self, guild_id: str, minutes: int = 10) -> Optional[str]:
+        """최근 클랜전 경기 찾기 (포지션 추가용)"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT cm.match_uuid 
+                FROM clan_matches cm
+                JOIN clan_scrims cs ON cm.scrim_id = cs.id
+                WHERE cs.guild_id = ? 
+                AND cm.has_position_data = FALSE
+                AND datetime(cm.created_at) > datetime('now', '-{} minutes')
+                ORDER BY cm.created_at DESC
+                LIMIT 1
+            '''.format(minutes), (guild_id,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+            
+    async def create_user_application(self, guild_id: str, user_id: str, username: str,
+                                    entry_method: str, battle_tag: str, main_position: str, previous_season_tier: str,
+                                    current_season_tier: str, highest_tier: str) -> bool:
+        """유저 신청 생성"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                await db.execute('''
+                    INSERT INTO user_applications 
+                    (guild_id, user_id, username, entry_method, battle_tag, main_position, 
+                    previous_season_tier, current_season_tier, highest_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (guild_id, user_id, username, entry_method, battle_tag, main_position,
+                    previous_season_tier, current_season_tier, highest_tier))
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                # 이미 신청한 경우
+                return False
+
+    async def get_user_application(self, guild_id: str, user_id: str) -> Optional[dict]:
+        """특정 유저의 신청 정보 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM user_applications 
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+
+    async def get_pending_applications(self, guild_id: str) -> List[dict]:
+        """대기 중인 신청 목록 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM user_applications 
+                WHERE guild_id = ? AND status = 'pending'
+                ORDER BY applied_at ASC
+            ''', (guild_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def reject_user_application(self, guild_id: str, user_id: str, admin_id: str, admin_note: str = None) -> bool:
+        """유저 신청 거절"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            cursor = await db.execute('''
+                UPDATE user_applications 
+                SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, 
+                    reviewed_by = ?, admin_note = ?
+                WHERE guild_id = ? AND user_id = ? AND status = 'pending'
+            ''', (admin_id, admin_note, guild_id, user_id))
+            
+            if cursor.rowcount > 0:
+                await db.commit()
+                return True
+            return False
+
+    async def is_user_registered(self, guild_id: str, user_id: str) -> bool:
+        """유저가 이미 등록되어 있는지 확인"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT COUNT(*) FROM registered_users 
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+            ''', (guild_id, user_id)) as cursor:
+                count = (await cursor.fetchone())[0]
+                return count > 0
+
+    async def get_application_stats(self, guild_id: str) -> dict:
+        """신청 통계 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            stats = {}
+            
+            # 상태별 신청 수
+            async with db.execute('''
+                SELECT status, COUNT(*) FROM user_applications 
+                WHERE guild_id = ? GROUP BY status
+            ''', (guild_id,)) as cursor:
+                status_counts = await cursor.fetchall()
+                stats['status_counts'] = dict(status_counts)
+            
+            # 등록된 유저 수
+            async with db.execute('''
+                SELECT COUNT(*) FROM registered_users 
+                WHERE guild_id = ? AND is_active = TRUE
+            ''', (guild_id,)) as cursor:
+                stats['total_registered'] = (await cursor.fetchone())[0]
+            
+            return stats
+        
+    async def is_server_admin(self, guild_id: str, user_id: str) -> bool:
+        """사용자가 서버 관리자인지 확인"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT COUNT(*) FROM server_admins 
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+            ''', (guild_id, user_id)) as cursor:
+                count = (await cursor.fetchone())[0]
+                return count > 0
+
+    async def add_server_admin(self, guild_id: str, user_id: str, username: str, added_by: str) -> bool:
+        """서버 관리자 추가"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                await db.execute('''
+                    INSERT INTO server_admins (guild_id, user_id, username, added_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (guild_id, user_id, username, added_by))
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                # 이미 관리자인 경우
+                return False
+
+    async def remove_server_admin(self, guild_id: str, user_id: str) -> bool:
+        """서버 관리자 제거"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            cursor = await db.execute('''
+                UPDATE server_admins 
+                SET is_active = FALSE 
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+            ''', (guild_id, user_id))
+            
+            if cursor.rowcount > 0:
+                await db.commit()
+                return True
+            return False
+
+    async def get_server_admins(self, guild_id: str) -> List[dict]:
+        """서버의 모든 관리자 목록 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT user_id, username, added_by, added_at 
+                FROM server_admins 
+                WHERE guild_id = ? AND is_active = TRUE
+                ORDER BY added_at ASC
+            ''', (guild_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def get_admin_count(self, guild_id: str) -> int:
+        """서버의 관리자 수 조회 (서버 소유자 제외)"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT COUNT(*) FROM server_admins 
+                WHERE guild_id = ? AND is_active = TRUE
+            ''', (guild_id,)) as cursor:
+                return (await cursor.fetchone())[0]
+
+    async def approve_user_application_with_nickname(self, guild_id: str, user_id: str, admin_id: str, 
+                                                discord_member: discord.Member, admin_note: str = None) -> tuple[bool, str]:
+        """유저 신청 승인 및 닉네임 자동 변경"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 먼저 신청 정보 가져오기
+            async with db.execute('''
+                SELECT * FROM user_applications 
+                WHERE guild_id = ? AND user_id = ? AND status = 'pending'
+            ''', (guild_id, user_id)) as cursor:
+                application = await cursor.fetchone()
+                if not application:
+                    return False, "신청을 찾을 수 없습니다."
+            
+            # 신청 상태 업데이트
+            await db.execute('''
+                UPDATE user_applications 
+                SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, 
+                    reviewed_by = ?, admin_note = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (admin_id, admin_note, guild_id, user_id))
+            
+            # 기존 레코드가 있으면 UPDATE, 없으면 INSERT
+            await db.execute('''
+                INSERT INTO registered_users 
+                (guild_id, user_id, username, entry_method, battle_tag, main_position, 
+                previous_season_tier, current_season_tier, highest_tier, approved_by, is_active, registered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    username = excluded.username,
+                    entry_method = excluded.entry_method,
+                    battle_tag = excluded.battle_tag,
+                    main_position = excluded.main_position,
+                    previous_season_tier = excluded.previous_season_tier,
+                    current_season_tier = excluded.current_season_tier,
+                    highest_tier = excluded.highest_tier,
+                    approved_by = excluded.approved_by,
+                    is_active = TRUE,
+                    registered_at = CURRENT_TIMESTAMP
+            ''', (application[1], application[2], application[3], application[4], 
+                application[5], application[6], application[7], application[8], application[9], admin_id))
+            
+            await db.commit()
+            
+            # 닉네임 변경 시도 (배틀태그, 포지션, 현시즌티어 사용)
+            nickname_result = await self._update_user_nickname(
+                discord_member, 
+                application[6],  # main_position
+                application[8],  # current_season_tier  
+                application[5]   # battle_tag
+            )
+            role_result = await self._update_user_roles_conditional(discord_member, guild_id)
+
+            combined_result = f"{nickname_result}\n{role_result}"
+
+            return True, combined_result
+
+    async def _update_user_nickname(self, member: discord.Member, position: str, tier: str, battle_tag: str) -> str:
+        """유저 닉네임 업데이트 (배틀태그 기반)"""
+        try:
+            # 포지션 축약 (복합 포지션 처리)
+            position_short = self._shorten_position(position)
+            
+            # 새로운 닉네임 생성: 배틀태그 / 포지션 / 티어
+            new_nickname = f"{battle_tag}/{position_short}/{tier}"
+            
+            # 32자 제한 (Discord 닉네임 길이 제한)
+            if len(new_nickname) > 32:
+                # 배틀태그에서 #태그 부분 제거해서 다시 시도
+                battle_name = battle_tag.split('#')[0] if '#' in battle_tag else battle_tag
+                new_nickname = f"{battle_name}/{position_short}/{tier}"
+                
+                if len(new_nickname) > 32:
+                    # 그래도 길면 배틀태그를 더 줄임
+                    max_battle_length = 32 - len(f"/{position_short}/{tier}")
+                    if max_battle_length > 3:  # 최소 3자는 남겨둠
+                        battle_name = battle_name[:max_battle_length]
+                        new_nickname = f"{battle_name}/{position_short}/{tier}"
+                    else:
+                        # 그래도 길면 포지션만 표시
+                        new_nickname = f"{battle_name[:15]}/{position_short}"
+            
+            await member.edit(nick=new_nickname)
+            return f"닉네임이 '{new_nickname}'으로 변경되었습니다."
+            
+        except discord.Forbidden:
+            return "닉네임 변경 권한이 부족합니다. (봇 권한 확인 필요)"
+        except discord.HTTPException as e:
+            return f"닉네임 변경 실패: {str(e)}"
+        except Exception as e:
+            return f"닉네임 변경 중 오류: {str(e)}"
+
+    async def delete_user_registration(self, guild_id: str, user_id: str) -> tuple[bool, dict]:
+        """등록된 유저 삭제 (재신청 가능하도록)"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 먼저 등록된 유저 정보 가져오기
+            async with db.execute('''
+                SELECT * FROM registered_users 
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+            ''', (guild_id, user_id)) as cursor:
+                user_data = await cursor.fetchone()
+                if not user_data:
+                    return False, {}
+            
+            # 등록된 유저 비활성화
+            await db.execute('''
+                UPDATE registered_users 
+                SET is_active = FALSE 
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id))
+            
+            # 기존 신청 기록도 삭제 (재신청 가능하도록)
+            await db.execute('''
+                DELETE FROM user_applications 
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id))
+            
+            await db.commit()
+            
+            # 삭제된 유저 정보 반환
+            columns = ['id', 'guild_id', 'user_id', 'username', 'entry_method', 'battle_tag', 
+                    'main_position', 'previous_season_tier', 'current_season_tier', 'highest_tier', 
+                    'approved_by', 'registered_at', 'is_active']
+            user_info = dict(zip(columns, user_data))
+            
+            return True, user_info
+
+    async def delete_registered_user(self, guild_id: str, user_id: str, admin_id: str, reason: str = None):
+        """등록된 유저 삭제"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 등록된 유저인지 확인하고 정보 가져오기
+                async with db.execute('''
+                    SELECT username FROM registered_users 
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    user = await cursor.fetchone()
+                    if not user:
+                        return False
+                
+                # 유저를 비활성화 (삭제하지 않고 is_active = FALSE로 설정)
+                await db.execute('''
+                    UPDATE registered_users 
+                    SET is_active = FALSE
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id))
+                
+                # 기존 신청 기록도 삭제 (재신청 가능하도록)
+                await db.execute('''
+                    DELETE FROM user_applications 
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 유저 삭제 오류: {e}")
+            import traceback
+            print(f"❌ 스택트레이스: {traceback.format_exc()}")
+            return False
+
+    async def get_registered_users_list(self, guild_id: str, limit: int = 50):
+        """등록된 유저 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                async with db.execute('''
+                    SELECT user_id, username, battle_tag, main_position, 
+                        current_season_tier, registered_at, approved_by
+                    FROM registered_users 
+                    WHERE guild_id = ? AND is_active = TRUE
+                    ORDER BY registered_at DESC
+                    LIMIT ?
+                ''', (guild_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1], 
+                            'battle_tag': row[2],
+                            'main_position': row[3],
+                            'current_season_tier': row[4],
+                            'registered_at': row[5],
+                            'approved_by': row[6]
+                        }
+                        for row in rows
+                    ]
+        except Exception as e:
+            print(f"❌ 등록 유저 목록 조회 오류: {e}")
+            return []
+
+    async def search_registered_user(self, guild_id: str, search_term: str) -> List[dict]:
+        """등록된 유저 검색 (닉네임, 배틀태그, 유입경로로) - 유입경로 포함"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT user_id, username, entry_method, battle_tag, main_position, current_season_tier, registered_at 
+                FROM registered_users 
+                WHERE guild_id = ? AND is_active = TRUE 
+                AND (username LIKE ? OR battle_tag LIKE ? OR entry_method LIKE ?)
+                ORDER BY registered_at DESC
+                LIMIT 10
+            ''', (guild_id, f'%{search_term}%', f'%{search_term}%', f'%{search_term}%')) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def reset_user_nickname(self, member: discord.Member) -> str:
+        """유저 닉네임을 원래대로 복원 (배틀태그 형식에서)"""
+        try:
+            # 현재 닉네임이 우리 형식인지 확인
+            current_nick = member.display_name
+            
+            # 배틀태그#숫자 / 포지션 / 티어 형식인지 체크
+            if '/' in current_nick and len(current_nick.split('/')) >= 2:
+                # 우리가 설정한 형식일 가능성이 높음 - Discord 계정명으로 복원
+                await member.edit(nick=None)
+                return f"Discord 계정명 '{member.name}'으로 복원되었습니다."
+            else:
+                # 이미 원래 형식이거나 다른 형식 - 그대로 유지
+                return f"닉네임 '{current_nick}'을 그대로 유지합니다."
+                
+        except discord.Forbidden:
+            return "닉네임 복원 권한이 부족합니다."
+        except discord.HTTPException as e:
+            return f"닉네임 복원 실패: {str(e)}"
+        except Exception as e:
+            return f"닉네임 복원 중 오류: {str(e)}"
+
+    def _shorten_position(self, position: str) -> str:
+        """포지션 축약 (닉네임 길이 절약용)"""
+        position_map = {
+            "탱커": "탱",
+            "딜러": "딜", 
+            "힐러": "힐",
+            "탱커 & 딜러": "탱딜",
+            "탱커 & 힐러": "탱힐",
+            "딜러 & 힐러": "딜힐",
+            "탱커 & 딜러 & 힐러": "탱딜힐" 
+        }
+        return position_map.get(position, position)
+
+    async def update_server_settings(self, guild_id: str, newbie_role_id: str = None, 
+                                    member_role_id: str = None, auto_role_change: bool = True,
+                                    welcome_channel_id: str = None):
+        """서버 설정 업데이트"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            await db.execute('''
+                INSERT INTO server_settings 
+                (guild_id, newbie_role_id, member_role_id, auto_role_change, welcome_channel_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    newbie_role_id = COALESCE(excluded.newbie_role_id, server_settings.newbie_role_id),
+                    member_role_id = COALESCE(excluded.member_role_id, server_settings.member_role_id),
+                    auto_role_change = excluded.auto_role_change,
+                    welcome_channel_id = COALESCE(excluded.welcome_channel_id, server_settings.welcome_channel_id),
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (guild_id, newbie_role_id, member_role_id, auto_role_change, welcome_channel_id))
+            
+            await db.commit()
+
+    async def get_server_settings(self, guild_id: str) -> dict:
+        """서버 설정 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM server_settings WHERE guild_id = ?
+            ''', (guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                if result:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, result))
+                return {}
+
+    async def _update_user_roles_conditional(self, member, guild_id: str) -> str:
+        """서버 설정에 따른 조건부 역할 변경"""
+        try:
+            settings = await self.get_server_settings(guild_id)
+            
+            # 자동 역할 변경이 비활성화된 경우
+            if not settings.get('auto_role_change', False):
+                return "ℹ️ 자동 역할 변경이 비활성화됨"
+            
+            # 역할 ID가 설정되지 않은 경우
+            newbie_role_id = settings.get('newbie_role_id')
+            member_role_id = settings.get('member_role_id')
+            
+            if not newbie_role_id or not member_role_id:
+                return "⚠️ 역할이 설정되지 않음 (닉네임만 변경)"
+            
+            # 실제 역할 변경 수행
+            return await self._update_user_roles(member, newbie_role_id, member_role_id)
+            
+        except Exception as e:
+            return f"❌ 역할 변경 중 오류: {str(e)}"
+
+    async def _update_user_roles(self, member, newbie_role_id: str, member_role_id: str) -> str:
+        """실제 역할 변경 수행"""
+        try:
+            guild = member.guild
+            newbie_role = guild.get_role(int(newbie_role_id))
+            member_role = guild.get_role(int(member_role_id))
+            
+            if not newbie_role:
+                return f"❌ 신입 역할을 찾을 수 없음 (ID: {newbie_role_id})"
+            
+            if not member_role:
+                return f"❌ 구성원 역할을 찾을 수 없음 (ID: {member_role_id})"
+            
+            changes = []
+            
+            # 신입 역할 제거
+            if newbie_role in member.roles:
+                await member.remove_roles(newbie_role, reason="RallyUp 유저 승인")
+                changes.append(f"제거: {newbie_role.name}")
+            
+            # 구성원 역할 추가
+            if member_role not in member.roles:
+                await member.add_roles(member_role, reason="RallyUp 유저 승인") 
+                changes.append(f"추가: {member_role.name}")
+            
+            if changes:
+                return f"✅ 역할 변경: {' | '.join(changes)}"
+            else:
+                return "ℹ️ 이미 올바른 역할 보유"
+                
+        except discord.Forbidden:
+            return "❌ 봇 권한 부족 (역할 관리 권한 필요)"
+        except ValueError:
+            return "❌ 잘못된 역할 ID 형식"
+        except Exception as e:
+            return f"❌ 역할 변경 실패: {str(e)}"
+
+    async def _reverse_user_roles_conditional(self, member, guild_id: str) -> str:
+        """유저 삭제 시 역할 복구 (구성원 → 신입)"""
+        try:
+            settings = await self.get_server_settings(guild_id)
+            
+            # 자동 역할 변경이 비활성화된 경우
+            if not settings.get('auto_role_change', False):
+                return "ℹ️ 자동 역할 변경이 비활성화됨 (역할 변경 안함)"
+            
+            # 역할 ID가 설정되지 않은 경우
+            newbie_role_id = settings.get('newbie_role_id')
+            member_role_id = settings.get('member_role_id')
+            
+            if not newbie_role_id or not member_role_id:
+                return "⚠️ 역할이 설정되지 않음 (역할 변경 안함)"
+            
+            # 실제 역할 복구 수행 (구성원 → 신입)
+            return await self._reverse_user_roles(member, newbie_role_id, member_role_id)
+            
+        except Exception as e:
+            return f"❌ 역할 복구 중 오류: {str(e)}"
+
+    async def _reverse_user_roles(self, member, newbie_role_id: str, member_role_id: str) -> str:
+        """실제 역할 복구 수행 (구성원 → 신입)"""
+        try:
+            guild = member.guild
+            newbie_role = guild.get_role(int(newbie_role_id))
+            member_role = guild.get_role(int(member_role_id))
+            
+            if not newbie_role:
+                return f"❌ 신입 역할을 찾을 수 없음 (ID: {newbie_role_id})"
+            
+            if not member_role:
+                return f"❌ 구성원 역할을 찾을 수 없음 (ID: {member_role_id})"
+            
+            changes = []
+            
+            # 구성원 역할 제거
+            if member_role in member.roles:
+                await member.remove_roles(member_role, reason="RallyUp 유저 삭제 - 역할 복구")
+                changes.append(f"제거: {member_role.name}")
+            
+            # 신입 역할 추가
+            if newbie_role not in member.roles:
+                await member.add_roles(newbie_role, reason="RallyUp 유저 삭제 - 역할 복구") 
+                changes.append(f"추가: {newbie_role.name}")
+            
+            if changes:
+                return f"✅ 역할 복구: {' | '.join(changes)}"
+            else:
+                return "ℹ️ 이미 올바른 역할 보유"
+                
+        except discord.Forbidden:
+            return "❌ 봇 권한 부족 (역할 관리 권한 필요)"
+        except ValueError:
+            return "❌ 잘못된 역할 ID 형식"
+        except Exception as e:
+            return f"❌ 역할 복구 실패: {str(e)}"
+
+    async def _restore_user_nickname(self, member) -> str:
+        """유저 닉네임을 Discord 원래 이름으로 복구"""
+        try:
+            current_nick = member.display_name
+            original_name = member.name  # Discord 원래 사용자명
+            
+            # 이미 원래 이름이거나 닉네임이 설정되지 않은 경우
+            if member.nick is None or current_nick == original_name:
+                return f"ℹ️ 닉네임이 이미 원래 상태 ('{original_name}')"
+            
+            # 현재 닉네임이 RallyUp 봇이 설정한 형식인지 확인
+            # 형식: "배틀태그/포지션/티어" 또는 "배틀태그 / 포지션 / 티어"
+            if ('/' in current_nick and 
+                any(tier in current_nick for tier in ['언랭', '브론즈', '실버', '골드', '플래티넘', '다이아', '마스터', '그마', '챔피언']) and
+                any(pos in current_nick for pos in ['탱', '딜', '힐'])):
+                
+                # RallyUp 형식으로 보이므로 원래 이름으로 복구
+                await member.edit(nick=None, reason="RallyUp 유저 삭제 - 닉네임 원상복구")
+                return f"✅ 닉네임 복구: '{current_nick}' → '{original_name}'"
+            else:
+                # RallyUp 형식이 아니므로 그대로 유지
+                return f"ℹ️ 커스텀 닉네임으로 보여 그대로 유지: '{current_nick}'"
+                
+        except discord.Forbidden:
+            return "❌ 닉네임 복구 권한이 부족합니다"
+        except discord.HTTPException as e:
+            return f"❌ 닉네임 복구 실패: {str(e)}"
+        except Exception as e:
+            return f"❌ 닉네임 복구 중 오류: {str(e)}"

@@ -16,6 +16,8 @@ class RallyUpBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.voice_states = True
+        intents.members = True
+        intents.guilds = True
         
         super().__init__(
             command_prefix='!',
@@ -27,7 +29,6 @@ class RallyUpBot(commands.Bot):
     
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
-        # 데이터베이스 초기화
         await self.db_manager.initialize()
         logger.info("Database initialized successfully")
         
@@ -48,7 +49,10 @@ class RallyUpBot(commands.Bot):
             'commands.match_result',
             'commands.position',
             'commands.dev_commands',
-            'commands.scrim_session'
+            'commands.scrim_session',
+            'commands.clan_scrim',
+            'commands.user_application',
+            'commands.admin_system',
         ]
         
         for command_module in commands_to_load:

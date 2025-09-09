@@ -15,9 +15,54 @@ class User:
     dps_wins: int = 0
     support_games: int = 0
     support_wins: int = 0
-    score: int = 1000  # 초기 점수
+    score: int = 1000
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+@dataclass
+class UserApplication:
+    id: Optional[int] = None
+    guild_id: str = ""
+    user_id: str = ""
+    username: str = ""
+    entry_method: str = ""  # 유입경로
+    battle_tag: str = ""  # 배틀태그 (새로 추가)
+    main_position: str = ""  # 메인 포지션 (탱커/딜러/힐러/복합)
+    previous_season_tier: str = ""  # 전시즌 티어
+    current_season_tier: str = ""  # 현시즌 티어
+    highest_tier: str = ""  # 최고 티어
+    status: str = "pending"  # pending, approved, rejected
+    applied_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None  # 승인/거절한 관리자 ID
+    admin_note: Optional[str] = None  # 관리자 메모
+    
+@dataclass
+class RegisteredUser:
+    id: Optional[int] = None
+    guild_id: str = ""
+    user_id: str = ""
+    username: str = ""
+    entry_method: str = ""
+    battle_tag: str = ""  # 배틀태그 (새로 추가)
+    main_position: str = ""
+    previous_season_tier: str = ""
+    current_season_tier: str = ""
+    highest_tier: str = ""
+    approved_by: str = ""  # 승인한 관리자 ID
+    registered_at: Optional[datetime] = None
+    is_active: bool = True
+
+@dataclass
+class ServerAdmin:
+    """서버 관리자 데이터 모델"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    user_id: str = ""
+    username: str = ""
+    added_by: str = ""  # 추가한 관리자의 user_id
+    added_at: Optional[datetime] = None
+    is_active: bool = True
 
 @dataclass
 class Match:
@@ -95,7 +140,7 @@ class TeammateCombination:
 
 @dataclass
 class TeamComposition:
-    """팀 구성 분석 데이터 모델 (향후 확장용)"""
+    """팀 구성 분석 데이터 모델"""
     id: Optional[int] = None
     match_id: int = 0
     team_num: int = 0  # 1 또는 2
@@ -105,7 +150,7 @@ class TeamComposition:
 
 @dataclass
 class PlaySession:
-    """플레이 세션 추적 모델 (향후 확장용)"""
+    """플레이 세션 추적 모델"""
     id: Optional[int] = None
     user_id: str = ""
     session_start: Optional[datetime] = None
@@ -248,3 +293,117 @@ class ServerStats:
     average_score: float
     top_player: str
     most_active_period: str
+
+@dataclass  
+class ClanTeam:
+    """클랜 팀 정보"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    clan_name: str = ""
+    created_by: str = ""  # 등록한 관리자 ID
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+@dataclass
+class ClanScrim:
+    """클랜전 스크림 세션"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    scrim_uuid: str = ""
+    clan_a_name: str = ""
+    clan_b_name: str = ""
+    voice_channel_a: str = ""
+    voice_channel_b: str = ""
+    scrim_status: str = "active"  # 'active', 'completed', 'cancelled'
+    started_by: str = ""  # 관리자 ID
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    total_matches: int = 0
+    clan_a_wins: int = 0
+    clan_b_wins: int = 0
+
+@dataclass
+class ClanMatch:
+    """클랜전 개별 경기"""
+    id: Optional[int] = None
+    scrim_id: int = 0
+    match_uuid: str = ""
+    match_number: int = 0  # 1판, 2판, 3판...
+    map_name: str = ""
+    map_type: Optional[str] = None  # 에스코트, 어솔트, 하이브리드, 컨트롤
+    winning_team: str = ""  # 'clan_a' or 'clan_b'
+    score_a: Optional[int] = None  # 스코어 (선택사항)
+    score_b: Optional[int] = None
+    has_position_data: bool = False
+    has_composition_data: bool = False
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ClanParticipant:
+    """클랜전 참가자"""
+    id: Optional[int] = None
+    match_id: int = 0
+    user_id: str = ""
+    username: str = ""
+    clan_name: str = ""
+    team_side: str = ""  # 'clan_a' or 'clan_b'
+    position: Optional[str] = None  # 탱, 딜, 힐
+    position_order: int = 0  # 1-5 (포지션 내 순서)
+    won: bool = False
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ClanComposition:
+    """클랜전 팀 조합 (Optional)"""
+    id: Optional[int] = None
+    match_id: int = 0
+    team_side: str = ""  # 'clan_a' or 'clan_b'
+    hero_1: Optional[str] = None  # 탱커
+    hero_2: Optional[str] = None  # 딜러1
+    hero_3: Optional[str] = None  # 딜러2  
+    hero_4: Optional[str] = None  # 힐러1
+    hero_5: Optional[str] = None  # 힐러2
+    composition_type: Optional[str] = None  # 다이브, 벙커, 브롤 등 (나중에 추가)
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ClanMatchStats:
+    """클랜전 통계 (분석용)"""
+    clan_name: str
+    total_matches: int = 0
+    total_wins: int = 0
+    total_losses: int = 0
+    win_rate: float = 0.0
+    favorite_maps: List[str] = None
+    recent_form: str = ""  # "W-W-L-W-L" 최근 5경기
+
+@dataclass
+class ClanVersusStats:
+    """클랜 간 상성 통계"""
+    clan_a: str
+    clan_b: str
+    clan_a_wins: int = 0
+    clan_b_wins: int = 0
+    total_matches: int = 0
+    last_match_date: Optional[datetime] = None
+    
+@dataclass
+class MapStats:
+    """맵별 통계"""
+    map_name: str
+    map_type: str
+    total_matches: int = 0
+    clan_performance: dict = None
+
+@dataclass
+class ServerSettings:
+    """서버 설정 데이터 모델"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    newbie_role_id: Optional[str] = None
+    member_role_id: Optional[str] = None
+    auto_role_change: bool = False
+    welcome_channel_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
