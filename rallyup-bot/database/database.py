@@ -1331,25 +1331,41 @@ class DatabaseManager:
                 row = await cursor.fetchone()
                 return row[0] if row else None
             
-    async def create_user_application(self, guild_id: str, user_id: str, username: str,
-                                    entry_method: str, battle_tag: str, main_position: str, previous_season_tier: str,
-                                    current_season_tier: str, highest_tier: str) -> bool:
-        """유저 신청 생성"""
+    async def create_user_application(self, guild_id: str, user_id: str, username: str, 
+                                    entry_method: str, battle_tag: str, main_position: str,
+                                    previous_season_tier: str, current_season_tier: str, highest_tier: str) -> bool:
+        """사용자 신청 생성 - 재신청 허용 (UPSERT 방식)"""
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute('PRAGMA journal_mode=WAL')
             
             try:
+                # 기존 레코드가 있으면 업데이트, 없으면 삽입
                 await db.execute('''
                     INSERT INTO user_applications 
                     (guild_id, user_id, username, entry_method, battle_tag, main_position, 
-                    previous_season_tier, current_season_tier, highest_tier)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_season_tier, current_season_tier, highest_tier, status, applied_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        username = excluded.username,
+                        entry_method = excluded.entry_method,
+                        battle_tag = excluded.battle_tag,
+                        main_position = excluded.main_position,
+                        previous_season_tier = excluded.previous_season_tier,
+                        current_season_tier = excluded.current_season_tier,
+                        highest_tier = excluded.highest_tier,
+                        status = 'pending',
+                        applied_at = CURRENT_TIMESTAMP,
+                        reviewed_at = NULL,
+                        reviewed_by = NULL,
+                        admin_note = NULL
                 ''', (guild_id, user_id, username, entry_method, battle_tag, main_position,
                     previous_season_tier, current_season_tier, highest_tier))
+                
                 await db.commit()
                 return True
-            except aiosqlite.IntegrityError:
-                # 이미 신청한 경우
+                
+            except Exception as e:
+                print(f"신청 생성/업데이트 오류: {e}")
                 return False
 
     async def get_user_application(self, guild_id: str, user_id: str) -> Optional[dict]:

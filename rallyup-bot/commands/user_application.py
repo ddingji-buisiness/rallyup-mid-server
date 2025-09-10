@@ -68,42 +68,27 @@ class UserApplicationCommands(commands.Cog):
                 )
                 return
             
-            # 이미 신청한 유저인지 확인
+            # 기존 신청 상태 확인
             existing_app = await self.bot.db_manager.get_user_application(guild_id, user_id)
+            
+            reapplication_message = ""
             if existing_app:
-                status_msg = {
-                    'pending': '⏳ 검토 대기 중',
-                    'approved': '✅ 승인됨',
-                    'rejected': '❌ 거절됨'
-                }.get(existing_app['status'], '❓ 알 수 없음')
-                
-                embed = discord.Embed(
-                    title="📋 기존 신청 정보",
-                    description=f"이미 신청하신 내역이 있습니다.\n**상태**: {status_msg}",
-                    color=0xff9500
-                )
-                
-                embed.add_field(
-                    name="신청 정보",
-                    value=f"**유입경로**: {existing_app['entry_method']}\n"
-                          f"**배틀태그**: {existing_app['battle_tag']}\n"
-                          f"**메인 포지션**: {existing_app['main_position']}\n"
-                          f"**전시즌 티어**: {existing_app['previous_season_tier']}\n"
-                          f"**현시즌 티어**: {existing_app['current_season_tier']}\n"
-                          f"**최고 티어**: {existing_app['highest_tier']}\n"
-                          f"**신청일**: <t:{int(datetime.fromisoformat(existing_app['applied_at']).timestamp())}:F>",
-                    inline=False
-                )
-                
-                if existing_app['status'] == 'rejected':
-                    embed.add_field(
-                        name="재신청 안내",
-                        value="거절된 신청입니다. 관리자에게 문의 후 재신청하시기 바랍니다.",
-                        inline=False
+                if existing_app['status'] == 'pending':
+                    await interaction.followup.send(
+                        "⏳ **이미 신청 대기 중입니다**\n\n"
+                        f"**신청일**: <t:{int(datetime.fromisoformat(existing_app['applied_at']).timestamp())}:F>\n"
+                        "관리자 검토를 기다려주세요.",
+                        ephemeral=True
                     )
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                return
+                    return
+                elif existing_app['status'] == 'rejected':
+                    reviewed_at_timestamp = int(datetime.fromisoformat(existing_app['reviewed_at']).timestamp()) if existing_app.get('reviewed_at') else 0
+                    reapplication_message = (
+                        "🔄 **재신청 감지**\n"
+                        f"**이전 거절일**: <t:{reviewed_at_timestamp}:F>\n"
+                        f"**거절 사유**: {existing_app.get('admin_note', '사유 없음')}\n\n"
+                        "개선 사항을 반영하여 신중하게 작성해주세요.\n\n"
+                    )
             
             # 입력값 검증
             if len(유입경로) > 200:
@@ -112,21 +97,7 @@ class UserApplicationCommands(commands.Cog):
                 )
                 return
             
-            # 배틀태그 형식 검증
-            # if not self._validate_battle_tag(배틀태그):
-            #     await interaction.followup.send(
-            #         "❌ 배틀태그 형식이 올바르지 않습니다.\n\n"
-            #         "**올바른 형식**: `닉네임#1234` (영문/한글/숫자 + # + 4자리 숫자)\n"
-            #         "**예시**: `지켜줬잖아#3979`, `Tracer#1234`\n\n"
-            #         "**규칙**:\n"
-            #         "• 닉네임: 2-12자 (영문/한글/숫자)\n"
-            #         "• # 기호 필수\n"
-            #         "• 태그: 정확히 4자리 숫자", 
-            #         ephemeral=True
-            #     )
-            #     return
-            
-            # 신청 생성
+            # 신청 생성 (재신청의 경우 기존 레코드 업데이트)
             success = await self.bot.db_manager.create_user_application(
                 guild_id, user_id, username, 유입경로, 배틀태그, 메인포지션, 
                 전시즌티어, 현시즌티어, 최고티어
@@ -135,7 +106,7 @@ class UserApplicationCommands(commands.Cog):
             if success:
                 embed = discord.Embed(
                     title="📝 서버 가입 신청 완료!",
-                    description="신청이 정상적으로 접수되었습니다. 관리자 검토 후 연락드리겠습니다.",
+                    description=reapplication_message + "신청이 정상적으로 접수되었습니다. 관리자 검토 후 연락드리겠습니다.",
                     color=0x00ff88,
                     timestamp=datetime.now()
                 )
@@ -143,22 +114,32 @@ class UserApplicationCommands(commands.Cog):
                 embed.add_field(
                     name="📋 신청 내용",
                     value=f"**유입경로**: {유입경로}\n"
-                          f"**배틀태그**: {배틀태그}\n"
-                          f"**메인 포지션**: {메인포지션}\n"
-                          f"**전시즌 티어**: {전시즌티어}\n"
-                          f"**현시즌 티어**: {현시즌티어}\n"
-                          f"**최고 티어**: {최고티어}",
+                        f"**배틀태그**: {배틀태그}\n"
+                        f"**메인 포지션**: {메인포지션}\n"
+                        f"**전시즌 티어**: {전시즌티어}\n"
+                        f"**현시즌 티어**: {현시즌티어}\n"
+                        f"**최고 티어**: {최고티어}",
                     inline=False
                 )
                 
-                embed.add_field(
-                    name="⏳ 다음 단계",
-                    value="• 관리자가 신청을 검토합니다\n"
-                          "• 승인/거절 시 DM으로 알려드립니다\n"
-                          "• 승인 시 서버 닉네임이 자동으로 설정됩니다\n"
-                          "• 문의사항은 관리자에게 연락해주세요",
-                    inline=False
-                )
+                # 재신청의 경우 추가 안내
+                if reapplication_message:
+                    embed.add_field(
+                        name="💡 재신청 팁",
+                        value="• 이전 거절 사유를 충분히 검토해주세요\n"
+                            "• 정확하고 상세한 정보를 입력해주세요\n"
+                            "• 궁금한 점이 있다면 관리자에게 문의해주세요",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="⏳ 다음 단계",
+                        value="• 관리자가 신청을 검토합니다\n"
+                            "• 승인/거절 시 DM으로 알려드립니다\n"
+                            "• 승인 시 서버 닉네임이 자동으로 설정됩니다\n"
+                            "• 문의사항은 관리자에게 연락해주세요",
+                        inline=False
+                    )
                 
                 embed.add_field(
                     name="🏷️ 닉네임 설정 안내",
@@ -497,7 +478,6 @@ class UserApplicationCommands(commands.Cog):
                 
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 
-                # 유저에게 DM 발송 시도
                 try:
                     dm_embed = discord.Embed(
                         title="📋 가입 신청 결과",
@@ -506,10 +486,13 @@ class UserApplicationCommands(commands.Cog):
                     )
                     if 사유:
                         dm_embed.add_field(name="거절 사유", value=사유, inline=False)
+                    
                     dm_embed.add_field(
-                        name="재신청 안내",
-                        value="문제를 해결하신 후 다시 신청하실 수 있습니다.\n"
-                            "궁금한 점이 있으시면 관리자에게 문의해주세요.",
+                        name="🔄 재신청 안내",
+                        value="문제를 해결하신 후 **언제든지 다시 신청**하실 수 있습니다.\n"
+                            "위의 거절 사유를 참고하여 개선해주세요.\n\n"
+                            "**재신청 방법**: `/유저신청` 명령어 사용\n"
+                            "**개선 팁**: 정확한 정보 입력, 거절 사유 반영",
                         inline=False
                     )
                     await user_member.send(embed=dm_embed)
