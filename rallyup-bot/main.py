@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import os
 from database.database import DatabaseManager
 from scheduler.bamboo_scheduler import BambooForestScheduler
+from scheduler.recruitment_scheduler import RecruitmentScheduler
 
 load_dotenv()
 
@@ -27,21 +28,24 @@ class RallyUpBot(commands.Bot):
         
         self.db_manager = DatabaseManager()
         self.bamboo_scheduler = BambooForestScheduler(self)
+        self.recruitment_scheduler = None
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
         try:
             await self.db_manager.initialize()
             logger.info("Database initialized successfully")
-            
-            await self.db_manager.create_bamboo_tables()
-            logger.info("🎋 Bamboo forest tables created")
 
             await self.load_commands()
             
             await self.bamboo_scheduler.start()
             logger.info("🎋 Bamboo forest scheduler started")
-            
+
+            if not self.recruitment_scheduler:
+                self.recruitment_scheduler = RecruitmentScheduler(self)
+                await self.recruitment_scheduler.start()
+                logger.info("내전 모집 스케줄러 시작")
+
             try:
                 print("슬래시 커맨드 동기화 중...")
                 synced = await self.tree.sync()
@@ -64,7 +68,8 @@ class RallyUpBot(commands.Bot):
             'commands.clan_scrim',
             'commands.user_application',
             'commands.admin_system',
-            'commands.bamboo_forest'
+            'commands.bamboo_forest',
+            'commands.scrim_recruitment'
         ]
         
         for command_module in commands_to_load:
@@ -85,11 +90,16 @@ class RallyUpBot(commands.Bot):
             activity=discord.Game(name="RallyUp 클랜 관리 | /help")
         )
         
-        # 대나무숲 스케줄러 상태 확인
+        # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:
             logger.info("🎋 Bamboo forest scheduler is running")
         else:
             logger.warning("🎋 Bamboo forest scheduler is not running!")
+
+        if self.recruitment_scheduler and self.recruitment_scheduler.is_running:
+            logger.info("🕐 내전 모집 스케줄러가 실행 중입니다")
+        else:
+            logger.warning("🕐 내전 모집 스케줄러가 실행되지 않았습니다!")
 
     async def on_member_join(self, member: discord.Member):
         """신규 멤버가 서버에 입장할 때 자동 역할 배정"""
@@ -197,7 +207,12 @@ class RallyUpBot(commands.Bot):
         try:
             if self.bamboo_scheduler:
                 await self.bamboo_scheduler.stop()
-                logger.info("🎋 Bamboo forest scheduler stopped")
+                logger.info("대나무숲 스케줄로 종료")
+
+            if self.recruitment_scheduler:
+                await self.recruitment_scheduler.stop()
+                logger.info("내전 모집 스케줄러 종료")
+
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")
         

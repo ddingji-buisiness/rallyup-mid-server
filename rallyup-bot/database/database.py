@@ -206,6 +206,38 @@ class DatabaseManager:
                     UNIQUE(session_id, user_id)
                 )
             ''')
+
+            # scrim_recruitments 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_recruitments (
+                    id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    scrim_date TEXT NOT NULL,
+                    deadline TEXT NOT NULL,
+                    channel_id TEXT,
+                    message_id TEXT,
+                    status TEXT DEFAULT 'active',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recruitment_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('joined', 'declined')),
+                    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
+                    UNIQUE(recruitment_id, user_id)
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -2440,3 +2472,626 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 관리자 목록 조회 오류: {e}")
             return [guild_owner_id]
+
+    async def create_scrim_recruitment(self, guild_id: str, title: str, description: str, 
+                                     scrim_date: datetime, deadline: datetime, 
+                                     created_by: str) -> str:
+        """새로운 내전 모집 생성"""
+        try:
+            recruitment_id = str(uuid.uuid4())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO scrim_recruitments 
+                    (id, guild_id, title, description, scrim_date, deadline, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    recruitment_id,
+                    guild_id,
+                    title,
+                    description,
+                    scrim_date.isoformat(),
+                    deadline.isoformat(),
+                    created_by
+                ))
+                await db.commit()
+                
+            return recruitment_id
+            
+        except Exception as e:
+            print(f"❌ 내전 모집 생성 실패: {e}")
+            raise
+
+    async def update_recruitment_message_id(self, recruitment_id: str, message_id: str, 
+                                           channel_id: str) -> bool:
+        """모집 메시지 ID 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_recruitments 
+                    SET message_id = ?, channel_id = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (message_id, channel_id, recruitment_id))
+                await db.commit()
+                
+            return True
+            
+        except Exception as e:
+            print(f"❌ 모집 메시지 ID 업데이트 실패: {e}")
+            return False
+
+    async def set_recruitment_channel(self, guild_id: str, channel_id: str) -> bool:
+        """내전 공지 채널 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기존 설정이 있는지 확인
+                async with db.execute('''
+                    SELECT guild_id FROM server_settings WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    existing = await cursor.fetchone()
+                
+                if existing:
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE server_settings 
+                        SET recruitment_channel_id = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                    ''', (channel_id, guild_id))
+                else:
+                    # 신규 생성
+                    await db.execute('''
+                        INSERT INTO server_settings (guild_id, recruitment_channel_id)
+                        VALUES (?, ?)
+                    ''', (guild_id, channel_id))
+                
+                await db.commit()
+                
+            return True
+            
+        except Exception as e:
+            print(f"❌ 공지 채널 설정 실패: {e}")
+            return False
+
+    async def get_recruitment_channel(self, guild_id: str) -> Optional[str]:
+        """설정된 내전 공지 채널 ID 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT recruitment_channel_id FROM server_settings 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    return result[0] if result and result[0] else None
+                    
+        except Exception as e:
+            print(f"❌ 공지 채널 조회 실패: {e}")
+            return None
+
+    async def get_active_recruitments(self, guild_id: str) -> List[Dict]:
+        """활성 상태인 내전 모집 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments 
+                    WHERE guild_id = ? AND status = 'active'
+                    ORDER BY scrim_date ASC
+                ''', (guild_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 활성 모집 조회 실패: {e}")
+            return []
+
+    async def get_recruitment_by_id(self, recruitment_id: str) -> Optional[Dict]:
+        """ID로 특정 모집 정보 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result:
+                        columns = [description[0] for description in cursor.description]
+                        return dict(zip(columns, result))
+                    
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 모집 정보 조회 실패: {e}")
+            return None
+
+    async def add_recruitment_participant(self, recruitment_id: str, user_id: str, 
+                                        username: str, status: str) -> bool:
+        """모집 참가자 추가/업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO scrim_participants 
+                    (recruitment_id, user_id, username, status)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(recruitment_id, user_id) DO UPDATE SET
+                        status = excluded.status,
+                        username = excluded.username,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (recruitment_id, user_id, username, status))
+                await db.commit()
+                
+            return True
+            
+        except Exception as e:
+            print(f"❌ 참가자 추가/업데이트 실패: {e}")
+            return False
+
+    async def get_recruitment_participants(self, recruitment_id: str) -> List[Dict]:
+        """특정 모집의 참가자 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_participants 
+                    WHERE recruitment_id = ?
+                    ORDER BY joined_at ASC
+                ''', (recruitment_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 참가자 목록 조회 실패: {e}")
+            return []
+
+    async def close_recruitment(self, recruitment_id: str) -> bool:
+        """모집 마감 처리"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_recruitments 
+                    SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (recruitment_id,))
+                await db.commit()
+                
+            return True
+            
+        except Exception as e:
+            print(f"❌ 모집 마감 처리 실패: {e}")
+            return False
+
+    async def get_expired_recruitments(self) -> List[Dict]:
+        """마감시간이 지난 활성 모집들 조회"""
+        try:
+            current_time = datetime.now().isoformat()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments 
+                    WHERE status = 'active' AND deadline < ?
+                ''', (current_time,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 만료된 모집 조회 실패: {e}")
+            return []
+
+    async def cancel_recruitment(self, recruitment_id: str) -> bool:
+        """모집 취소 처리"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_recruitments 
+                    SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'active'
+                ''', (recruitment_id,))
+                
+                result = await db.execute('SELECT changes()')
+                changes = await result.fetchone()
+                
+                await db.commit()
+                
+                return changes[0] > 0  # 실제로 업데이트된 행이 있는지 확인
+                
+        except Exception as e:
+            print(f"❌ 모집 취소 처리 실패: {e}")
+            return False
+
+    async def get_user_participation_status(self, recruitment_id: str, user_id: str) -> Optional[str]:
+        """특정 사용자의 특정 모집 참가 상태 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT status FROM scrim_participants 
+                    WHERE recruitment_id = ? AND user_id = ?
+                ''', (recruitment_id, user_id)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    return result[0] if result else None
+                    
+        except Exception as e:
+            print(f"❌ 사용자 참가 상태 조회 실패: {e}")
+            return None
+
+    async def get_recruitment_stats(self, guild_id: str) -> Dict:
+        """서버의 내전 모집 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 전체 모집 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM scrim_recruitments WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    total_recruitments = (await cursor.fetchone())[0]
+                
+                # 활성 모집 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM scrim_recruitments 
+                    WHERE guild_id = ? AND status = 'active'
+                ''', (guild_id,)) as cursor:
+                    active_recruitments = (await cursor.fetchone())[0]
+                
+                # 완료된 모집 수  
+                async with db.execute('''
+                    SELECT COUNT(*) FROM scrim_recruitments 
+                    WHERE guild_id = ? AND status = 'closed'
+                ''', (guild_id,)) as cursor:
+                    closed_recruitments = (await cursor.fetchone())[0]
+                
+                # 취소된 모집 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM scrim_recruitments 
+                    WHERE guild_id = ? AND status = 'cancelled'
+                ''', (guild_id,)) as cursor:
+                    cancelled_recruitments = (await cursor.fetchone())[0]
+                
+                # 총 참가자 수 (중복 제거)
+                async with db.execute('''
+                    SELECT COUNT(DISTINCT user_id) FROM scrim_participants 
+                    WHERE recruitment_id IN (
+                        SELECT id FROM scrim_recruitments WHERE guild_id = ?
+                    )
+                ''', (guild_id,)) as cursor:
+                    unique_participants = (await cursor.fetchone())[0]
+                
+                return {
+                    'total_recruitments': total_recruitments,
+                    'active_recruitments': active_recruitments,
+                    'closed_recruitments': closed_recruitments,
+                    'cancelled_recruitments': cancelled_recruitments,
+                    'unique_participants': unique_participants
+                }
+                
+        except Exception as e:
+            print(f"❌ 모집 통계 조회 실패: {e}")
+            return {}
+
+    async def get_user_recruitment_history(self, guild_id: str, user_id: str) -> List[Dict]:
+        """특정 사용자의 모집 참가 이력"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT r.title, r.scrim_date, r.status as recruitment_status,
+                        p.status as participation_status, p.joined_at
+                    FROM scrim_recruitments r
+                    JOIN scrim_participants p ON r.id = p.recruitment_id
+                    WHERE r.guild_id = ? AND p.user_id = ?
+                    ORDER BY r.scrim_date DESC
+                    LIMIT 20
+                ''', (guild_id, user_id)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 사용자 참가 이력 조회 실패: {e}")
+            return []
+
+    async def cleanup_old_recruitments(self, days_old: int = 30) -> int:
+        """오래된 모집 데이터 정리"""
+        try:
+            from datetime import datetime, timedelta
+            cutoff_date = (datetime.now() - timedelta(days=days_old)).isoformat()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 오래된 참가자 데이터 삭제
+                await db.execute('''
+                    DELETE FROM scrim_participants 
+                    WHERE recruitment_id IN (
+                        SELECT id FROM scrim_recruitments 
+                        WHERE created_at < ? AND status IN ('closed', 'cancelled')
+                    )
+                ''', (cutoff_date,))
+                
+                # 오래된 모집 데이터 삭제
+                result = await db.execute('''
+                    DELETE FROM scrim_recruitments 
+                    WHERE created_at < ? AND status IN ('closed', 'cancelled')
+                ''', (cutoff_date,))
+                
+                deleted_count = result.rowcount
+                await db.commit()
+                
+                print(f"✅ {deleted_count}개의 오래된 모집 데이터 정리 완료")
+                return deleted_count
+                
+        except Exception as e:
+            print(f"❌ 오래된 데이터 정리 실패: {e}")
+            return 0
+
+    async def get_popular_participation_times(self, guild_id: str) -> Dict:
+        """인기 있는 참가 시간대 분석"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 시간대별 참가자 수 통계
+                async with db.execute('''
+                    SELECT 
+                        CASE 
+                            WHEN CAST(strftime('%H', r.scrim_date) AS INTEGER) BETWEEN 0 AND 5 THEN '새벽 (0-5시)'
+                            WHEN CAST(strftime('%H', r.scrim_date) AS INTEGER) BETWEEN 6 AND 11 THEN '오전 (6-11시)'
+                            WHEN CAST(strftime('%H', r.scrim_date) AS INTEGER) BETWEEN 12 AND 17 THEN '오후 (12-17시)'
+                            WHEN CAST(strftime('%H', r.scrim_date) AS INTEGER) BETWEEN 18 AND 23 THEN '저녁 (18-23시)'
+                        END as time_period,
+                        COUNT(p.user_id) as participant_count,
+                        COUNT(DISTINCT r.id) as recruitment_count
+                    FROM scrim_recruitments r
+                    LEFT JOIN scrim_participants p ON r.id = p.recruitment_id AND p.status = 'joined'
+                    WHERE r.guild_id = ? AND r.status = 'closed'
+                    GROUP BY time_period
+                ''', (guild_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    
+                    stats = {}
+                    for time_period, participant_count, recruitment_count in results:
+                        if time_period:  # None 체크
+                            stats[time_period] = {
+                                'participant_count': participant_count,
+                                'recruitment_count': recruitment_count,
+                                'avg_participants': round(participant_count / recruitment_count, 1) if recruitment_count > 0 else 0
+                            }
+                    
+                    return stats
+                    
+        except Exception as e:
+            print(f"❌ 시간대 분석 실패: {e}")
+            return {}
+
+    async def get_server_admins(self, guild_id: str) -> List[Dict]:
+        """서버의 등록된 관리자 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id, username, added_at FROM server_admins 
+                    WHERE guild_id = ?
+                    ORDER BY added_at ASC
+                ''', (guild_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 서버 관리자 목록 조회 실패: {e}")
+            return []
+
+    async def get_recruitment_detailed_stats(self, recruitment_id: str) -> Dict:
+        """특정 모집의 상세 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기본 모집 정보
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    recruitment_data = await cursor.fetchone()
+                    if not recruitment_data:
+                        return {}
+                    
+                    columns = [description[0] for description in cursor.description]
+                    recruitment = dict(zip(columns, recruitment_data))
+                
+                # 참가자 통계
+                async with db.execute('''
+                    SELECT 
+                        status,
+                        COUNT(*) as count,
+                        GROUP_CONCAT(username, ', ') as users
+                    FROM scrim_participants 
+                    WHERE recruitment_id = ?
+                    GROUP BY status
+                ''', (recruitment_id,)) as cursor:
+                    participant_stats = await cursor.fetchall()
+                
+                # 시간별 참가 패턴
+                async with db.execute('''
+                    SELECT 
+                        strftime('%H', joined_at) as hour,
+                        COUNT(*) as registrations
+                    FROM scrim_participants 
+                    WHERE recruitment_id = ?
+                    GROUP BY strftime('%H', joined_at)
+                    ORDER BY hour
+                ''', (recruitment_id,)) as cursor:
+                    hourly_stats = await cursor.fetchall()
+                
+                # 결과 구성
+                stats = recruitment.copy()
+                stats['participant_stats'] = {
+                    stat[0]: {'count': stat[1], 'users': stat[2].split(', ') if stat[2] else []}
+                    for stat in participant_stats
+                }
+                stats['hourly_registration'] = [
+                    {'hour': stat[0], 'count': stat[1]} for stat in hourly_stats
+                ]
+                
+                return stats
+                
+        except Exception as e:
+            print(f"❌ 모집 상세 통계 조회 실패: {e}")
+            return {}
+
+    async def get_recruitment_summary_for_admin(self, guild_id: str, days: int = 7) -> Dict:
+        """관리자용 최근 모집 요약"""
+        try:
+            from datetime import datetime, timedelta
+            
+            cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 최근 모집들
+                async with db.execute('''
+                    SELECT 
+                        r.*,
+                        COUNT(CASE WHEN p.status = 'joined' THEN 1 END) as joined_count,
+                        COUNT(CASE WHEN p.status = 'declined' THEN 1 END) as declined_count,
+                        COUNT(p.user_id) as total_responses
+                    FROM scrim_recruitments r
+                    LEFT JOIN scrim_participants p ON r.id = p.recruitment_id
+                    WHERE r.guild_id = ? AND r.created_at > ?
+                    GROUP BY r.id
+                    ORDER BY r.created_at DESC
+                    LIMIT 10
+                ''', (guild_id, cutoff_date)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    recent_recruitments = [dict(zip(columns, row)) for row in results]
+                
+                # 전체 통계
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as total_recruitments,
+                        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_count,
+                        COUNT(CASE WHEN status = 'closed' THEN 1 END) as closed_count,
+                        COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_count
+                    FROM scrim_recruitments
+                    WHERE guild_id = ? AND created_at > ?
+                ''', (guild_id, cutoff_date)) as cursor:
+                    overall_stats = await cursor.fetchone()
+                
+                return {
+                    'recent_recruitments': recent_recruitments,
+                    'overall_stats': {
+                        'total': overall_stats[0],
+                        'active': overall_stats[1], 
+                        'closed': overall_stats[2],
+                        'cancelled': overall_stats[3]
+                    },
+                    'period_days': days
+                }
+                
+        except Exception as e:
+            print(f"❌ 관리자용 모집 요약 조회 실패: {e}")
+            return {}
+
+    async def update_recruitment_notification_sent(self, recruitment_id: str, 
+                                                notification_type: str = 'closed') -> bool:
+        """모집 알림 발송 기록"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 알림 발송 기록용 컬럼이 없다면 추가하는 로직도 포함
+                try:
+                    await db.execute('''
+                        ALTER TABLE scrim_recruitments 
+                        ADD COLUMN notifications_sent TEXT DEFAULT ''
+                    ''')
+                except:
+                    pass  # 컬럼이 이미 존재하는 경우
+                
+                # 기존 알림 기록 조회
+                async with db.execute('''
+                    SELECT notifications_sent FROM scrim_recruitments WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result:
+                        existing_notifications = result[0] or ''
+                        new_notifications = f"{existing_notifications},{notification_type}" if existing_notifications else notification_type
+                        
+                        await db.execute('''
+                            UPDATE scrim_recruitments 
+                            SET notifications_sent = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        ''', (new_notifications, recruitment_id))
+                        
+                        await db.commit()
+                        return True
+                
+                return False
+                
+        except Exception as e:
+            print(f"❌ 알림 발송 기록 실패: {e}")
+            return False
+
+    async def get_recruitment_participation_timeline(self, recruitment_id: str) -> List[Dict]:
+        """모집 참가 신청 시간순 타임라인"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        user_id, username, status, joined_at, updated_at
+                    FROM scrim_participants 
+                    WHERE recruitment_id = ?
+                    ORDER BY joined_at ASC
+                ''', (recruitment_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    timeline = []
+                    for row in results:
+                        event = dict(zip(columns, row))
+                        # 참가 상태 변경 이력도 추가
+                        if event['joined_at'] != event['updated_at']:
+                            event['status_changed'] = True
+                        else:
+                            event['status_changed'] = False
+                        timeline.append(event)
+                    
+                    return timeline
+                    
+        except Exception as e:
+            print(f"❌ 참가 타임라인 조회 실패: {e}")
+            return []
+
+    async def schedule_recruitment_reminder(self, recruitment_id: str, remind_before_minutes: int = 60):
+        """모집 마감 전 리마인더 스케줄링 (향후 확장용)"""
+        try:
+            # 향후 리마인더 기능 구현 시 사용할 메소드
+            # 현재는 기본 구조만 제공
+            async with aiosqlite.connect(self.db_path) as db:
+                # 리마인더 테이블이 필요하면 생성
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS recruitment_reminders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        recruitment_id TEXT NOT NULL,
+                        remind_at TEXT NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id)
+                    )
+                ''')
+                
+                # 리마인더 시간 계산 및 저장
+                recruitment = await self.get_recruitment_by_id(recruitment_id)
+                if recruitment:
+                    from datetime import datetime, timedelta
+                    deadline = datetime.fromisoformat(recruitment['deadline'])
+                    remind_at = deadline - timedelta(minutes=remind_before_minutes)
+                    
+                    await db.execute('''
+                        INSERT INTO recruitment_reminders (recruitment_id, remind_at)
+                        VALUES (?, ?)
+                    ''', (recruitment_id, remind_at.isoformat()))
+                    
+                    await db.commit()
+                    return True
+                
+                return False
+                
+        except Exception as e:
+            print(f"❌ 리마인더 스케줄링 실패: {e}")
+            return False
