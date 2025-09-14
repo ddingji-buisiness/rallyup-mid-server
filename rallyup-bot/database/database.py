@@ -3095,3 +3095,68 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 리마인더 스케줄링 실패: {e}")
             return False
+
+    async def set_bamboo_channel(self, guild_id: str, channel_id: str) -> bool:
+        """대나무숲 채널 ID 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기존 설정이 있는지 확인
+                async with db.execute('''
+                    SELECT guild_id FROM server_settings WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    exists = await cursor.fetchone()
+                
+                if exists:
+                    # 기존 설정 업데이트
+                    await db.execute('''
+                        UPDATE server_settings 
+                        SET bamboo_channel_id = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                    ''', (channel_id, guild_id))
+                else:
+                    # 새 설정 추가
+                    await db.execute('''
+                        INSERT INTO server_settings (guild_id, bamboo_channel_id)
+                        VALUES (?, ?)
+                    ''', (guild_id, channel_id))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 대나무숲 채널 설정 실패: {e}")
+            return False
+
+    async def get_bamboo_channel(self, guild_id: str) -> str:
+        """대나무숲 채널 ID 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT bamboo_channel_id FROM server_settings 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result and result[0]:
+                        return result[0]
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 대나무숲 채널 조회 실패: {e}")
+            return None
+
+    async def remove_bamboo_channel(self, guild_id: str) -> bool:
+        """대나무숲 채널 설정 제거"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE server_settings 
+                    SET bamboo_channel_id = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                ''', (guild_id,))
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 대나무숲 채널 설정 제거 실패: {e}")
+            return False
