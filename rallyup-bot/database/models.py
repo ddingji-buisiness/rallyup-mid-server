@@ -407,3 +407,20 @@ class ServerSettings:
     welcome_channel_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+@dataclass
+class ServerSettings:
+    """서버 설정 데이터 모델"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    
+    newbie_role_id: Optional[str] = None     
+    member_role_id: Optional[str] = None      
+    auto_role_change: bool = False            
+    
+    new_member_role_id: Optional[str] = None  
+    auto_assign_new_member: bool = False      
+    
+    welcome_channel_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None

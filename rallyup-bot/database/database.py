@@ -1,7 +1,8 @@
 import aiosqlite
 import json
-from datetime import datetime
-from typing import List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+from utils.time_utils import TimeUtils
 
 import discord
 from database.models import ClanScrim, ClanTeam, User, Match, Participant, UserMatchup
@@ -23,6 +24,8 @@ class DatabaseManager:
 
             await self.initialize_clan_tables()
             await self.initialize_server_settings_tables()
+            await self.update_server_settings_for_auto_role()
+            await self.create_bamboo_tables()
 
             # users 테이블
             await db.execute('''
@@ -354,6 +357,43 @@ class DatabaseManager:
             
             await db.commit()
             print("✅ Server settings tables initialized")
+
+    async def create_bamboo_tables(self):
+        """대나무숲 관련 테이블 생성"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 대나무숲 메시지 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bamboo_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL UNIQUE,
+                    author_id TEXT NOT NULL,
+                    original_content TEXT NOT NULL,
+                    message_type TEXT NOT NULL CHECK (message_type IN ('anonymous', 'timed_reveal')),
+                    reveal_time INTEGER,
+                    is_revealed BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    revealed_at TIMESTAMP
+                )
+            ''')
+            
+            # 성능 최적화를 위한 인덱스 생성
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bamboo_reveal_time 
+                ON bamboo_messages(reveal_time, is_revealed) 
+                WHERE message_type = 'timed_reveal'
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_bamboo_guild_created
+                ON bamboo_messages(guild_id, created_at)
+            ''')
+            
+            await db.commit()
+            print("🎋 대나무숲 테이블이 생성되었습니다.")
 
     async def _update_teammate_combinations_in_transaction(self, db, match_id: int):
         """팀메이트 조합 데이터 업데이트 (트랜잭션 내에서 실행)"""
@@ -1935,3 +1975,468 @@ class DatabaseManager:
             return f"❌ 닉네임 복구 실패: {str(e)}"
         except Exception as e:
             return f"❌ 닉네임 복구 중 오류: {str(e)}"
+
+    async def save_bamboo_message(self, guild_id: str, channel_id: str, message_id: str,
+                                author_id: str, original_content: str, message_type: str,
+                                reveal_time: Optional[int] = None) -> bool:
+        """대나무숲 메시지 데이터베이스에 저장"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                utc_now = TimeUtils.get_utc_now().isoformat()
+
+                await db.execute('''
+                    INSERT INTO bamboo_messages 
+                    (guild_id, channel_id, message_id, author_id, original_content, 
+                    message_type, reveal_time, is_revealed, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?)
+                ''', (guild_id, channel_id, message_id, author_id, original_content, 
+                    message_type, reveal_time, utc_now))
+                
+                await db.commit()
+                print(f"🎋 메시지 저장 완료 - UTC: {utc_now}, KST: {TimeUtils.get_kst_now()}")
+                return True
+                
+        except Exception as e:
+            print(f"대나무숲 메시지 저장 오류: {e}")
+            return False
+
+    async def get_bamboo_message(self, message_id: str) -> Optional[Dict]:
+        """메시지 ID로 대나무숲 메시지 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM bamboo_messages WHERE message_id = ?
+                ''', (message_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            print(f"대나무숲 메시지 조회 오류: {e}")
+            return None
+
+    async def get_pending_reveals(self) -> List[Dict]:
+        """공개 시간이 도래한 메시지들 조회"""
+        try:
+            current_time = int(TimeUtils.get_utc_now().timestamp())
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM bamboo_messages 
+                    WHERE message_type = 'timed_reveal' 
+                    AND is_revealed = FALSE 
+                    AND reveal_time <= ?
+                    ORDER BY reveal_time ASC
+                ''', (current_time,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    result = [dict(zip(columns, row)) for row in rows]
+                    
+                    # print(f"🐛 공개 대상 메시지: {len(result)}개")
+                    # for msg in result:
+                    #     print(f"  - {msg['message_id']}: 예정시간 {msg['reveal_time']}")
+                    
+                    return result
+                    
+        except Exception as e:
+            print(f"공개 대기 메시지 조회 오류: {e}")
+            return []
+
+    async def mark_message_revealed(self, message_id: str) -> bool:
+        """메시지를 공개됨으로 표시"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+
+                revealed_at_utc = TimeUtils.get_utc_now().isoformat()
+
+                cursor = await db.execute('''
+                    UPDATE bamboo_messages 
+                    SET is_revealed = TRUE, revealed_at = ?
+                    WHERE message_id = ?
+                ''', (revealed_at_utc, message_id))
+                
+                if cursor.rowcount > 0:
+                    await db.commit()
+                    return True
+                return False
+                
+        except Exception as e:
+            print(f"메시지 공개 표시 오류: {e}")
+            return False
+
+    async def get_bamboo_statistics(self, guild_id: str) -> Dict:
+        """대나무숲 사용 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                stats = {}
+                
+                # 기본 통계
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as total_messages,
+                        COUNT(CASE WHEN message_type = 'anonymous' THEN 1 END) as anonymous_messages,
+                        COUNT(CASE WHEN message_type = 'timed_reveal' THEN 1 END) as timed_messages,
+                        COUNT(CASE WHEN is_revealed = TRUE THEN 1 END) as revealed_messages
+                    FROM bamboo_messages 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        stats.update(dict(zip([desc[0] for desc in cursor.description], row)))
+                
+                # 🔥 수정: 시간별 통계 - KST 기준으로 날짜 계산 후 UTC로 변환
+                now_kst = TimeUtils.get_kst_now()
+                today_start_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+                week_start_kst = today_start_kst - timedelta(days=7)
+                month_start_kst = today_start_kst - timedelta(days=30)
+                
+                # KST를 UTC로 변환해서 DB 쿼리
+                today_start_utc = TimeUtils.kst_to_utc(today_start_kst)
+                week_start_utc = TimeUtils.kst_to_utc(week_start_kst)
+                month_start_utc = TimeUtils.kst_to_utc(month_start_kst)
+                
+                print(f"🐛 시간 디버깅 - KST 오늘 시작: {today_start_kst}")
+                print(f"🐛 시간 디버깅 - UTC 오늘 시작: {today_start_utc}")
+                
+                # 오늘 메시지 (KST 기준 오늘)
+                async with db.execute('''
+                    SELECT COUNT(*) FROM bamboo_messages 
+                    WHERE guild_id = ? AND created_at >= ?
+                ''', (guild_id, today_start_utc.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    stats['today_messages'] = row[0] if row else 0
+                
+                # 이번 주 메시지
+                async with db.execute('''
+                    SELECT COUNT(*) FROM bamboo_messages 
+                    WHERE guild_id = ? AND created_at >= ?
+                ''', (guild_id, week_start_utc.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    stats['week_messages'] = row[0] if row else 0
+                
+                # 이번 달 메시지
+                async with db.execute('''
+                    SELECT COUNT(*) FROM bamboo_messages 
+                    WHERE guild_id = ? AND created_at >= ?
+                ''', (guild_id, month_start_utc.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    stats['month_messages'] = row[0] if row else 0
+                
+                # 🔥 수정: 공개 대기 중인 메시지 수 - UTC 기준
+                current_timestamp = int(TimeUtils.get_utc_now().timestamp())
+                async with db.execute('''
+                    SELECT COUNT(*) FROM bamboo_messages 
+                    WHERE guild_id = ? AND message_type = 'timed_reveal' 
+                    AND is_revealed = FALSE AND reveal_time > ?
+                ''', (guild_id, current_timestamp)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['pending_reveals'] = row[0] if row else 0
+                
+                # 다음 공개 예정 시간
+                async with db.execute('''
+                    SELECT MIN(reveal_time) FROM bamboo_messages 
+                    WHERE guild_id = ? AND message_type = 'timed_reveal' 
+                    AND is_revealed = FALSE AND reveal_time > ?
+                ''', (guild_id, current_timestamp)) as cursor:
+                    row = await cursor.fetchone()
+                    if row and row[0]:
+                        stats['next_reveal'] = f"<t:{row[0]}:R>"
+                    else:
+                        stats['next_reveal'] = "없음"
+                
+                return stats
+                
+        except Exception as e:
+            print(f"대나무숲 통계 조회 오류: {e}")
+            # 기본값 반환
+            return {
+                'total_messages': 0,
+                'anonymous_messages': 0, 
+                'timed_messages': 0,
+                'revealed_messages': 0,
+                'today_messages': 0,
+                'week_messages': 0,
+                'month_messages': 0,
+                'pending_reveals': 0,
+                'next_reveal': '없음'
+            }
+
+    async def get_user_bamboo_messages(self, guild_id: str, author_id: str, limit: int = 10) -> List[Dict]:
+        """특정 사용자의 대나무숲 메시지 조회 (관리자용)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT message_id, original_content, message_type, is_revealed, 
+                        created_at, reveal_time, revealed_at
+                    FROM bamboo_messages 
+                    WHERE guild_id = ? AND author_id = ?
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                ''', (guild_id, author_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"사용자 대나무숲 메시지 조회 오류: {e}")
+            return []
+
+    async def cleanup_old_bamboo_messages(self, days_old: int = 365) -> int:
+        """오래된 대나무숲 메시지 정리"""
+        try:
+            cutoff_date = datetime.now() - timedelta(days=days_old)
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 오래된 메시지 삭제 (공개된 메시지 또는 완전 익명 메시지)
+                cursor = await db.execute('''
+                    DELETE FROM bamboo_messages 
+                    WHERE created_at < ? 
+                    AND (is_revealed = TRUE OR message_type = 'anonymous')
+                ''', (cutoff_date.isoformat(),))
+                
+                deleted_count = cursor.rowcount
+                await db.commit()
+                
+                if deleted_count > 0:
+                    print(f"🎋 {deleted_count}개의 오래된 대나무숲 메시지가 정리되었습니다.")
+                
+                return deleted_count
+                
+        except Exception as e:
+            print(f"대나무숲 메시지 정리 오류: {e}")
+            return 0
+
+    async def get_bamboo_message_by_author(self, guild_id: str, author_id: str, 
+                                        message_content: str) -> Optional[Dict]:
+        """작성자와 내용으로 메시지 찾기 (중복 방지용)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 최근 1시간 내 동일한 작성자의 동일한 내용 메시지 확인
+                one_hour_ago = datetime.now() - timedelta(hours=1)
+                
+                async with db.execute('''
+                    SELECT * FROM bamboo_messages 
+                    WHERE guild_id = ? AND author_id = ? 
+                    AND original_content = ? AND created_at >= ?
+                    ORDER BY created_at DESC LIMIT 1
+                ''', (guild_id, author_id, message_content, one_hour_ago.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            print(f"중복 메시지 확인 오류: {e}")
+            return None
+
+    async def update_server_settings_for_auto_role(self):
+        """신규 유저 자동 역할 배정을 위한 server_settings 테이블 업데이트"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                # 새로운 컬럼들 추가
+                await db.execute('''
+                    ALTER TABLE server_settings 
+                    ADD COLUMN new_member_role_id TEXT
+                ''')
+                print("✅ new_member_role_id 컬럼 추가됨")
+            except Exception as e:
+                if "duplicate column name" in str(e).lower():
+                    print("ℹ️ new_member_role_id 컬럼이 이미 존재함")
+                else:
+                    print(f"❌ new_member_role_id 컬럼 추가 실패: {e}")
+            
+            try:
+                await db.execute('''
+                    ALTER TABLE server_settings 
+                    ADD COLUMN auto_assign_new_member BOOLEAN DEFAULT FALSE
+                ''')
+                print("✅ auto_assign_new_member 컬럼 추가됨")
+            except Exception as e:
+                if "duplicate column name" in str(e).lower():
+                    print("ℹ️ auto_assign_new_member 컬럼이 이미 존재함")
+                else:
+                    print(f"❌ auto_assign_new_member 컬럼 추가 실패: {e}")
+            
+            await db.commit()
+            print("🎯 신규 유저 자동 역할 배정 스키마 업데이트 완료")
+
+    async def set_new_member_auto_role(self, guild_id: str, role_id: str, enabled: bool = True) -> bool:
+        """신규 유저 자동 역할 배정 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 기존 설정이 있는지 확인
+                async with db.execute('''
+                    SELECT id FROM server_settings WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    existing = await cursor.fetchone()
+                
+                if existing:
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE server_settings 
+                        SET new_member_role_id = ?, 
+                            auto_assign_new_member = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                    ''', (role_id, enabled, guild_id))
+                else:
+                    # 신규 생성
+                    await db.execute('''
+                        INSERT INTO server_settings 
+                        (guild_id, new_member_role_id, auto_assign_new_member)
+                        VALUES (?, ?, ?)
+                    ''', (guild_id, role_id, enabled))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 신규 유저 자동 역할 설정 실패: {e}")
+            return False
+
+    async def get_new_member_auto_role_settings(self, guild_id: str) -> dict:
+        """신규 유저 자동 역할 배정 설정 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT new_member_role_id, auto_assign_new_member
+                    FROM server_settings 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result:
+                        return {
+                            'role_id': result[0],
+                            'enabled': bool(result[1]) if result[1] is not None else False
+                        }
+                    else:
+                        return {'role_id': None, 'enabled': False}
+                        
+        except Exception as e:
+            print(f"❌ 신규 유저 자동 역할 설정 조회 실패: {e}")
+            return {'role_id': None, 'enabled': False}
+
+    async def disable_new_member_auto_role(self, guild_id: str) -> bool:
+        """신규 유저 자동 역할 배정 비활성화"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE server_settings 
+                    SET auto_assign_new_member = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                ''', (guild_id,))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 신규 유저 자동 역할 배정 비활성화 실패: {e}")
+            return False
+
+    async def get_deletable_users_for_autocomplete(self, guild_id: str, search_query: str = "", limit: int = 100):
+        """유저삭제 자동완성용 - 관리자 제외, 검색어 필터링"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 관리자 목록 먼저 조회
+                admin_user_ids = []
+                async with db.execute('''
+                    SELECT user_id FROM server_admins 
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,)) as cursor:
+                    admin_rows = await cursor.fetchall()
+                    admin_user_ids = [row[0] for row in admin_rows]
+                
+                # 검색어가 있는 경우와 없는 경우 분기
+                if search_query:
+                    # 검색어가 있으면 DB 레벨에서 필터링
+                    search_pattern = f"%{search_query.lower()}%"
+                    query = '''
+                        SELECT user_id, username, battle_tag, main_position, 
+                            current_season_tier, registered_at
+                        FROM registered_users 
+                        WHERE guild_id = ? 
+                        AND is_active = TRUE
+                        AND (LOWER(username) LIKE ? OR LOWER(battle_tag) LIKE ?)
+                        ORDER BY username ASC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, search_pattern, search_pattern, limit)
+                else:
+                    # 검색어가 없으면 전체 조회
+                    query = '''
+                        SELECT user_id, username, battle_tag, main_position, 
+                            current_season_tier, registered_at
+                        FROM registered_users 
+                        WHERE guild_id = ? 
+                        AND is_active = TRUE
+                        ORDER BY username ASC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, limit)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    users = []
+                    for row in rows:
+                        user_data = {
+                            'user_id': row[0],
+                            'username': row[1], 
+                            'battle_tag': row[2] or '',
+                            'main_position': row[3] or '',
+                            'current_season_tier': row[4] or '',
+                            'registered_at': row[5]
+                        }
+                        
+                        # 관리자는 제외
+                        if user_data['user_id'] not in admin_user_ids:
+                            users.append(user_data)
+                    
+                    return users
+                    
+        except Exception as e:
+            print(f"❌ 삭제 가능 유저 조회 오류: {e}")
+            return []
+        
+    async def get_all_server_admins_for_notification(self, guild_id: str, guild_owner_id: str):
+        """알림용 모든 관리자 ID 목록 조회 (서버 소유자 포함)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                admin_ids = set()
+                
+                # 1. 서버 소유자 추가
+                admin_ids.add(guild_owner_id)
+                
+                # 2. 등록된 관리자들 추가
+                async with db.execute('''
+                    SELECT user_id FROM server_admins 
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        admin_ids.add(row[0])
+                
+                return list(admin_ids)
+                
+        except Exception as e:
+            print(f"❌ 관리자 목록 조회 오류: {e}")
+            return [guild_owner_id]
