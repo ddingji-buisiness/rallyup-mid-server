@@ -21,9 +21,151 @@ class BambooForestCommands(commands.Cog):
         # 데이터베이스에서 관리자 확인
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
-    def get_bamboo_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
-        """대나무숲 채널 찾기"""
-        return discord.utils.get(guild.channels, name="대나무숲")
+    async def get_bamboo_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
+        """대나무숲 채널 찾기 (ID 기반)"""
+        try:
+            channel_id = await self.bot.db_manager.get_bamboo_channel(str(guild.id))
+            if not channel_id:
+                return None
+            
+            channel = guild.get_channel(int(channel_id))
+            if not channel:
+                # 채널이 삭제된 경우 DB에서 정보 제거
+                await self.bot.db_manager.remove_bamboo_channel(str(guild.id))
+                return None
+                
+            return channel
+            
+        except Exception as e:
+            print(f"❌ 대나무숲 채널 조회 오류: {e}")
+            return None
+        
+    async def _send_welcome_message(self, channel: discord.TextChannel):
+        """환영 메시지 전송"""
+        try:
+            welcome_embed = discord.Embed(
+                title="🎋 대나무숲에 오신 것을 환영합니다!",
+                description="이곳은 익명으로 메시지를 남길 수 있는 특별한 공간입니다.",
+                color=0x00ff88
+            )
+            
+            welcome_embed.add_field(
+                name="📝 사용 방법",
+                value="1️⃣ `/대나무숲` 명령어로 메시지 작성\n"
+                      "2️⃣ **완전 익명** 또는 **시간 후 실명** 선택\n"
+                      "3️⃣ 메시지 자동 전송 및 공개",
+                inline=False
+            )
+            
+            welcome_embed.add_field(
+                name="🔒 익명성 보장",
+                value="• **완전 익명**: 영구적으로 익명 유지\n"
+                      "• **시간 후 실명**: 설정 시간 후 닉네임+아바타 공개\n"
+                      "• **관리자 조회**: 필요시 작성자 확인 가능",
+                inline=False
+            )
+            
+            welcome_embed.add_field(
+                name="📋 이용 규칙",
+                value="• 서로 존중하고 배려하는 마음으로 이용해주세요\n"
+                      "• 부적절한 내용 발견 시 관리자에게 신고해주세요\n"
+                      "• 메시지는 최대 2000자까지 작성 가능합니다",
+                inline=False
+            )
+            
+            welcome_embed.set_footer(text="💡 지금 바로 /대나무숲 명령어를 사용해보세요!")
+            
+            await channel.send(embed=welcome_embed)
+            
+        except Exception as e:
+            print(f"❌ 환영 메시지 전송 실패: {e}")
+
+    @app_commands.command(name="대나무숲설정", description="[관리자] 대나무숲 채널을 설정합니다")
+    @app_commands.describe(
+        채널="대나무숲으로 사용할 채널 (생략 시 새 채널 생성)",
+        채널명="새 채널 생성 시 채널 이름 (기본값: 대나무숲)"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def setup_bamboo_forest(
+        self, 
+        interaction: discord.Interaction, 
+        채널: discord.TextChannel = None,
+        채널명: str = "대나무숲"
+    ):
+        """대나무숲 설정 명령어"""
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            bamboo_channel = None
+            
+            if 채널:
+                # 기존 채널을 대나무숲으로 설정
+                bamboo_channel = 채널
+                setup_type = "기존 채널 설정"
+            else:
+                # 새 채널 생성
+                bamboo_channel = await interaction.guild.create_text_channel(
+                    name=채널명,
+                    topic="🎋 익명으로 메시지를 남기는 공간입니다. /대나무숲 명령어를 사용해보세요!",
+                    reason="대나무숲 기능 설정"
+                )
+                setup_type = "새 채널 생성"
+            
+            # 데이터베이스에 채널 ID 저장
+            success = await self.bot.db_manager.set_bamboo_channel(
+                str(interaction.guild_id), 
+                str(bamboo_channel.id)
+            )
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 대나무숲 설정 저장 중 오류가 발생했습니다.", ephemeral=True
+                )
+                return
+            
+            # 환영 메시지 전송 (새 채널인 경우만)
+            if not 채널:
+                await self._send_welcome_message(bamboo_channel)
+            
+            # 성공 응답
+            embed = discord.Embed(
+                title="✅ 대나무숲 설정 완료!",
+                description=f"**{setup_type}**: <#{bamboo_channel.id}>",
+                color=0x00ff88
+            )
+            
+            embed.add_field(
+                name="🎯 사용 가능한 명령어",
+                value="• `/대나무숲 [메시지]` - 익명 메시지 작성\n"
+                      "• `/대나무숲조회 [링크]` - 작성자 조회 (관리자)\n" 
+                      "• `/대나무숲통계` - 사용 통계 (관리자)\n"
+                      "• `/대나무숲강제공개 [링크]` - 강제 공개 (관리자)",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="⚙️ 시스템 상태", 
+                value=f"**스케줄러**: {'🟢 실행 중' if self.bot.bamboo_scheduler.running else '🔴 중지됨'}",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ 채널 생성/수정 권한이 없습니다. 서버 관리 권한을 확인해주세요.", 
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 설정 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
 
     @app_commands.command(name="대나무숲", description="익명으로 메시지를 남깁니다")
     @app_commands.describe(메시지="남길 메시지를 입력해주세요 (최대 2000자)")
@@ -44,11 +186,11 @@ class BambooForestCommands(commands.Cog):
             return
         
         # 대나무숲 채널 확인
-        bamboo_channel = self.get_bamboo_channel(interaction.guild)
+        bamboo_channel = await self.get_bamboo_channel(interaction.guild)
         if not bamboo_channel:
             await interaction.response.send_message(
-                "❌ `#대나무숲` 채널을 찾을 수 없습니다.\n"
-                "관리자에게 `/대나무숲설정`으로 채널 생성을 요청해주세요.", 
+                "❌ 대나무숲 채널이 설정되지 않았습니다.\n"
+                "관리자에게 `/대나무숲설정`으로 채널 설정을 요청해주세요.", 
                 ephemeral=True
             )
             return
@@ -84,6 +226,118 @@ class BambooForestCommands(commands.Cog):
         embed.set_footer(text="💡 5분 내에 선택해주세요")
         
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(name="대나무숲정보", description="[관리자] 현재 대나무숲 설정 정보를 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def bamboo_info(self, interaction: discord.Interaction):
+        """대나무숲 설정 정보 확인"""
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # 현재 설정된 채널 확인
+            bamboo_channel = await self.get_bamboo_channel(interaction.guild)
+            
+            embed = discord.Embed(
+                title="🎋 대나무숲 설정 정보",
+                color=0x00ff88
+            )
+            
+            if bamboo_channel:
+                embed.add_field(
+                    name="📢 현재 대나무숲 채널",
+                    value=f"<#{bamboo_channel.id}>\n"
+                          f"**채널명**: {bamboo_channel.name}\n"
+                          f"**채널 ID**: `{bamboo_channel.id}`",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="✅ 상태",
+                    value="🟢 정상 작동",
+                    inline=True
+                )
+            else:
+                embed.add_field(
+                    name="❌ 상태",
+                    value="🔴 채널이 설정되지 않음",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="🔧 해결 방법",
+                    value="`/대나무숲설정` 명령어로 채널을 설정해주세요",
+                    inline=False
+                )
+            
+            embed.add_field(
+                name="⚙️ 시스템 상태", 
+                value=f"**스케줄러**: {'🟢 실행 중' if self.bot.bamboo_scheduler.running else '🔴 중지됨'}",
+                inline=True
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 정보 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+
+    @app_commands.command(name="대나무숲해제", description="[관리자] 대나무숲 설정을 해제합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def remove_bamboo_forest(self, interaction: discord.Interaction):
+        """대나무숲 설정 해제"""
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # 현재 설정 확인
+            bamboo_channel = await self.get_bamboo_channel(interaction.guild)
+            
+            if not bamboo_channel:
+                await interaction.followup.send(
+                    "❌ 설정된 대나무숲 채널이 없습니다.", ephemeral=True
+                )
+                return
+            
+            # DB에서 설정 제거
+            success = await self.bot.db_manager.remove_bamboo_channel(str(interaction.guild_id))
+            
+            if success:
+                embed = discord.Embed(
+                    title="✅ 대나무숲 설정 해제 완료",
+                    description=f"<#{bamboo_channel.id}> 채널의 대나무숲 설정이 해제되었습니다.",
+                    color=0xff6b6b
+                )
+                
+                embed.add_field(
+                    name="📝 안내",
+                    value="• 채널은 삭제되지 않았습니다\n"
+                          "• 기존 메시지는 그대로 유지됩니다\n"
+                          "• `/대나무숲설정`으로 다시 설정할 수 있습니다",
+                    inline=False
+                )
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "❌ 설정 해제 중 오류가 발생했습니다.", ephemeral=True
+                )
+                
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 설정 해제 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
 
     @app_commands.command(name="대나무숲조회", description="[관리자] 익명 메시지의 작성자를 조회합니다")
     @app_commands.describe(메시지링크="조회할 대나무숲 메시지의 링크")
@@ -250,60 +504,6 @@ class BambooForestCommands(commands.Cog):
             await interaction.followup.send(
                 f"❌ 통계 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
-
-    @app_commands.command(name="대나무숲설정", description="[관리자] 대나무숲 초기 설정을 진행합니다")
-    @app_commands.default_permissions(manage_guild=True) 
-    async def bamboo_setup(self, interaction: discord.Interaction):
-        """대나무숲 초기 설정 (관리자 전용)"""
-        
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-        
-        bamboo_channel = self.get_bamboo_channel(interaction.guild)
-        
-        if not bamboo_channel:
-            # 채널이 없으면 생성 옵션 제공
-            embed = discord.Embed(
-                title="🎋 대나무숲 채널 설정",
-                description="`#대나무숲` 채널이 존재하지 않습니다.\n새로 생성하시겠습니까?",
-                color=0xff9500
-            )
-            
-            view = ChannelCreateView()
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        else:
-            # 채널이 있으면 설정 완료 안내
-            embed = discord.Embed(
-                title="✅ 대나무숲 설정 완료",
-                description="대나무숲 기능이 준비되었습니다!",
-                color=0x00ff88
-            )
-            
-            embed.add_field(
-                name="📢 대나무숲 채널",
-                value=f"<#{bamboo_channel.id}>",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🎯 사용 가능한 명령어",
-                value="• `/대나무숲 [메시지]` - 익명 메시지 작성\n"
-                      "• `/대나무숲조회 [링크]` - 작성자 조회 (관리자)\n" 
-                      "• `/대나무숲통계` - 사용 통계 (관리자)\n"
-                      "• `/대나무숲강제공개 [링크]` - 강제 공개 (관리자)",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="⚙️ 시스템 상태", 
-                value=f"**스케줄러**: {'🟢 실행 중' if self.bot.bamboo_scheduler.running else '🔴 중지됨'}",
-                inline=False
-            )
-            
-            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="대나무숲강제공개", description="[관리자] 시간 공개 메시지를 즉시 공개합니다")
     @app_commands.describe(메시지링크="즉시 공개할 메시지의 링크")
