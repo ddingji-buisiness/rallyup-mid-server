@@ -1,4 +1,3 @@
-# commands/position.py
 from typing import List
 import discord
 from discord.ext import commands
@@ -10,13 +9,14 @@ class PositionCommand(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
     
-    @app_commands.command(name="포지션", description="특정 내전 경기의 포지션 정보를 추가합니다")
+    @app_commands.command(name="내전포지션", description="특정 내전 경기의 포지션 정보를 추가합니다")
     @app_commands.describe(
         team_a_channel="A팀 음성채널명",
         team_a_positions="A팀 포지션 구성 (예: 탱딜딜힐힐)",
         team_b_channel="B팀 음성채널명",
         team_b_positions="B팀 포지션 구성 (예: 딜탱딜힐힐)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def position(
         self, 
         interaction: discord.Interaction,

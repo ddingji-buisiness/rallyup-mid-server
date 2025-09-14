@@ -72,6 +72,7 @@ class ClanScrimCommands(commands.Cog):
 
     @app_commands.command(name="클랜등록", description="[관리자] 새로운 클랜을 등록합니다")
     @app_commands.describe(클랜명="등록할 클랜의 이름")
+    @app_commands.default_permissions(manage_guild=True)
     async def register_clan(self, interaction: discord.Interaction, 클랜명: str):
         # 관리자 권한 확인
         if not self.is_admin(interaction.user.id):
@@ -131,6 +132,7 @@ class ClanScrimCommands(commands.Cog):
             )
 
     @app_commands.command(name="클랜목록", description="[관리자] 등록된 클랜 목록을 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def list_clans(self, interaction: discord.Interaction):
         # 관리자 권한 확인
         if not self.is_admin(interaction.user.id):
@@ -185,6 +187,7 @@ class ClanScrimCommands(commands.Cog):
         a음성채널="A클랜이 사용할 음성채널명",
         b음성채널="B클랜이 사용할 음성채널명"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def start_clan_scrim(
         self,
         interaction: discord.Interaction,
@@ -406,6 +409,7 @@ class ClanScrimCommands(commands.Cog):
         승리팀="승리한 팀의 음성채널명",
         맵이름="경기가 진행된 맵 이름"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def clan_match_result(
         self,
         interaction: discord.Interaction,
@@ -569,6 +573,7 @@ class ClanScrimCommands(commands.Cog):
         힐러1="첫 번째 힐러",
         힐러2="두 번째 힐러"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def clan_position(
         self,
         interaction: discord.Interaction,
@@ -700,6 +705,7 @@ class ClanScrimCommands(commands.Cog):
         힐러1영웅="첫 번째 힐러가 사용한 영웅",
         힐러2영웅="두 번째 힐러가 사용한 영웅"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def clan_composition(
         self,
         interaction: discord.Interaction,
@@ -827,6 +833,7 @@ class ClanScrimCommands(commands.Cog):
             )
 
     @app_commands.command(name="클랜전종료", description="[관리자] 현재 진행 중인 클랜전 스크림을 종료합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def end_clan_scrim(self, interaction: discord.Interaction):
         # 관리자 권한 확인
         if not self.is_admin(interaction.user.id):
@@ -924,6 +931,7 @@ class ClanScrimCommands(commands.Cog):
             )
 
     @app_commands.command(name="클랜전현황", description="[관리자] 현재 클랜전 스크림 상태를 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def clan_scrim_status(self, interaction: discord.Interaction):
         # 관리자 권한 확인
         if not self.is_admin(interaction.user.id):

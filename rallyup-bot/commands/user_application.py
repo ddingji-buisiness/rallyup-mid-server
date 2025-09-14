@@ -151,6 +151,32 @@ class UserApplicationCommands(commands.Cog):
                 embed.set_footer(text="RallyUp Bot | 유저 신청 시스템")
                 
                 await interaction.followup.send(embed=embed, ephemeral=True)
+
+                try:
+                    application_data = {
+                        'entry_method': 유입경로,
+                        'battle_tag': 배틀태그,
+                        'main_position': 메인포지션,
+                        'previous_season_tier': 전시즌티어,
+                        'current_season_tier': 현시즌티어,
+                        'highest_tier': 최고티어
+                    }
+                    
+                    success_count, fail_count = await self.send_admin_notification_dm(
+                        interaction.guild, 
+                        interaction.user, 
+                        application_data
+                    )
+                    
+                    # 관리자 알림 결과를 로그로만 기록 (사용자에게는 표시하지 않음)
+                    if success_count > 0:
+                        print(f"✅ {success_count}명의 관리자에게 신청 알림이 전송되었습니다.")
+                    if fail_count > 0:
+                        print(f"⚠️ {fail_count}명의 관리자에게 DM 전송에 실패했습니다.")
+                        
+                except Exception as dm_error:
+                    # DM 전송 실패해도 신청 자체는 성공으로 처리
+                    print(f"❌ 관리자 DM 알림 시스템 오류: {dm_error}")
             else:
                 await interaction.followup.send(
                     "❌ 신청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
@@ -164,6 +190,7 @@ class UserApplicationCommands(commands.Cog):
             )
 
     @app_commands.command(name="신청현황", description="[관리자] 대기 중인 유저 신청을 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def check_applications(self, interaction: discord.Interaction):
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
@@ -247,6 +274,7 @@ class UserApplicationCommands(commands.Cog):
         유저명="승인할 유저명 (자동완성)",
         메모="관리자 메모 (선택사항)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def approve_application(
         self,
         interaction: discord.Interaction,
@@ -422,6 +450,7 @@ class UserApplicationCommands(commands.Cog):
         유저명="거절할 유저명 (자동완성)",
         사유="거절 사유 (선택사항)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def reject_application(
         self,
         interaction: discord.Interaction,
@@ -526,6 +555,7 @@ class UserApplicationCommands(commands.Cog):
         유저명="삭제할 등록된 유저명 (자동완성)",
         사유="삭제 사유 (선택사항)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def delete_user(
         self,
         interaction: discord.Interaction,
@@ -693,12 +723,12 @@ class UserApplicationCommands(commands.Cog):
         interaction: discord.Interaction,
         current: str
     ) -> List[app_commands.Choice[str]]:
-        """등록된 유저들만 자동완성으로 표시"""
+        """등록된 유저들만 자동완성으로 표시 (서버 존재 여부 무관)"""
         try:
             guild_id = str(interaction.guild_id)
             
             # 등록된 유저 목록 가져오기
-            registered_users = await self.bot.db_manager.get_registered_users_list(guild_id, 50)
+            registered_users = await self.bot.db_manager.get_registered_users_list(guild_id, 100)
             
             matching_users = []
             
@@ -709,30 +739,40 @@ class UserApplicationCommands(commands.Cog):
                 position = user_data.get('main_position', '')
                 tier = user_data.get('current_season_tier', '')
                 
-                # 검색어와 매칭되는지 확인
+                # 검색어 매칭 확인
                 if (current.lower() in username.lower() or 
                     current.lower() in battle_tag.lower()):
                     
-                    # Discord 멤버 객체 찾기 (추가 정보 표시용)
+                    # Discord 멤버 객체 찾기 (상태 표시용)
                     guild_member = interaction.guild.get_member(int(user_id))
+                    
+                    # 🔧 수정: 서버 존재 여부와 관계없이 모든 등록된 유저 표시
                     if guild_member:
-                        display_name = f"{username} ({battle_tag}/{position}/{tier})"
-                        
-                        matching_users.append(
-                            app_commands.Choice(
-                                name=display_name[:100],  # Discord 제한
-                                value=username
-                            )
+                        # 서버에 있는 멤버
+                        display_name = f"✅ {username} ({battle_tag}/{position}/{tier})"
+                    else:
+                        # 서버를 떠났지만 DB에는 등록되어 있는 멤버
+                        display_name = f"👻 {username} ({battle_tag}/{position}/{tier}) - 서버 없음"
+                    
+                    matching_users.append(
+                        app_commands.Choice(
+                            name=display_name[:100],  # Discord 제한
+                            value=username
                         )
+                    )
             
-            return matching_users[:25]  # Discord 제한
+            # Discord 자동완성 한도는 25개
+            return matching_users[:25]
             
         except Exception as e:
             print(f"[DEBUG] 유저삭제 자동완성 오류: {e}")
+            import traceback
+            print(f"[DEBUG] 스택트레이스: {traceback.format_exc()}")
             return []
 
     @app_commands.command(name="등록유저목록", description="[관리자] 등록된 유저 목록을 확인합니다")
     @app_commands.describe(검색어="유저명, 배틀태그, 또는 유입경로로 검색 (선택사항)")
+    @app_commands.default_permissions(manage_guild=True)
     async def list_registered_users(self, interaction: discord.Interaction, 검색어: str = None):
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
@@ -842,6 +882,94 @@ class UserApplicationCommands(commands.Cog):
                 f"❌ 등록 유저 목록 조회 중 오류가 발생했습니다: {str(e)}",
                 ephemeral=True
             )
+
+    async def send_admin_notification_dm(self, guild: discord.Guild, applicant: discord.Member, application_data: dict):
+        """모든 관리자에게 신규 신청 알림 DM 발송"""
+        try:
+            guild_id = str(guild.id)
+            guild_owner_id = str(guild.owner_id)
+            
+            # 모든 관리자 ID 조회
+            admin_ids = await self.bot.db_manager.get_all_server_admins_for_notification(
+                guild_id, guild_owner_id
+            )
+            
+            # DM 임베드 생성
+            embed = discord.Embed(
+                title="🔔 새로운 유저 신청 알림",
+                description=f"**{guild.name}** 서버에 새로운 가입 신청이 접수되었습니다!",
+                color=0x00ff88,
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="👤 신청자 정보",
+                value=f"**이름**: {applicant.display_name} ({applicant.name})\n"
+                    f"**ID**: <@{applicant.id}>\n"
+                    f"**가입일**: <t:{int(applicant.joined_at.timestamp())}:R>",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="📋 신청 내용",
+                value=f"**유입경로**: {application_data['entry_method']}\n"
+                    f"**배틀태그**: {application_data['battle_tag']}\n"
+                    f"**메인 포지션**: {application_data['main_position']}\n"
+                    f"**전시즌 티어**: {application_data['previous_season_tier']}\n"
+                    f"**현시즌 티어**: {application_data['current_season_tier']}\n"
+                    f"**최고 티어**: {application_data['highest_tier']}",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="⚡ 빠른 액션",
+                value=f"**승인**: `/신청승인 {applicant.display_name}`\n"
+                    f"**거절**: `/신청거절 {applicant.display_name} [사유]`\n"
+                    f"**목록 확인**: `/신청현황`",
+                inline=False
+            )
+            
+            embed.set_thumbnail(url=applicant.display_avatar.url)
+            embed.set_footer(
+                text=f"서버: {guild.name} | RallyUp 관리자 알림",
+                icon_url=guild.icon.url if guild.icon else None
+            )
+            
+            # 각 관리자에게 DM 발송
+            success_count = 0
+            fail_count = 0
+            
+            for admin_id in admin_ids:
+                try:
+                    admin_user = self.bot.get_user(int(admin_id))
+                    if not admin_user:
+                        # 캐시에 없으면 API로 가져오기
+                        admin_user = await self.bot.fetch_user(int(admin_id))
+                    
+                    if admin_user:
+                        await admin_user.send(embed=embed)
+                        success_count += 1
+                        print(f"✅ 관리자 DM 전송 성공: {admin_user.name} (ID: {admin_id})")
+                    
+                except discord.Forbidden:
+                    # DM 차단된 경우
+                    fail_count += 1
+                    print(f"❌ DM 차단됨: 관리자 ID {admin_id}")
+                except discord.NotFound:
+                    # 사용자를 찾을 수 없는 경우
+                    fail_count += 1
+                    print(f"❌ 사용자 없음: 관리자 ID {admin_id}")
+                except Exception as e:
+                    # 기타 오류
+                    fail_count += 1
+                    print(f"❌ DM 전송 실패: 관리자 ID {admin_id}, 오류: {e}")
+            
+            print(f"📊 관리자 DM 알림 결과: 성공 {success_count}명, 실패 {fail_count}명")
+            return success_count, fail_count
+            
+        except Exception as e:
+            print(f"❌ 관리자 DM 알림 전체 실패: {e}")
+            return 0, len(admin_ids) if 'admin_ids' in locals() else 1
 
 async def setup(bot):
     await bot.add_cog(UserApplicationCommands(bot))

@@ -34,6 +34,7 @@ class DevCommands(commands.Cog):
         return result
 
     @app_commands.command(name="dev-등록", description="[개발용] 현재 사용자를 개발자로 등록합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_register(self, interaction):
         # 기존 개발자만 새로운 개발자 등록 가능
         if not self.is_developer(interaction.user.id):
@@ -53,6 +54,7 @@ class DevCommands(commands.Cog):
 
     @app_commands.command(name="dev-추가", description="[개발용] 새로운 개발자를 추가합니다")
     @app_commands.describe(사용자="추가할 사용자")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_add_user(self, interaction, 사용자: discord.Member):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -86,6 +88,7 @@ class DevCommands(commands.Cog):
         participant_count="참가자 수 (기본: 10명)",
         session_name="세션 이름 (선택사항)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_start_scrim(
         self, 
         interaction,
@@ -214,6 +217,7 @@ class DevCommands(commands.Cog):
             )
 
     @app_commands.command(name="dev-세션현황", description="[개발용] 현재 테스트 세션 상태를 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_session_status(self, interaction):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -312,6 +316,7 @@ class DevCommands(commands.Cog):
             await interaction.followup.send(f"❌ 세션 현황 조회 중 오류: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="dev-내전종료", description="[개발용] 현재 테스트 세션을 종료합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_end_scrim(self, interaction):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -392,6 +397,7 @@ class DevCommands(commands.Cog):
     @app_commands.describe(
         winning_team="승리팀 (1 또는 2, 기본값: 랜덤)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_match_result(
         self, 
         interaction,
@@ -524,6 +530,7 @@ class DevCommands(commands.Cog):
         team_a_positions="A팀 포지션 (예: 탱딜딜힐힐)",
         team_b_positions="B팀 포지션 (예: 딜탱딜힐힐)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_position(self, interaction, team_a_positions: str, team_b_positions: str):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -616,6 +623,7 @@ class DevCommands(commands.Cog):
             )
 
     @app_commands.command(name="dev-확인", description="[개발용] 데이터베이스 상태 확인")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_check(self, interaction):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -714,6 +722,7 @@ class DevCommands(commands.Cog):
             await interaction.followup.send(f"❌ 확인 중 오류: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="dev-정리", description="[개발용] 가상 데이터 정리")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_cleanup(self, interaction):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(
@@ -775,6 +784,7 @@ class DevCommands(commands.Cog):
             )
 
     @app_commands.command(name="dev-ping", description="[개발용] 봇 응답 테스트")
+    @app_commands.default_permissions(manage_guild=True)
     async def dev_ping(self, interaction):
         if not self.is_developer(interaction.user.id):
             await interaction.response.send_message(

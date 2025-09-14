@@ -15,6 +15,7 @@ class MatchResultCommand(commands.Cog):
         team_b="B팀 음성채널명", 
         winner="승리한 팀의 음성채널명"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def match_result(
         self, 
         interaction: discord.Interaction,

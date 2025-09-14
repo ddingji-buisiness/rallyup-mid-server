@@ -15,6 +15,7 @@ class ScrimSessionCommands(commands.Cog):
         음성채널="내전 참여자들이 모인 음성채널명",
         세션명="내전 세션 이름 (선택사항)"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def start_scrim(
         self, 
         interaction: discord.Interaction,
@@ -123,7 +124,8 @@ class ScrimSessionCommands(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ 세션 시작 중 오류: {str(e)}", ephemeral=True)
 
-    @app_commands.command(name="세션현황", description="현재 진행 중인 내전 세션 상태를 확인합니다")
+    @app_commands.command(name="내전세션현황", description="현재 진행 중인 내전 세션 상태를 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def session_status(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
@@ -212,6 +214,7 @@ class ScrimSessionCommands(commands.Cog):
             await interaction.followup.send(f"❌ 세션 현황 조회 중 오류: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="내전종료", description="현재 진행 중인 내전 세션을 종료합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def end_scrim(self, interaction: discord.Interaction):
         await interaction.response.defer()
         

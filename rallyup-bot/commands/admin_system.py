@@ -22,6 +22,7 @@ class AdminSystemCommands(commands.Cog):
 
     @app_commands.command(name="관리자추가", description="[관리자] 새로운 관리자를 추가합니다")
     @app_commands.describe(유저="관리자로 추가할 유저")
+    @app_commands.default_permissions(manage_guild=True)
     async def add_admin(self, interaction: discord.Interaction, 유저: discord.Member):
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
@@ -125,6 +126,7 @@ class AdminSystemCommands(commands.Cog):
 
     @app_commands.command(name="관리자제거", description="[관리자] 관리자 권한을 제거합니다")
     @app_commands.describe(유저="관리자 권한을 제거할 유저")
+    @app_commands.default_permissions(manage_guild=True)
     async def remove_admin(self, interaction: discord.Interaction, 유저: discord.Member):
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
@@ -295,6 +297,7 @@ class AdminSystemCommands(commands.Cog):
         구성원역할="승인된 구성원에게 부여되는 역할",
         자동변경="승인 시 자동으로 역할을 변경할지 여부"
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def setup_roles(
         self, 
         interaction: discord.Interaction,
@@ -387,6 +390,7 @@ class AdminSystemCommands(commands.Cog):
             await interaction.followup.send(f"❌ 설정 저장 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="설정확인", description="[관리자] 현재 서버 설정을 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
     async def check_settings(self, interaction: discord.Interaction):
         if not await self.is_admin(interaction):
             await interaction.response.send_message("❌ 관리자만 사용 가능합니다.", ephemeral=True)
@@ -475,6 +479,7 @@ class AdminSystemCommands(commands.Cog):
 
     @app_commands.command(name="역할테스트", description="[관리자] 역할 변경 기능을 테스트합니다")
     @app_commands.describe(대상유저="테스트할 유저 (본인 권장)")
+    @app_commands.default_permissions(manage_guild=True)
     async def test_role_change(self, interaction: discord.Interaction, 대상유저: discord.Member):
         if not await self.is_admin(interaction):
             await interaction.response.send_message("❌ 관리자만 사용 가능합니다.", ephemeral=True)
@@ -512,6 +517,304 @@ class AdminSystemCommands(commands.Cog):
             
         except Exception as e:
             await interaction.followup.send(f"❌ 테스트 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
+
+    @app_commands.command(name="신규역할설정", description="[관리자] 신규 입장자에게 자동으로 배정할 역할을 설정합니다")
+    @app_commands.describe(
+        역할="신규 입장자에게 자동 배정할 역할",
+        활성화="자동 배정 기능을 활성화할지 선택 (기본값: True)"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_new_member_role(
+        self, 
+        interaction: discord.Interaction, 
+        역할: discord.Role,
+        활성화: bool = True
+    ):
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            role_id = str(역할.id)
+            
+            # 봇의 역할보다 높은 역할인지 확인
+            bot_member = interaction.guild.get_member(self.bot.user.id)
+            if bot_member and 역할.position >= bot_member.top_role.position:
+                await interaction.followup.send(
+                    f"❌ **{역할.name}** 역할은 봇의 최고 역할보다 높거나 같습니다.\n"
+                    f"봇이 이 역할을 배정할 수 없습니다. 서버 설정에서 봇의 역할을 더 높이거나, 더 낮은 역할을 선택해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # @everyone 역할은 배정할 수 없음
+            if 역할.id == interaction.guild.id:
+                await interaction.followup.send(
+                    "❌ @everyone 역할은 신규 입장자 역할로 설정할 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 봇 역할인지 확인
+            if 역할.managed:
+                await interaction.followup.send(
+                    f"❌ **{역할.name}**은 봇 전용 역할이므로 설정할 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 데이터베이스에 설정 저장
+            success = await self.bot.db_manager.set_new_member_auto_role(
+                guild_id, role_id, 활성화
+            )
+            
+            if success:
+                status = "✅ 활성화됨" if 활성화 else "⏸️ 비활성화됨"
+                
+                embed = discord.Embed(
+                    title="🎯 신규 입장자 자동 역할 설정 완료",
+                    description=f"새로운 멤버가 서버에 입장하면 자동으로 역할이 배정됩니다!",
+                    color=0x00ff88 if 활성화 else 0xffa500,
+                    timestamp=datetime.now()
+                )
+                
+                embed.add_field(
+                    name="🎭 설정된 역할",
+                    value=f"**{역할.name}** ({역할.mention})\n"
+                        f"└ 색상: {str(역할.color)}\n"
+                        f"└ 위치: {역할.position}번째",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="⚙️ 상태",
+                    value=f"{status}\n"
+                        f"└ 설정자: {interaction.user.display_name}",
+                    inline=True
+                )
+                
+                if 활성화:
+                    embed.add_field(
+                        name="📋 작동 방식",
+                        value="• 새로운 멤버가 서버 입장\n"
+                            "• 봇이 자동으로 역할 배정\n" 
+                            "• 배정 실패시 로그 기록",
+                        inline=True
+                    )
+                else:
+                    embed.add_field(
+                        name="⚠️ 알림",
+                        value="현재 비활성화 상태입니다.\n"
+                            "자동 배정이 작동하지 않습니다.",
+                        inline=True
+                    )
+                
+                embed.set_footer(
+                    text=f"설정 변경: `/신규역할설정` | 현황 확인: `/신규역할현황`"
+                )
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+            else:
+                await interaction.followup.send(
+                    "❌ 역할 설정 중 오류가 발생했습니다. 다시 시도해주세요.",
+                    ephemeral=True
+                )
+                
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 명령어 실행 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    @app_commands.command(name="신규역할현황", description="[관리자] 현재 신규 입장자 자동 역할 설정을 확인합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def check_new_member_role_status(self, interaction: discord.Interaction):
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            settings = await self.bot.db_manager.get_new_member_auto_role_settings(guild_id)
+            
+            embed = discord.Embed(
+                title="📊 신규 입장자 자동 역할 현황",
+                description="현재 서버의 신규 멤버 자동 역할 배정 설정을 확인하세요",
+                color=0x0099ff,
+                timestamp=datetime.now()
+            )
+            
+            if settings['role_id'] and settings['enabled']:
+                # 역할 정보 가져오기
+                role = interaction.guild.get_role(int(settings['role_id']))
+                
+                if role:
+                    embed.color = 0x00ff88
+                    embed.add_field(
+                        name="✅ 현재 상태",
+                        value="**활성화됨** - 자동 배정 작동 중",
+                        inline=False
+                    )
+                    
+                    embed.add_field(
+                        name="🎭 설정된 역할",
+                        value=f"**{role.name}** ({role.mention})\n"
+                            f"└ 색상: {str(role.color)}\n"
+                            f"└ 위치: {role.position}번째\n"
+                            f"└ 멤버 수: {len(role.members)}명",
+                        inline=False
+                    )
+                    
+                    # 봇 권한 확인
+                    bot_member = interaction.guild.get_member(self.bot.user.id)
+                    if bot_member:
+                        if role.position >= bot_member.top_role.position:
+                            embed.add_field(
+                                name="⚠️ 권한 문제",
+                                value="봇의 역할이 설정된 역할보다 낮아서\n"
+                                    "자동 배정이 실패할 수 있습니다.",
+                                inline=True
+                            )
+                        else:
+                            embed.add_field(
+                                name="✅ 권한 상태",
+                                value="봇이 해당 역할을 배정할 수 있습니다.",
+                                inline=True
+                            )
+                    
+                else:
+                    embed.color = 0xff6b6b
+                    embed.add_field(
+                        name="❌ 오류 발생",
+                        value="설정된 역할을 찾을 수 없습니다.\n"
+                            "역할이 삭제되었을 가능성이 있습니다.",
+                        inline=False
+                    )
+                    
+            elif settings['role_id'] and not settings['enabled']:
+                role = interaction.guild.get_role(int(settings['role_id']))
+                role_name = role.name if role else "삭제된 역할"
+                
+                embed.color = 0xffa500
+                embed.add_field(
+                    name="⏸️ 현재 상태", 
+                    value="**비활성화됨** - 자동 배정 중단됨",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="🎭 설정된 역할",
+                    value=f"**{role_name}**\n"
+                        f"└ 상태: 비활성화",
+                    inline=False
+                )
+                
+            else:
+                embed.color = 0x888888
+                embed.add_field(
+                    name="❓ 현재 상태",
+                    value="**미설정** - 자동 역할 배정이 설정되지 않음",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="🔧 설정 방법",
+                    value="`/신규역할설정 [역할]` 명령어로\n"
+                        "신규 입장자 자동 역할을 설정하세요.",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"조회자: {interaction.user.display_name}")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 현황 조회 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    @app_commands.command(name="신규역할해제", description="[관리자] 신규 입장자 자동 역할 배정을 비활성화합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def disable_new_member_role(self, interaction: discord.Interaction):
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # 현재 설정 확인
+            settings = await self.bot.db_manager.get_new_member_auto_role_settings(guild_id)
+            
+            if not settings['enabled']:
+                await interaction.followup.send(
+                    "ℹ️ 신규 입장자 자동 역할 배정이 이미 비활성화되어 있습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 비활성화 실행
+            success = await self.bot.db_manager.disable_new_member_auto_role(guild_id)
+            
+            if success:
+                role_name = "알 수 없음"
+                if settings['role_id']:
+                    role = interaction.guild.get_role(int(settings['role_id']))
+                    if role:
+                        role_name = role.name
+                
+                embed = discord.Embed(
+                    title="⏸️ 신규 입장자 자동 역할 배정 비활성화",
+                    description="자동 역할 배정이 비활성화되었습니다.",
+                    color=0xffa500,
+                    timestamp=datetime.now()
+                )
+                
+                embed.add_field(
+                    name="📋 변경 사항",
+                    value=f"• 이전 상태: **활성화됨**\n"
+                        f"• 현재 상태: **비활성화됨**\n"
+                        f"• 설정된 역할: **{role_name}** (유지됨)",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="ℹ️ 안내",
+                    value="• 새로운 멤버에게 자동 역할 배정이 중단됩니다\n"
+                        f"• 재활성화: `/신규역할설정 [@역할] True`",
+                    inline=False
+                )
+                
+                embed.set_footer(text=f"비활성화한 관리자: {interaction.user.display_name}")
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+            else:
+                await interaction.followup.send(
+                    "❌ 비활성화 중 오류가 발생했습니다. 다시 시도해주세요.",
+                    ephemeral=True
+                )
+                
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 명령어 실행 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
 
 async def setup(bot):
     await bot.add_cog(AdminSystemCommands(bot))
