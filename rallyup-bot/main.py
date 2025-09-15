@@ -69,7 +69,9 @@ class RallyUpBot(commands.Bot):
             'commands.user_application',
             'commands.admin_system',
             'commands.bamboo_forest',
-            'commands.scrim_recruitment'
+            'commands.scrim_recruitment',
+            'commands.scrim_result_recording',
+            'commands.simple_user_management'
         ]
         
         for command_module in commands_to_load:

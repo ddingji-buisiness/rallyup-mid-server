@@ -238,6 +238,55 @@ class DatabaseManager:
                     UNIQUE(recruitment_id, user_id)
                 )
             ''')
+
+            # match_results 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS match_results (
+                    id TEXT PRIMARY KEY,
+                    recruitment_id TEXT NOT NULL,
+                    match_number INTEGER NOT NULL,
+                    team_a_score INTEGER DEFAULT 0,
+                    team_b_score INTEGER DEFAULT 0,
+                    winning_team TEXT NOT NULL CHECK (winning_team IN ('team_a', 'team_b')),
+                    match_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                    created_by TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id)
+                )
+            ''')
+            
+            # 경기 참가자 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS match_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    team TEXT NOT NULL CHECK (team IN ('team_a', 'team_b')),
+                    position TEXT NOT NULL CHECK (position IN ('탱커', '딜러', '힐러')),
+                    won BOOLEAN NOT NULL,
+                    FOREIGN KEY (match_id) REFERENCES match_results(id)
+                )
+            ''')
+            
+            # 사용자 통계 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_statistics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    total_games INTEGER DEFAULT 0,
+                    total_wins INTEGER DEFAULT 0,
+                    tank_games INTEGER DEFAULT 0,
+                    tank_wins INTEGER DEFAULT 0,
+                    dps_games INTEGER DEFAULT 0,
+                    dps_wins INTEGER DEFAULT 0,
+                    support_games INTEGER DEFAULT 0,
+                    support_wins INTEGER DEFAULT 0,
+                    last_updated TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, guild_id)
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -1446,6 +1495,19 @@ class DatabaseManager:
             async with db.execute('''
                 SELECT * FROM user_applications 
                 WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+
+    async def get_registered_user_info(self, guild_id: str, user_id: str) -> Optional[dict]:
+        """등록된 유저 정보 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT * FROM registered_users 
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
             ''', (guild_id, user_id)) as cursor:
                 row = await cursor.fetchone()
                 if row:
@@ -3160,3 +3222,466 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 대나무숲 채널 설정 제거 실패: {e}")
             return False
+
+    async def get_completed_recruitments(self, guild_id: str) -> List[Dict]:
+        """마감된 내전 모집 목록 조회 (참가자 수 포함)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        r.id,
+                        r.title,
+                        r.description,
+                        r.scrim_date,
+                        r.deadline,
+                        r.created_by,
+                        COUNT(p.user_id) as participant_count
+                    FROM scrim_recruitments r
+                    LEFT JOIN scrim_participants p ON r.id = p.recruitment_id 
+                        AND p.status = 'joined'
+                    WHERE r.guild_id = ? 
+                        AND r.status = 'closed'
+                        AND datetime(r.deadline) <= datetime('now', 'localtime')
+                    GROUP BY r.id
+                    ORDER BY r.scrim_date DESC
+                    LIMIT 10
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'id': row[0],
+                            'title': row[1],
+                            'description': row[2],
+                            'scrim_date': row[3],
+                            'deadline': row[4],
+                            'created_by': row[5],
+                            'participant_count': row[6]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"마감된 모집 조회 실패: {e}")
+            return []
+            
+    async def save_match_result(self, match_data: Dict) -> str:
+        """매치 결과를 데이터베이스에 저장"""
+        try:
+            match_id = str(uuid.uuid4())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 매치 기본 정보 저장
+                await db.execute('''
+                    INSERT INTO match_results (
+                        id, recruitment_id, match_number, winning_team, 
+                        created_by, guild_id, match_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    match_id,
+                    match_data['recruitment_id'],
+                    match_data['match_number'],
+                    match_data['winner'],
+                    match_data['created_by'],
+                    match_data['guild_id'],
+                    datetime.now().isoformat()
+                ))
+                
+                # 참가자별 세부 정보 저장
+                for team_key in ['team_a', 'team_b']:
+                    team_data = match_data[team_key]
+                    positions = match_data[f'{team_key}_positions']
+                    is_winning_team = (match_data['winner'] == team_key)
+                    
+                    for participant in team_data:
+                        user_id = participant['user_id']
+                        position = positions[user_id]
+                        
+                        await db.execute('''
+                            INSERT INTO match_participants (
+                                match_id, user_id, username, team, position, won
+                            ) VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            match_id,
+                            user_id,
+                            participant['username'],
+                            team_key,
+                            position,
+                            is_winning_team
+                        ))
+                
+                await db.commit()
+                return match_id
+                
+        except Exception as e:
+            print(f"매치 저장 실패: {e}")
+            raise
+
+    async def update_user_statistics(self, guild_id: str, match_results: List[Dict]):
+        """여러 매치 결과를 기반으로 사용자 통계 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                for match_data in match_results:
+                    for team_key in ['team_a', 'team_b']:
+                        team_data = match_data[team_key]
+                        positions = match_data[f'{team_key}_positions']
+                        is_winning_team = (match_data['winner'] == team_key)
+                        
+                        for participant in team_data:
+                            user_id = participant['user_id']
+                            position = positions[user_id]
+                            
+                            await self._update_single_user_stats(
+                                db, guild_id, user_id, position, is_winning_team
+                            )
+                
+                await db.commit()
+                
+        except Exception as e:
+            print(f"통계 업데이트 실패: {e}")
+            raise
+
+    async def _update_single_user_stats(self, db, guild_id: str, user_id: str, position: str, won: bool):
+        """개별 사용자 통계 업데이트"""
+        # 기존 통계 조회
+        async with db.execute('''
+            SELECT total_games, total_wins, tank_games, tank_wins, 
+                dps_games, dps_wins, support_games, support_wins
+            FROM user_statistics
+            WHERE user_id = ? AND guild_id = ?
+        ''', (user_id, guild_id)) as cursor:
+            existing = await cursor.fetchone()
+        
+        if existing:
+            # 기존 데이터 업데이트
+            total_games, total_wins, tank_games, tank_wins = existing[:4]
+            dps_games, dps_wins, support_games, support_wins = existing[4:]
+            
+            # 전체 통계 업데이트
+            total_games += 1
+            if won:
+                total_wins += 1
+            
+            # 포지션별 통계 업데이트
+            if position == '탱커':
+                tank_games += 1
+                if won:
+                    tank_wins += 1
+            elif position == '딜러':
+                dps_games += 1
+                if won:
+                    dps_wins += 1
+            elif position == '힐러':
+                support_games += 1
+                if won:
+                    support_wins += 1
+            
+            await db.execute('''
+                UPDATE user_statistics SET
+                    total_games = ?, total_wins = ?,
+                    tank_games = ?, tank_wins = ?,
+                    dps_games = ?, dps_wins = ?,
+                    support_games = ?, support_wins = ?,
+                    last_updated = ?
+                WHERE user_id = ? AND guild_id = ?
+            ''', (
+                total_games, total_wins, tank_games, tank_wins,
+                dps_games, dps_wins, support_games, support_wins,
+                datetime.now().isoformat(), user_id, guild_id
+            ))
+        else:
+            # 새 데이터 생성
+            stats = {
+                'total_games': 1, 'total_wins': 1 if won else 0,
+                'tank_games': 0, 'tank_wins': 0,
+                'dps_games': 0, 'dps_wins': 0,
+                'support_games': 0, 'support_wins': 0
+            }
+            
+            if position == '탱커':
+                stats['tank_games'] = 1
+                stats['tank_wins'] = 1 if won else 0
+            elif position == '딜러':
+                stats['dps_games'] = 1
+                stats['dps_wins'] = 1 if won else 0
+            elif position == '힐러':
+                stats['support_games'] = 1
+                stats['support_wins'] = 1 if won else 0
+            
+            await db.execute('''
+                INSERT INTO user_statistics (
+                    user_id, guild_id, total_games, total_wins,
+                    tank_games, tank_wins, dps_games, dps_wins,
+                    support_games, support_wins, last_updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user_id, guild_id, stats['total_games'], stats['total_wins'],
+                stats['tank_games'], stats['tank_wins'], stats['dps_games'], stats['dps_wins'],
+                stats['support_games'], stats['support_wins'], datetime.now().isoformat()
+            ))
+
+    async def get_detailed_user_stats(self, user_id: str, guild_id: str = None) -> Dict:
+        """사용자의 상세 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                query = '''
+                    SELECT total_games, total_wins, tank_games, tank_wins,
+                        dps_games, dps_wins, support_games, support_wins
+                    FROM user_statistics
+                    WHERE user_id = ?
+                '''
+                params = [user_id]
+                
+                if guild_id:
+                    query += ' AND guild_id = ?'
+                    params.append(guild_id)
+                
+                async with db.execute(query, params) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if not result:
+                        return None
+                    
+                    total_games, total_wins, tank_games, tank_wins = result[:4]
+                    dps_games, dps_wins, support_games, support_wins = result[4:]
+                    
+                    return {
+                        'total_games': total_games,
+                        'wins': total_wins,
+                        'losses': total_games - total_wins,
+                        'tank_games': tank_games,
+                        'tank_wins': tank_wins,
+                        'tank_winrate': (tank_wins / tank_games * 100) if tank_games > 0 else 0,
+                        'dps_games': dps_games,
+                        'dps_wins': dps_wins,
+                        'dps_winrate': (dps_wins / dps_games * 100) if dps_games > 0 else 0,
+                        'support_games': support_games,
+                        'support_wins': support_wins,
+                        'support_winrate': (support_wins / support_games * 100) if support_games > 0 else 0,
+                        'overall_winrate': (total_wins / total_games * 100) if total_games > 0 else 0
+                    }
+                    
+        except Exception as e:
+            print(f"사용자 통계 조회 실패: {e}")
+            return None
+
+    async def get_recent_matches(self, user_id: str, guild_id: str, limit: int = 5) -> List[Dict]:
+        """사용자의 최근 경기 기록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT mr.match_date, mp.position, mp.won, mr.match_number,
+                        sr.title as scrim_title
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    JOIN scrim_recruitments sr ON mr.recruitment_id = sr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ?
+                    ORDER BY mr.match_date DESC
+                    LIMIT ?
+                ''', (user_id, guild_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'match_date': row[0],
+                            'position': row[1],
+                            'won': bool(row[2]),
+                            'match_number': row[3],
+                            'scrim_title': row[4]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"최근 경기 조회 실패: {e}")
+            return []
+
+    async def get_server_rankings(self, guild_id: str, sort_by: str = 'winrate', 
+                                position: str = 'all', min_games: int = 5) -> List[Dict]:
+        """서버 내 사용자 랭킹 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 정렬 기준에 따른 쿼리 구성
+                if sort_by == 'winrate':
+                    order_clause = 'ORDER BY winrate DESC, total_games DESC'
+                elif sort_by == 'games':
+                    order_clause = 'ORDER BY total_games DESC'
+                elif sort_by == 'wins':
+                    order_clause = 'ORDER BY total_wins DESC'
+                else:
+                    order_clause = 'ORDER BY winrate DESC'
+                
+                # 포지션별 필터링
+                if position != 'all':
+                    position_filter = {
+                        'tank': 'AND tank_games >= ?',
+                        'dps': 'AND dps_games >= ?', 
+                        'support': 'AND support_games >= ?'
+                    }.get(position, '')
+                else:
+                    position_filter = ''
+                
+                query = f'''
+                    SELECT us.user_id, ua.username, us.total_games, us.total_wins,
+                        CASE WHEN us.total_games > 0 
+                                THEN ROUND(us.total_wins * 100.0 / us.total_games, 1)
+                                ELSE 0 END as winrate,
+                        ua.current_season_tier
+                    FROM user_statistics us
+                    JOIN user_applications ua ON us.user_id = ua.user_id
+                    WHERE us.guild_id = ? AND us.total_games >= ?
+                    {position_filter}
+                    {order_clause}
+                    LIMIT 50
+                '''
+                
+                params = [guild_id, min_games]
+                if position != 'all':
+                    params.append(min_games)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1],
+                            'total_games': row[2],
+                            'wins': row[3],
+                            'winrate': row[4],
+                            'tier': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"랭킹 조회 실패: {e}")
+            return []
+
+    async def get_user_server_rank(self, user_id: str, guild_id: str) -> Dict:
+        """특정 사용자의 서버 내 순위 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 전체 랭킹에서 해당 사용자 순위 찾기
+                async with db.execute('''
+                    WITH ranked_users AS (
+                        SELECT user_id,
+                            ROW_NUMBER() OVER (
+                                ORDER BY 
+                                    CASE WHEN total_games > 0 
+                                            THEN total_wins * 100.0 / total_games 
+                                            ELSE 0 END DESC,
+                                    total_games DESC
+                            ) as rank
+                        FROM user_statistics
+                        WHERE guild_id = ? AND total_games >= 5
+                    ),
+                    user_stats AS (
+                        SELECT COUNT(*) as total_users
+                        FROM user_statistics
+                        WHERE guild_id = ? AND total_games >= 5
+                    )
+                    SELECT ru.rank, us.total_users
+                    FROM ranked_users ru, user_stats us
+                    WHERE ru.user_id = ?
+                ''', (guild_id, guild_id, user_id)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result:
+                        rank, total_users = result
+                        percentile = (rank / total_users) * 100
+                        
+                        return {
+                            'rank': rank,
+                            'total_users': total_users,
+                            'percentile': round(percentile, 1)
+                        }
+                    
+                    return None
+                    
+        except Exception as e:
+            print(f"개인 랭킹 조회 실패: {e}")
+            return None
+
+    async def get_head_to_head(self, user1_id: str, user2_id: str, guild_id: str) -> Dict:
+        """두 사용자 간 대전 기록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        SUM(CASE WHEN mp1.won = 1 THEN 1 ELSE 0 END) as user1_wins,
+                        SUM(CASE WHEN mp2.won = 1 THEN 1 ELSE 0 END) as user2_wins,
+                        COUNT(*) as total_matches
+                    FROM match_participants mp1
+                    JOIN match_participants mp2 ON mp1.match_id = mp2.match_id
+                    JOIN match_results mr ON mp1.match_id = mr.id
+                    WHERE mp1.user_id = ? AND mp2.user_id = ? 
+                        AND mp1.user_id != mp2.user_id
+                        AND mr.guild_id = ?
+                ''', (user1_id, user2_id, guild_id)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result and result[2] > 0:
+                        return {
+                            'wins': result[0] or 0,
+                            'losses': result[1] or 0,
+                            'total_matches': result[2]
+                        }
+                    
+                    return None
+                    
+        except Exception as e:
+            print(f"Head-to-Head 조회 실패: {e}")
+            return None
+
+    async def finalize_session_statistics(self, guild_id: str, completed_matches: List[Dict]):
+        """세션 완료 후 모든 통계 일괄 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 트랜잭션으로 일괄 처리
+                await db.execute('BEGIN TRANSACTION')
+                
+                try:
+                    for match_data in completed_matches:
+                        # 매치 저장
+                        match_id = await self.save_match_result(match_data)
+                        
+                        # 개별 통계 업데이트
+                        for team_key in ['team_a', 'team_b']:
+                            team_data = match_data[team_key]
+                            positions = match_data[f'{team_key}_positions']
+                            is_winning_team = (match_data['winner'] == team_key)
+                            
+                            for participant in team_data:
+                                user_id = participant['user_id']
+                                position = positions[user_id]
+                                
+                                await self._update_single_user_stats(
+                                    db, guild_id, user_id, position, is_winning_team
+                                )
+                    
+                    await db.execute('COMMIT')
+                    return True
+                    
+                except Exception as e:
+                    await db.execute('ROLLBACK')
+                    raise e
+                    
+        except Exception as e:
+            print(f"세션 통계 완료 실패: {e}")
+            return False
+
+    async def get_max_match_number(self, recruitment_id: str) -> Optional[int]:
+        """특정 모집의 최대 경기번호 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT MAX(match_number) FROM match_results 
+                    WHERE recruitment_id = ?
+                ''', (recruitment_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    return result[0] if result[0] is not None else None
+                    
+        except Exception as e:
+            print(f"최대 경기번호 조회 실패: {e}")
+            return None
