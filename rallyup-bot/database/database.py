@@ -3528,7 +3528,7 @@ class DatabaseManager:
                                 ELSE 0 END as winrate,
                         ua.current_season_tier
                     FROM user_statistics us
-                    JOIN user_applications ua ON us.user_id = ua.user_id
+                    JOIN user_applications ua ON us.user_id = ua.user_id AND ua.guild_id = us.guild_id
                     WHERE us.guild_id = ? AND us.total_games >= ?
                     {position_filter}
                     {order_clause}
