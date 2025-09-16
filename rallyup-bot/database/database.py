@@ -26,7 +26,6 @@ class DatabaseManager:
             await self.initialize_server_settings_tables()
             await self.update_server_settings_for_auto_role()
             await self.create_bamboo_tables()
-            await self.update_scrim_participants_status_constraint()
 
             # users 테이블
             await db.execute('''
@@ -3686,47 +3685,3 @@ class DatabaseManager:
         except Exception as e:
             print(f"최대 경기번호 조회 실패: {e}")
             return None
-
-    async def update_scrim_participants_status_constraint(self):
-        """scrim_participants 테이블의 status 제약조건을 업데이트하여 late_join 허용"""
-        try:
-            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
-                await db.execute('PRAGMA journal_mode=WAL')
-                
-                # 1. 기존 데이터 백업용 임시 테이블 생성
-                await db.execute('''
-                    CREATE TABLE IF NOT EXISTS scrim_participants_temp (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        recruitment_id TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        username TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
-                        joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
-                        UNIQUE(recruitment_id, user_id)
-                    )
-                ''')
-                
-                # 2. 기존 데이터를 임시 테이블로 복사
-                await db.execute('''
-                    INSERT INTO scrim_participants_temp 
-                    (id, recruitment_id, user_id, username, status, joined_at, updated_at)
-                    SELECT id, recruitment_id, user_id, username, status, joined_at, updated_at
-                    FROM scrim_participants
-                ''')
-                
-                # 3. 기존 테이블 삭제
-                await db.execute('DROP TABLE scrim_participants')
-                
-                # 4. 임시 테이블을 원래 이름으로 변경
-                await db.execute('ALTER TABLE scrim_participants_temp RENAME TO scrim_participants')
-                
-                await db.commit()
-                print("✅ scrim_participants 테이블 업데이트 완료 - late_join 상태 지원")
-                
-                return True
-                
-        except Exception as e:
-            print(f"❌ scrim_participants 테이블 업데이트 실패: {e}")
-            return False
