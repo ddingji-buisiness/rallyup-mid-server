@@ -3266,17 +3266,21 @@ class DatabaseManager:
             return []
             
     async def save_match_result(self, match_data: Dict) -> str:
-        """매치 결과를 데이터베이스에 저장"""
+        """매치 결과를 데이터베이스에 저장 (맵 정보 포함)"""
         try:
             match_id = str(uuid.uuid4())
             
             async with aiosqlite.connect(self.db_path) as db:
-                # 매치 기본 정보 저장
+                # 🆕 맵 정보 추출
+                map_name = match_data.get('map_name')
+                map_type = match_data.get('map_type')
+                
+                # 매치 기본 정보 저장 (맵 정보 포함)
                 await db.execute('''
                     INSERT INTO match_results (
                         id, recruitment_id, match_number, winning_team, 
-                        created_by, guild_id, match_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        created_by, guild_id, match_date, map_name, map_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     match_id,
                     match_data['recruitment_id'],
@@ -3284,7 +3288,9 @@ class DatabaseManager:
                     match_data['winner'],
                     match_data['created_by'],
                     match_data['guild_id'],
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    map_name,
+                    map_type
                 ))
                 
                 # 참가자별 세부 정보 저장
@@ -3295,7 +3301,7 @@ class DatabaseManager:
                     
                     for participant in team_data:
                         user_id = participant['user_id']
-                        position = positions[user_id]
+                        position = positions.get(user_id, '미설정')  # 포지션 정보가 없을 경우 기본값
                         
                         await db.execute('''
                             INSERT INTO match_participants (
@@ -3314,7 +3320,7 @@ class DatabaseManager:
                 return match_id
                 
         except Exception as e:
-            print(f"매치 저장 실패: {e}")
+            print(f"❌ 매치 저장 실패: {e}")
             raise
 
     async def update_user_statistics(self, guild_id: str, match_results: List[Dict]):

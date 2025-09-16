@@ -1,10 +1,260 @@
-# scrim_result_recording.py
 import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
 import uuid
+
+OVERWATCH_MAPS = {
+    "호위": [
+        "66번국도", "지브롤터", "도라도", "리알토", "샴발리수도원", 
+        "서킷로얄", "쓰레기촌", "하바나"
+    ],
+    "밀기": [
+        "뉴 퀸 스트리트", "이스페란사", "콜로세오", "루나사피"
+    ],
+    "혼합": [
+        "눔바니", "미드타운", "블리자드 월드", "아이헨발데", 
+        "왕의 길", "파라이수", "할리우드"
+    ],
+    "쟁탈": [
+        "일리오스", "리장타워", "네팔", "오아시스", 
+        "부산", "남극반도", "사모아"
+    ],
+    "플래시포인트": [
+        "뉴 정크 시티", "수라바사", "아틀라스"
+    ],
+    "격돌": [
+        "아누비스의 왕좌", "하나오카"
+    ]
+}
+
+class MapSelectionView(discord.ui.View):
+    """맵 선택 View"""
+    
+    def __init__(self, bot, session: 'ScrimResultSession', match_number: int):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.session = session
+        self.match_number = match_number
+        self.match_data = session.matches[match_number]
+        
+        # 맵 타입 선택 드롭다운
+        self.add_item(MapTypeSelect(self))
+        
+        # 건너뛰기 버튼
+        skip_button = discord.ui.Button(
+            label="맵 선택 건너뛰기",
+            style=discord.ButtonStyle.secondary,
+            emoji="⏭️"
+        )
+        skip_button.callback = self.skip_map_selection
+        self.add_item(skip_button)
+    
+    async def skip_map_selection(self, interaction: discord.Interaction):
+        """맵 선택 건너뛰기"""
+        # 맵 정보 없이 최종 완료
+        await self.complete_match_recording(interaction)
+    
+    async def complete_match_recording(self, interaction: discord.Interaction):
+        """최종 경기 기록 완료"""
+        try:
+            # 매치 완료 표시
+            self.match_data['completed'] = True
+            self.match_data['guild_id'] = str(interaction.guild_id)
+
+            # 데이터베이스에 저장
+            await self.save_match_to_database(str(interaction.guild_id))
+            
+            # 완료 메시지
+            embed = discord.Embed(
+                title=f"✅ {self.match_number}경기 기록 완료!",
+                description="경기 결과가 성공적으로 저장되었습니다.",
+                color=0x00ff88
+            )
+            
+            # 경기 요약 표시
+            winner_text = "🔵 A팀" if self.match_data['winner'] == "team_a" else "🔴 B팀"
+            embed.add_field(name="🏆 승리팀", value=winner_text, inline=True)
+            
+            # 맵 정보가 있으면 표시
+            if 'map_name' in self.match_data and self.match_data['map_name']:
+                map_info = f"**{self.match_data['map_name']}**"
+                if 'map_type' in self.match_data and self.match_data['map_type']:
+                    map_info += f" ({self.match_data['map_type']})"
+                embed.add_field(name="🗺️ 맵", value=map_info, inline=True)
+            
+            # 팀 구성 요약
+            # for team_key, team_name in [("team_a", "🔵 A팀"), ("team_b", "🔴 B팀")]:
+            #     team_summary = []
+            #     position_key = f"{team_key}_positions"
+                
+            #     for player in self.match_data[team_key]:
+            #         pos = self.match_data[position_key].get(player['user_id'], '미설정')
+            #         emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚" if pos == "힐러" else "❓"
+            #         team_summary.append(f"{emoji} {player['username']}")
+                
+            #     embed.add_field(
+            #         name=team_name,
+            #         value="\n".join(team_summary),
+            #         inline=True
+            #     )
+            
+            # 다음 단계 안내
+            next_match = self.match_number + 1
+            embed.add_field(
+                name="🔄 다음 단계",
+                value=f"`/팀세팅 {next_match}` 명령어로 다음 경기를 진행하거나\n"
+                      f"`/내전현황` 명령어로 현재 진행 상황을 확인하세요.\n"
+                      f"`/내전결과완료` 명령어로 모든 경기 기록을 마무리할 수 있습니다.",
+                inline=False
+            )
+            
+            await interaction.response.edit_message(embed=embed, view=None)
+            
+        except Exception as e:
+            await interaction.response.send_message(
+                f"경기 기록 저장 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+    
+    async def save_match_to_database(self, guild_id: str):
+        """매치 데이터를 데이터베이스에 저장 (맵 정보 포함)"""
+        try:
+            # 매치 데이터 준비
+            match_data_for_db = {
+                'recruitment_id': self.session.recruitment_id,
+                'match_number': self.match_number,
+                'winner': self.match_data['winner'],
+                'created_by': self.session.created_by,
+                'guild_id': guild_id,
+                'team_a': self.match_data['team_a'],
+                'team_b': self.match_data['team_b'],
+                'team_a_positions': self.match_data['team_a_positions'],
+                'team_b_positions': self.match_data['team_b_positions'],
+                # 🆕 맵 정보 추가
+                'map_name': self.match_data.get('map_name'),
+                'map_type': self.match_data.get('map_type')
+            }
+            
+            # 데이터베이스에 저장
+            match_id = await self.bot.db_manager.save_match_result(match_data_for_db)
+            return match_id
+            
+        except Exception as e:
+            print(f"매치 저장 실패: {e}")
+            raise
+
+class MapTypeSelect(discord.ui.Select):
+    """맵 타입 선택 드롭다운"""
+    
+    def __init__(self, parent_view):
+        self.parent_view = parent_view
+        
+        options = []
+        for map_type in OVERWATCH_MAPS.keys():
+            map_count = len(OVERWATCH_MAPS[map_type])
+            options.append(discord.SelectOption(
+                label=map_type,
+                description=f"{map_count}개 맵 포함",
+                emoji="🗺️"
+            ))
+        
+        super().__init__(
+            placeholder="맵 타입을 선택하세요...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected_map_type = self.values[0]
+        
+        # 선택된 맵 타입의 맵들로 새 View 생성
+        view = MapSelectionView(
+            self.parent_view.bot, 
+            self.parent_view.session, 
+            self.parent_view.match_number
+        )
+        view.clear_items()
+        
+        # 맵 선택 드롭다운 추가
+        view.add_item(MapSelect(view, selected_map_type))
+        
+        # 뒤로가기 버튼
+        back_button = discord.ui.Button(
+            label="맵 타입 다시 선택",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔙"
+        )
+        back_button.callback = self.go_back_to_type_selection
+        view.add_item(back_button)
+        
+        # 건너뛰기 버튼
+        skip_button = discord.ui.Button(
+            label="맵 선택 건너뛰기",
+            style=discord.ButtonStyle.secondary,
+            emoji="⏭️"
+        )
+        skip_button.callback = view.skip_map_selection
+        view.add_item(skip_button)
+        
+        embed = discord.Embed(
+            title=f"🗺️ {selected_map_type} 맵 선택",
+            description=f"**{selected_map_type}** 타입에서 플레이한 맵을 선택해주세요.",
+            color=0x0099ff
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+    
+    async def go_back_to_type_selection(self, interaction: discord.Interaction):
+        """맵 타입 선택으로 돌아가기"""
+        # 원래 View 다시 생성
+        view = MapSelectionView(
+            self.parent_view.bot,
+            self.parent_view.session,
+            self.parent_view.match_number
+        )
+        
+        embed = discord.Embed(
+            title="🗺️ 맵 선택 (선택사항)",
+            description="플레이한 맵을 기록하시겠습니까?\n맵별 통계를 위해 선택하시는 것을 권장합니다.",
+            color=0x0099ff
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class MapSelect(discord.ui.Select):
+    """개별 맵 선택 드롭다운"""
+    
+    def __init__(self, parent_view, map_type: str):
+        self.parent_view = parent_view
+        self.map_type = map_type
+        
+        options = []
+        for map_name in OVERWATCH_MAPS[map_type]:
+            options.append(discord.SelectOption(
+                label=map_name,
+                description=f"{map_type} 맵",
+                emoji="🎯"
+            ))
+        
+        super().__init__(
+            placeholder=f"{map_type} 맵을 선택하세요...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        selected_map = self.values[0]
+        
+        # 매치 데이터에 맵 정보 저장
+        match_data = self.parent_view.match_data
+        match_data['map_name'] = selected_map
+        match_data['map_type'] = self.map_type
+        
+        # 맵 선택 완료 후 최종 기록 완료
+        await self.parent_view.complete_match_recording(interaction)
 
 class ScrimResultSession:
     """내전 결과 기록 세션 관리"""
@@ -411,15 +661,108 @@ class MatchResultView(discord.ui.View):
         self.add_item(self.winner_select)
     
     async def select_winner_callback(self, interaction: discord.Interaction):
-        """승리팀 선택 처리"""
+        """승리팀 선택 처리 (수정된 버전)"""
         winner = self.winner_select.values[0]
         self.match_data['winner'] = winner
         
+        # 승리팀 선택 확인 및 재선택 옵션 제공
+        await self.show_winner_confirmation(interaction, winner)
+    
+    async def show_winner_confirmation(self, interaction: discord.Interaction, winner: str):
+        """승리팀 선택 확인 단계"""
+        winner_text = "🔵 A팀" if winner == "team_a" else "🔴 B팀"
+        
+        embed = discord.Embed(
+            title=f"🏆 {self.match_number}경기 승리팀 선택",
+            description=f"**{winner_text}**을(를) 승리팀으로 선택하셨습니다.",
+            color=0x0099ff if winner == "team_a" else 0xff4444
+        )
+        
+        # 팀 구성 재확인
+        team_a_list = [p['username'] for p in self.match_data['team_a']]
+        team_b_list = [p['username'] for p in self.match_data['team_b']]
+        
+        embed.add_field(
+            name="🔵 A팀",
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔴 B팀", 
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
+            inline=True
+        )
+        
+        self.clear_items()
+        
+        # 확인 후 포지션 선택 시작 버튼
+        confirm_button = discord.ui.Button(
+            label="포지션 선택 시작",
+            style=discord.ButtonStyle.success,
+            emoji="✅"
+        )
+        confirm_button.callback = self.start_position_selection
+        self.add_item(confirm_button)
+        
+        # 승리팀 다시 선택 버튼
+        retry_winner_button = discord.ui.Button(
+            label="승리팀 다시 선택",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔄"
+        )
+        retry_winner_button.callback = self.retry_winner_selection
+        self.add_item(retry_winner_button)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def start_position_selection(self, interaction: discord.Interaction):
+        """포지션 선택 시작"""
         # A팀 포지션 선택 단계로 이동
         await self.show_position_selection(interaction, "team_a")
     
+    async def retry_winner_selection(self, interaction: discord.Interaction):
+        """승리팀 재선택"""
+        self.match_data['winner'] = None
+        
+        embed = discord.Embed(
+            title=f"🎯 {self.match_number}경기 결과 기록",
+            description="승리팀을 다시 선택해주세요.",
+            color=0x0099ff
+        )
+        
+        # 팀 구성 표시
+        team_a_list = [p['username'] for p in self.match_data['team_a']]
+        team_b_list = [p['username'] for p in self.match_data['team_b']]
+        
+        embed.add_field(
+            name="🔵 A팀",
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔴 B팀", 
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
+            inline=True
+        )
+        
+        # 원래 승리팀 선택 상태로 되돌리기
+        self.clear_items()
+        self.winner_select = discord.ui.Select(
+            placeholder="승리팀을 선택하세요",
+            options=[
+                discord.SelectOption(label="🔵 A팀 승리", value="team_a", emoji="🔵"),
+                discord.SelectOption(label="🔴 B팀 승리", value="team_b", emoji="🔴")
+            ]
+        )
+        self.winner_select.callback = self.select_winner_callback
+        self.add_item(self.winner_select)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+
     async def show_position_selection(self, interaction, team: str):
-        """포지션 선택 화면 표시"""
+        """포지션 선택 화면 표시 (기존 코드 유지하되 개선된 View 사용)"""
         team_data = self.match_data[team]
         team_name = "🔵 A팀" if team == "team_a" else "🔴 B팀"
         
@@ -434,6 +777,7 @@ class MatchResultView(discord.ui.View):
             winner_text = "🔵 A팀 승리" if self.match_data['winner'] == "team_a" else "🔴 B팀 승리"
             embed.add_field(name="🏆 승리팀", value=winner_text, inline=False)
         
+        # 개선된 PositionSelectionView 사용
         view = PositionSelectionView(self.bot, self.session, self.match_number, team)
         
         if interaction.response.is_done():
@@ -442,7 +786,7 @@ class MatchResultView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=view)
 
 class PositionSelectionView(discord.ui.View):
-    """포지션 선택 시작 View - 첫 번째 플레이어부터 시작"""
+    """포지션 선택 시작 View"""
     
     def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str):
         super().__init__(timeout=600)
@@ -450,9 +794,11 @@ class PositionSelectionView(discord.ui.View):
         self.session = session
         self.match_number = match_number
         self.team = team
-        self.match_data = session.matches[match_number]
-        self.team_data = self.match_data[team]
-        self.position_key = f"{team}_positions"
+        self.current_player_index = 0
+        self.team_data = session.matches[match_number][team]
+        
+        # 포지션 선택 진행 상황 추적 (개선된 부분)
+        self.position_selections = {}  # {player_index: selected_position}
         
         # 포지션 선택 시작 버튼
         self.start_button = discord.ui.Button(
@@ -466,221 +812,366 @@ class PositionSelectionView(discord.ui.View):
     async def start_position_selection(self, interaction: discord.Interaction):
         """포지션 선택 시작 - 첫 번째 플레이어부터"""
         await self.show_single_player_position(interaction, 0)
-    
-    async def show_single_player_position(self, interaction, player_index: int):
-        """개별 플레이어 포지션 선택"""
-        if player_index >= len(self.team_data):
-            # 모든 플레이어 완료
-            await self.complete_all_positions(interaction)
-            return
+
+    async def confirm_team_positions(self, interaction: discord.Interaction):
+        """팀 포지션 확정"""
+        # 포지션 데이터를 세션에 저장
+        position_key = f"{self.team}_positions"
+        for i, player in enumerate(self.team_data):
+            position = self.position_selections[i]
+            self.session.matches[self.match_number][position_key][player['user_id']] = position
         
-        player = self.team_data[player_index]
+        if self.team == "team_a":
+            # A팀 완료 -> B팀으로 이동
+            view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b")
+            await view.show_single_player_position(interaction, 0)
+        else:
+            # B팀 완료 -> 최종 검토 단계로
+            final_review = FinalReviewView(self.bot, self.session, self.match_number)
+            await final_review.show_final_review(interaction)
+
+    async def retry_team_positions(self, interaction: discord.Interaction):
+        """팀 포지션 다시 선택"""
+        self.position_selections.clear()
+        await self.show_single_player_position(interaction, 0)
+
+    async def show_team_position_review(self, interaction: discord.Interaction):
+        """팀 포지션 선택 검토 단계"""
         team_name = "🔵 A팀" if self.team == "team_a" else "🔴 B팀"
         
         embed = discord.Embed(
-            title=f"🎯 {team_name} 포지션 선택",
-            description=f"**{player['username']}** 플레이어의 포지션을 선택해주세요",
+            title=f"📋 {self.match_number}경기 - {team_name} 포지션 검토",
+            description="선택된 포지션을 확인해주세요",
             color=0x0099ff if self.team == "team_a" else 0xff4444
         )
         
-        # 진행 상황 표시
-        embed.add_field(
-            name="📊 진행 상황",
-            value=f"플레이어 {player_index + 1}/5",
-            inline=True
-        )
-        
-        # 이미 선택된 포지션들 표시
-        if player_index > 0:
-            selected_positions = []
-            for i in range(player_index):
-                prev_player = self.team_data[i]
-                pos = self.match_data[self.position_key].get(prev_player['user_id'], '미선택')
-                emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚" if pos == "힐러" else "❓"
-                selected_positions.append(f"{emoji} {prev_player['username']} - {pos}")
-            
-            embed.add_field(
-                name="✅ 선택 완료",
-                value="\n".join(selected_positions),
-                inline=False
-            )
-        
-        view = SinglePlayerPositionView(
-            self.bot, self.session, self.match_number, 
-            self.team, player_index
-        )
-        
-        if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=view)
-        else:
-            await interaction.response.edit_message(embed=embed, view=view)
-
-class SinglePlayerPositionView(discord.ui.View):
-    """개별 플레이어 포지션 선택 View"""
-    
-    def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str, player_index: int):
-        super().__init__(timeout=600)
-        self.bot = bot
-        self.session = session
-        self.match_number = match_number
-        self.team = team
-        self.player_index = player_index
-        self.match_data = session.matches[match_number]
-        self.team_data = self.match_data[team]
-        self.position_key = f"{team}_positions"
-        self.current_player = self.team_data[player_index]
-        
-        # 포지션 선택 드롭다운
-        self.position_select = discord.ui.Select(
-            placeholder=f"{self.current_player['username']} 포지션 선택",
-            options=[
-                discord.SelectOption(label="🛡️ 탱커", value="탱커", emoji="🛡️"),
-                discord.SelectOption(label="⚔️ 딜러", value="딜러", emoji="⚔️"),
-                discord.SelectOption(label="💚 힐러", value="힐러", emoji="💚")
-            ]
-        )
-        self.position_select.callback = self.select_position_callback
-        self.add_item(self.position_select)
-    
-    async def select_position_callback(self, interaction: discord.Interaction):
-        """포지션 선택 처리"""
-        selected_position = self.position_select.values[0]
-        
-        # 포지션 저장
-        self.match_data[self.position_key][self.current_player['user_id']] = selected_position
-        
-        # 다음 플레이어로 진행
-        next_player_index = self.player_index + 1
-        
-        if next_player_index < len(self.team_data):
-            # 다음 플레이어
-            parent_view = PositionSelectionView(
-                self.bot, self.session, self.match_number, self.team
-            )
-            await parent_view.show_single_player_position(interaction, next_player_index)
-        else:
-            # 모든 플레이어 완료
-            await self.complete_team_positions(interaction)
-    
-    async def complete_team_positions(self, interaction: discord.Interaction):
-        """팀 포지션 선택 완료"""
-        team_name = "🔵 A팀" if self.team == "team_a" else "🔴 B팀"
-        
-        # 팀 구성 검증
-        positions = list(self.match_data[self.position_key].values())
-        tank_count = positions.count("탱커")
-        dps_count = positions.count("딜러")
-        support_count = positions.count("힐러")
-        
-        embed = discord.Embed(
-            title=f"✅ {team_name} 포지션 선택 완료!",
-            color=0x00ff88
-        )
-        
-        # 선택된 포지션들 표시
-        team_summary = []
-        for player in self.team_data:
-            pos = self.match_data[self.position_key][player['user_id']]
+        # 선택된 포지션 표시
+        position_summary = []
+        for i, player in enumerate(self.team_data):
+            pos = self.position_selections[i]
             emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚"
-            team_summary.append(f"{emoji} {player['username']} - {pos}")
+            position_summary.append(f"{emoji} **{player['username']}** - {pos}")
         
         embed.add_field(
-            name=f"{team_name} 구성",
-            value="\n".join(team_summary),
+            name=f"{team_name} 포지션 구성",
+            value="\n".join(position_summary),
             inline=False
         )
         
-        # 구성 검증 결과
+        # 포지션 구성 검증
+        positions = list(self.position_selections.values())
+        tank_count = positions.count("탱커")
+        dps_count = positions.count("딜러")  
+        support_count = positions.count("힐러")
+        
         if tank_count == 1 and dps_count == 2 and support_count == 2:
             embed.add_field(
                 name="✅ 구성 검증",
                 value="올바른 구성 (탱1딜2힐2)",
                 inline=False
             )
-            
-            # 다음 단계 결정
-            if self.team == "team_a":
-                # A팀 완료 -> B팀 포지션 선택
-                embed.add_field(
-                    name="🔄 다음 단계",
-                    value="이제 🔴 B팀의 포지션을 선택해주세요.",
-                    inline=False
-                )
-                
-                view = PositionSelectionView(
-                    self.bot, self.session, self.match_number, "team_b"
-                )
-                await interaction.response.edit_message(embed=embed, view=view)
-            else:
-                # B팀 완료 -> 경기 기록 완료
-                await self.complete_match_recording(interaction)
         else:
             embed.add_field(
-                name="❌ 구성 오류",
-                value=f"잘못된 구성 (탱{tank_count}딜{dps_count}힐{support_count})\n"
-                      f"탱1딜2힐2가 되어야 합니다.",
+                name="⚠️ 구성 확인",
+                value=f"현재 구성: 탱{tank_count}딜{dps_count}힐{support_count}\n"
+                      f"권장 구성: 탱1딜2힐2",
                 inline=False
             )
-            
-            # 다시 선택하기 버튼
-            view = RetryPositionView(
-                self.bot, self.session, self.match_number, self.team
-            )
-            await interaction.response.edit_message(embed=embed, view=view)
+        
+        self.clear_items()
+        
+        # 확인 버튼
+        confirm_button = discord.ui.Button(
+            label="포지션 확정",
+            style=discord.ButtonStyle.success,
+            emoji="✅"
+        )
+        confirm_button.callback = self.confirm_team_positions
+        self.add_item(confirm_button)
+        
+        # 다시 선택하기 버튼
+        retry_button = discord.ui.Button(
+            label="다시 선택하기",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔄"
+        )
+        retry_button.callback = self.retry_team_positions
+        self.add_item(retry_button)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
     
-    async def complete_match_recording(self, interaction: discord.Interaction):
-        """경기 기록 완료"""
-        try:
-            # 매치 완료 표시
-            self.match_data['completed'] = True
-
-            self.match_data['guild_id'] = str(interaction.guild_id)
-
-            # 데이터베이스에 저장
-            await self.save_match_to_database(str(interaction.guild_id))
+    async def show_single_player_position(self, interaction: discord.Interaction, player_index: int):
+        """개별 플레이어 포지션 선택 (개선된 버전)"""
+        self.current_player_index = player_index
+        
+        if player_index >= len(self.team_data):
+            # 모든 플레이어 포지션 선택 완료 -> 검토 단계로
+            await self.show_team_position_review(interaction)
+            return
             
-            # 완료 메시지
-            embed = discord.Embed(
-                title=f"✅ {self.match_number}경기 기록 완료!",
-                description="경기 결과가 성공적으로 저장되었습니다.",
-                color=0x00ff88
+        player = self.team_data[player_index]
+        team_name = "🔵 A팀" if self.team == "team_a" else "🔴 B팀"
+        
+        embed = discord.Embed(
+            title=f"🎯 {self.match_number}경기 - {team_name} 포지션 선택",
+            description=f"**{player['username']}**의 포지션을 선택해주세요 ({player_index + 1}/5)",
+            color=0x0099ff if self.team == "team_a" else 0xff4444
+        )
+        
+        # 진행 상황 표시 (개선된 부분)
+        progress_text = []
+        for i, p in enumerate(self.team_data):
+            if i in self.position_selections:
+                pos = self.position_selections[i]
+                emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚"
+                progress_text.append(f"{emoji} {p['username']} - {pos}")
+            elif i == player_index:
+                progress_text.append(f"➡️ {p['username']} - 선택 중...")
+            else:
+                progress_text.append(f"⏳ {p['username']} - 대기 중")
+        
+        embed.add_field(
+            name="진행 상황",
+            value="\n".join(progress_text),
+            inline=False
+        )
+        
+        self.clear_items()
+        
+        # 포지션 선택 드롭다운
+        position_select = discord.ui.Select(
+            placeholder="포지션을 선택하세요",
+            options=[
+                discord.SelectOption(label="탱커", value="탱커", emoji="🛡️"),
+                discord.SelectOption(label="딜러", value="딜러", emoji="⚔️"),
+                discord.SelectOption(label="힐러", value="힐러", emoji="💚")
+            ]
+        )
+        position_select.callback = self.position_select_callback
+        self.add_item(position_select)
+        
+        # 이전 플레이어로 되돌리기 버튼 (첫 번째 플레이어가 아닌 경우)
+        if player_index > 0:
+            back_button = discord.ui.Button(
+                label="이전 플레이어로",
+                style=discord.ButtonStyle.secondary,
+                emoji="⬅️"
             )
+            back_button.callback = self.back_to_previous_player
+            self.add_item(back_button)
+        
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def position_select_callback(self, interaction: discord.Interaction):
+        """포지션 선택 처리 (개선된 버전)"""
+        selected_position = interaction.data['values'][0]
+        self.position_selections[self.current_player_index] = selected_position
+        
+        # 다음 플레이어로 진행
+        await self.show_single_player_position(interaction, self.current_player_index + 1)
+    
+    async def back_to_previous_player(self, interaction: discord.Interaction):
+        """이전 플레이어로 되돌리기 (새로 추가된 기능)"""
+        # 이전 플레이어의 선택 취소
+        prev_index = self.current_player_index - 1
+        if prev_index in self.position_selections:
+            del self.position_selections[prev_index]
+        
+        # 이전 플레이어 선택 화면으로
+        await self.show_single_player_position(interaction, prev_index)
+
+class FinalReviewView(discord.ui.View):
+    """최종 검토 단계 View"""
+    
+    def __init__(self, bot, session: ScrimResultSession, match_number: int):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.session = session
+        self.match_number = match_number
+        self.match_data = session.matches[match_number]
+    
+    async def show_final_review(self, interaction: discord.Interaction):
+        """경기 최종 검토 단계"""
+        embed = discord.Embed(
+            title=f"🎯 {self.match_number}경기 최종 검토",
+            description="모든 설정을 확인해주세요",
+            color=0x00ff88
+        )
+        
+        # 승리팀 표시
+        winner_text = "🔵 A팀" if self.match_data['winner'] == "team_a" else "🔴 B팀"
+        embed.add_field(name="🏆 승리팀", value=winner_text, inline=False)
+        
+        # 양팀 포지션 구성 표시
+        for team_key, team_name in [("team_a", "🔵 A팀"), ("team_b", "🔴 B팀")]:
+            team_summary = []
+            position_key = f"{team_key}_positions"
             
-            # 경기 요약 표시
-            winner_text = "🔵 A팀" if self.match_data['winner'] == "team_a" else "🔴 B팀"
-            embed.add_field(name="🏆 승리팀", value=winner_text, inline=False)
+            for player in self.match_data[team_key]:
+                pos = self.match_data[position_key][player['user_id']]
+                emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚"
+                team_summary.append(f"{emoji} {player['username']}")
             
-            # 팀 구성 요약
-            for team_key, team_name in [("team_a", "🔵 A팀"), ("team_b", "🔴 B팀")]:
-                team_summary = []
-                position_key = f"{team_key}_positions"
-                
-                for player in self.match_data[team_key]:
-                    pos = self.match_data[position_key][player['user_id']]
-                    emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚"
-                    team_summary.append(f"{emoji} {player['username']}")
-                
-                embed.add_field(
-                    name=team_name,
-                    value="\n".join(team_summary),
-                    inline=True
-                )
-            
-            # 다음 단계 안내
-            next_match = self.match_number + 1
             embed.add_field(
-                name="🔄 다음 단계",
-                value=f"`/팀세팅 {next_match}` 명령어로 다음 경기를 진행하거나\n"
-                      f"`/내전현황` 명령어로 현재 진행 상황을 확인하세요.",
-                inline=False
+                name=team_name,
+                value="\n".join(team_summary),
+                inline=True
             )
+        
+        # 구성 검증 결과 표시
+        validation_results = []
+        for team_key, team_name in [("team_a", "A팀"), ("team_b", "B팀")]:
+            position_key = f"{team_key}_positions"
+            positions = list(self.match_data[position_key].values())
+            tank_count = positions.count("탱커")
+            dps_count = positions.count("딜러")
+            support_count = positions.count("힐러")
             
-            await interaction.response.edit_message(embed=embed, view=None)
+            if tank_count == 1 and dps_count == 2 and support_count == 2:
+                validation_results.append(f"✅ {team_name}: 올바른 구성")
+            else:
+                validation_results.append(f"⚠️ {team_name}: 탱{tank_count}딜{dps_count}힐{support_count}")
+        
+        embed.add_field(
+            name="📊 구성 검증",
+            value="\n".join(validation_results),
+            inline=False
+        )
+        
+        self.clear_items()
+        
+        # 최종 확인 버튼
+        final_confirm_button = discord.ui.Button(
+            label="경기 기록 완료",
+            style=discord.ButtonStyle.success,
+            emoji="✅"
+        )
+        final_confirm_button.callback = self.final_confirm_match
+        self.add_item(final_confirm_button)
+        
+        # B팀 포지션 다시 선택
+        retry_b_team_button = discord.ui.Button(
+            label="B팀 포지션 재선택",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔴"
+        )
+        retry_b_team_button.callback = self.retry_b_team_positions
+        self.add_item(retry_b_team_button)
+        
+        # A팀 포지션 다시 선택
+        retry_a_team_button = discord.ui.Button(
+            label="A팀 포지션 재선택", 
+            style=discord.ButtonStyle.secondary,
+            emoji="🔵"
+        )
+        retry_a_team_button.callback = self.retry_a_team_positions
+        self.add_item(retry_a_team_button)
+        
+        # 승리팀 다시 선택
+        retry_winner_button = discord.ui.Button(
+            label="승리팀 재선택",
+            style=discord.ButtonStyle.secondary,
+            emoji="🏆"
+        )
+        retry_winner_button.callback = self.retry_winner_selection
+        self.add_item(retry_winner_button)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def retry_b_team_positions(self, interaction: discord.Interaction):
+        """B팀 포지션 다시 선택"""
+        # B팀 포지션 데이터 초기화
+        self.match_data['team_b_positions'] = {}
+        
+        # B팀 포지션 선택 시작
+        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b")
+        await view.show_single_player_position(interaction, 0)
+
+    async def retry_a_team_positions(self, interaction: discord.Interaction):
+        """A팀 포지션 다시 선택"""
+        # A팀 포지션 데이터 초기화
+        self.match_data['team_a_positions'] = {}
+        
+        # A팀 포지션 선택 시작
+        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_a")
+        await view.show_single_player_position(interaction, 0)
+
+    async def retry_winner_selection(self, interaction: discord.Interaction):
+        """승리팀 다시 선택"""
+        # 승리팀 데이터 초기화
+        self.match_data['winner'] = None
+        
+        # 승리팀 선택 화면으로 되돌아가기
+        view = MatchResultView(self.bot, self.session, self.match_number)
+        
+        embed = discord.Embed(
+            title=f"🎯 {self.match_number}경기 결과 기록",
+            description="승리팀을 다시 선택해주세요.",
+            color=0x0099ff
+        )
+        
+        # 팀 구성 표시
+        team_a_list = [p['username'] for p in self.match_data['team_a']]
+        team_b_list = [p['username'] for p in self.match_data['team_b']]
+        
+        embed.add_field(
+            name="🔵 A팀",
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔴 B팀", 
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
+            inline=True
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def final_confirm_match(self, interaction: discord.Interaction):
+        """포지션 설정 완료 후 맵 선택 단계로 이동 (기존 최종 확인 대신)"""
+        # 🆕 맵 선택 단계로 이동
+        view = MapSelectionView(self.bot, self.session, self.match_number)
+        
+        embed = discord.Embed(
+            title="🗺️ 맵 선택 (선택사항)",
+            description="플레이한 맵을 기록하시겠습니까?\n맵별 통계를 위해 선택하시는 것을 권장합니다.",
+            color=0x0099ff
+        )
+        
+        # 현재까지의 경기 정보 요약 표시
+        winner_text = "🔵 A팀" if self.match_data['winner'] == "team_a" else "🔴 B팀"
+        embed.add_field(name="🏆 승리팀", value=winner_text, inline=True)
+        
+        # 포지션 구성 간단 요약
+        team_summary = []
+        for team_key, team_name in [("team_a", "🔵 A팀"), ("team_b", "🔴 B팀")]:
+            position_key = f"{team_key}_positions"
+            positions_count = {"탱커": 0, "딜러": 0, "힐러": 0}
             
-        except Exception as e:
-            await interaction.response.send_message(
-                f"경기 기록 저장 중 오류가 발생했습니다: {str(e)}", ephemeral=True
-            )
+            for player in self.match_data[team_key]:
+                pos = self.match_data[position_key].get(player['user_id'], '미설정')
+                if pos in positions_count:
+                    positions_count[pos] += 1
+            
+            team_summary.append(f"{team_name}: 탱{positions_count['탱커']}딜{positions_count['딜러']}힐{positions_count['힐러']}")
+        
+        embed.add_field(
+            name="👥 팀 구성", 
+            value="\n".join(team_summary), 
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 맵 정보의 활용",
+            value="• 개인/팀별 맵 승률 통계\n• 맵 타입별 성과 분석\n• 포지션-맵 조합 분석",
+            inline=False
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
     
     async def save_match_to_database(self, guild_id: str):
         """매치 데이터를 데이터베이스에 저장"""
@@ -696,7 +1187,7 @@ class SinglePlayerPositionView(discord.ui.View):
                 'team_b': self.match_data['team_b'],
                 'team_a_positions': self.match_data['team_a_positions'],
                 'team_b_positions': self.match_data['team_b_positions']
-            }                                                                                                                                                                                                                   
+            }
             
             # 데이터베이스에 저장
             match_id = await self.bot.db_manager.save_match_result(match_data_for_db)
@@ -707,7 +1198,7 @@ class SinglePlayerPositionView(discord.ui.View):
             raise
 
 class RetryPositionView(discord.ui.View):
-    """포지션 재선택 View"""
+    """포지션 재선택 View - 간소화된 버전"""
     
     def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str):
         super().__init__(timeout=300)
@@ -731,7 +1222,7 @@ class RetryPositionView(discord.ui.View):
         position_key = f"{self.team}_positions"
         self.session.matches[self.match_number][position_key] = {}
         
-        # 처음부터 다시 시작
+        # 개선된 PositionSelectionView로 처음부터 다시 시작
         view = PositionSelectionView(
             self.bot, self.session, self.match_number, self.team
         )

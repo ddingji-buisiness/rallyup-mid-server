@@ -1,4 +1,3 @@
-# commands/scrim_session.py - 내전 세션 관리 명령어
 import discord
 from discord.ext import commands
 from discord import app_commands
