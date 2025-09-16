@@ -370,7 +370,7 @@ class DateTimeSelectionView(discord.ui.View):
                                                scrim_datetime: datetime, 
                                                deadline_datetime: datetime):
         """모집 임베드와 뷰 생성"""
-        from commands.scrim_recruitment import RecruitmentView  # 순환 import 방지
+        from commands.scrim_recruitment import RecruitmentView 
         
         embed = discord.Embed(
             title=f"🎮 {self.title}",
@@ -425,12 +425,21 @@ class RecruitmentView(discord.ui.View):
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """불참 버튼 클릭 처리"""
         await self._handle_participation(interaction, "declined")
+
+    @discord.ui.button(
+        label="⏰ 늦참",
+        style=discord.ButtonStyle.primary,
+        custom_id="late_join_scrim"
+    )
+    async def late_join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """늦참 버튼 클릭 처리"""
+        await self._handle_participation(interaction, "late_join")
     
     @discord.ui.button(
         label="📋 참가자 목록",
         style=discord.ButtonStyle.secondary,
         custom_id="show_participants"
-    )
+    ) 
     async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """참가자 목록 보기"""
         await self._show_participants_list(interaction)
@@ -479,8 +488,15 @@ class RecruitmentView(discord.ui.View):
             # 4. 메시지 업데이트
             await self._update_recruitment_message(interaction)
             
-            # 5. 사용자 피드백
-            status_text = "참가" if status == "joined" else "불참"
+            if status == "joined":
+                status_text = "참가"
+            elif status == "declined":
+                status_text = "불참"
+            elif status == "late_join":
+                status_text = "늦참"
+            else:
+                status_text = status
+
             await interaction.followup.send(
                 f"✅ **{recruitment['title']}** 내전 모집에 **{status_text}**로 등록되었습니다!",
                 ephemeral=True
@@ -513,6 +529,7 @@ class RecruitmentView(discord.ui.View):
             
             participants = await self.bot.db_manager.get_recruitment_participants(self.recruitment_id)
             joined_users = [p for p in participants if p['status'] == 'joined']
+            late_join_users = [p for p in participants if p['status'] == 'late_join']
             declined_users = [p for p in participants if p['status'] == 'declined']
             
             # 임베드 생성
@@ -542,6 +559,14 @@ class RecruitmentView(discord.ui.View):
                     value="아직 참가자가 없습니다.",
                     inline=False
                 )
+
+            if late_join_users:
+                late_join_list = [f"{i}. {user['username']}" for i, user in enumerate(late_join_users, 1)]
+                embed.add_field(
+                    name=f"⏰ 늦참자 ({len(late_join_users)}명)",
+                    value='\n'.join(late_join_list),
+                    inline=False
+                )
             
             # 불참자 목록 (간략하게)
             if declined_users:
@@ -561,22 +586,31 @@ class RecruitmentView(discord.ui.View):
             )
     
     async def _update_recruitment_message(self, interaction: discord.Interaction):
-        """모집 메시지 업데이트 (참가자 수 실시간 반영)"""
+        """모집 메시지 업데이트 (참가자 수 실시간 반영, 늦참자 포함)"""
         try:
             recruitment = await self.bot.db_manager.get_recruitment_by_id(self.recruitment_id)
             participants = await self.bot.db_manager.get_recruitment_participants(self.recruitment_id)
             
             joined_count = len([p for p in participants if p['status'] == 'joined'])
+            late_join_count = len([p for p in participants if p['status'] == 'late_join'])  # 늦참자 추가
             declined_count = len([p for p in participants if p['status'] == 'declined'])
             
             # 업데이트된 임베드 생성
             scrim_date = datetime.fromisoformat(recruitment['scrim_date'])
             deadline = datetime.fromisoformat(recruitment['deadline'])
             
+            # 상태에 따른 색상 및 텍스트
+            if datetime.now() > deadline:
+                status_text = "🔒 모집 마감"
+                color = 0x666666
+            else:
+                status_text = "🟢 모집 중"
+                color = 0x0099ff
+            
             embed = discord.Embed(
                 title=f"🎮 {recruitment['title']}",
-                description=recruitment['description'],
-                color=0x0099ff
+                description=f"{recruitment['description']}\n",
+                color=color
             )
             
             embed.add_field(
@@ -592,12 +626,23 @@ class RecruitmentView(discord.ui.View):
             )
             
             embed.add_field(
+                name="📊 현재 상황",
+                value=status_text,
+                inline=True
+            )
+            
+            # 참가 현황 (시각적 바 포함)
+            participation_bar = self._create_participation_bar(joined_count, late_join_count, declined_count)
+            embed.add_field(
                 name="👥 참가 현황",
-                value=f"참가: {joined_count}명 | 불참: {declined_count}명",
+                value=f"✅ **참가**: {joined_count}명\n"
+                    f"⏰ **늦참**: {late_join_count}명\n"
+                    f"❌ **불참**: {declined_count}명\n"
+                    f"{participation_bar}",
                 inline=False
             )
             
-            embed.set_footer(text=f"모집 ID: {recruitment['id']}")
+            embed.set_footer(text=f"모집 ID: {recruitment['id']} | 버튼을 눌러 참가 의사를 표시하세요!")
             
             # 원본 메시지 업데이트
             await interaction.edit_original_response(embed=embed, view=self)
@@ -665,20 +710,25 @@ class RecruitmentView(discord.ui.View):
         
         return embed
     
-    def _create_participation_bar(self, joined: int, declined: int, total_width: int = 10) -> str:
-        """참가자 비율 시각화 바 (개선된 버전)"""
-        if joined == 0 and declined == 0:
-            return "⬜" * total_width + f" (0명)"
+    def _create_participation_bar(self, joined_count, late_join_count, declined_count):
+        """참가 현황 시각적 바 생성"""
+        total = joined_count + late_join_count + declined_count
+        if total == 0:
+            return "📊 `아직 응답이 없습니다`"
         
-        total = joined + declined
-        joined_width = int((joined / total) * total_width) if total > 0 else 0
-        declined_width = total_width - joined_width
+        # 비율 계산
+        joined_ratio = joined_count / total
+        late_join_ratio = late_join_count / total
         
-        bar = "🟢" * joined_width + "🔴" * declined_width
-        if joined_width + declined_width < total_width:
-            bar += "⬜" * (total_width - joined_width - declined_width)
+        # 바 생성 (총 10칸)
+        bar_length = 10
+        joined_bars = int(joined_ratio * bar_length)
+        late_join_bars = int(late_join_ratio * bar_length)
+        declined_bars = bar_length - joined_bars - late_join_bars
         
-        return f"{bar} (총 {total}명 응답)"
+        bar = "🟢" * joined_bars + "🟡" * late_join_bars + "🔴" * declined_bars
+        
+        return f"📊 `{bar}` ({total}명 응답)"
     
 class ScrimRecruitmentCommands(commands.Cog):
     def __init__(self, bot):
