@@ -424,3 +424,60 @@ class ServerSettings:
     welcome_channel_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+@dataclass
+class TeammatePairStats:
+    """팀메이트 페어 승률 통계"""
+    teammate_id: str
+    teammate_name: str
+    my_position: str
+    teammate_position: str
+    total_games: int
+    wins: int
+    winrate: float
+    
+    def __post_init__(self):
+        """승률 자동 계산"""
+        if self.total_games > 0:
+            self.winrate = round((self.wins / self.total_games) * 100, 1)
+        else:
+            self.winrate = 0.0
+
+@dataclass
+class BestPairSummary:
+    """베스트 페어 요약"""
+    tank_pair: Optional[TeammatePairStats] = None
+    support_pair: Optional[TeammatePairStats] = None  
+    dps_pair: Optional[TeammatePairStats] = None
+
+@dataclass
+class TeamWinrateAnalysis:
+    """팀 승률 종합 분석"""
+    user_id: str
+    username: str
+    tank_pairs: List[TeammatePairStats]
+    support_pairs: List[TeammatePairStats]
+    dps_pairs: List[TeammatePairStats]
+    best_pairs: BestPairSummary
+    actual_team_games: int = 0
+
+    def get_total_team_games(self) -> int:
+        """실제 팀 경기 총 횟수 (중복 제거)"""
+        return self.actual_team_games
+    
+    def get_overall_team_winrate(self) -> float:
+        """전체 팀 승률 (실제 경기 기준)"""
+        if self.actual_team_games == 0:
+            return 0.0
+        
+        all_pairs = self.tank_pairs + self.support_pairs + self.dps_pairs
+        if not all_pairs:
+            return 0.0
+        
+        total_wins = sum(pair.wins for pair in all_pairs)
+        total_pair_games = sum(pair.total_games for pair in all_pairs)
+        
+        if total_pair_games == 0:
+            return 0.0
+        
+        return round((total_wins / total_pair_games) * 100, 1)

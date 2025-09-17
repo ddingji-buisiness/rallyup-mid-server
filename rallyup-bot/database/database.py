@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 from utils.time_utils import TimeUtils
 
 import discord
-from database.models import ClanScrim, ClanTeam, User, Match, Participant, UserMatchup
+from database.models import BestPairSummary, ClanScrim, ClanTeam, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup
 import uuid
 import asyncio
 
@@ -24,7 +24,6 @@ class DatabaseManager:
 
             await self.initialize_clan_tables()
             await self.initialize_server_settings_tables()
-            await self.update_server_settings_for_auto_role()
             await self.create_bamboo_tables()
 
             # users 테이블
@@ -2332,39 +2331,6 @@ class DatabaseManager:
             print(f"중복 메시지 확인 오류: {e}")
             return None
 
-    async def update_server_settings_for_auto_role(self):
-        """신규 유저 자동 역할 배정을 위한 server_settings 테이블 업데이트"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('PRAGMA journal_mode=WAL')
-            
-            try:
-                # 새로운 컬럼들 추가
-                await db.execute('''
-                    ALTER TABLE server_settings 
-                    ADD COLUMN new_member_role_id TEXT
-                ''')
-                print("✅ new_member_role_id 컬럼 추가됨")
-            except Exception as e:
-                if "duplicate column name" in str(e).lower():
-                    print("ℹ️ new_member_role_id 컬럼이 이미 존재함")
-                else:
-                    print(f"❌ new_member_role_id 컬럼 추가 실패: {e}")
-            
-            try:
-                await db.execute('''
-                    ALTER TABLE server_settings 
-                    ADD COLUMN auto_assign_new_member BOOLEAN DEFAULT FALSE
-                ''')
-                print("✅ auto_assign_new_member 컬럼 추가됨")
-            except Exception as e:
-                if "duplicate column name" in str(e).lower():
-                    print("ℹ️ auto_assign_new_member 컬럼이 이미 존재함")
-                else:
-                    print(f"❌ auto_assign_new_member 컬럼 추가 실패: {e}")
-            
-            await db.commit()
-            print("🎯 신규 유저 자동 역할 배정 스키마 업데이트 완료")
-
     async def set_new_member_auto_role(self, guild_id: str, role_id: str, enabled: bool = True) -> bool:
         """신규 유저 자동 역할 배정 설정"""
         try:
@@ -3615,23 +3581,27 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
                     SELECT 
-                        SUM(CASE WHEN mp1.won = 1 THEN 1 ELSE 0 END) as user1_wins,
-                        SUM(CASE WHEN mp2.won = 1 THEN 1 ELSE 0 END) as user2_wins,
+                        SUM(CASE WHEN mp1.won = 1 AND mp2.won = 0 THEN 1 ELSE 0 END) as user1_wins,
+                        SUM(CASE WHEN mp1.won = 0 AND mp2.won = 1 THEN 1 ELSE 0 END) as user2_wins,
                         COUNT(*) as total_matches
                     FROM match_participants mp1
                     JOIN match_participants mp2 ON mp1.match_id = mp2.match_id
                     JOIN match_results mr ON mp1.match_id = mr.id
-                    WHERE mp1.user_id = ? AND mp2.user_id = ? 
-                        AND mp1.user_id != mp2.user_id
-                        AND mr.guild_id = ?
+                    WHERE mp1.user_id = ?      
+                        AND mp2.user_id = ?         
+                        AND mp1.user_id != mp2.user_id 
+                        AND mp1.team != mp2.team    
+                        AND mr.guild_id = ?  
                 ''', (user1_id, user2_id, guild_id)) as cursor:
                     result = await cursor.fetchone()
                     
                     if result and result[2] > 0:
                         return {
-                            'wins': result[0] or 0,
-                            'losses': result[1] or 0,
-                            'total_matches': result[2]
+                            'user1_wins': result[0] or 0,
+                            'user2_wins': result[1] or 0,
+                            'total_matches': result[2],
+                            'wins': result[0] or 0,   
+                            'losses': result[1] or 0  
                         }
                     
                     return None
@@ -3691,3 +3661,1045 @@ class DatabaseManager:
         except Exception as e:
             print(f"최대 경기번호 조회 실패: {e}")
             return None
+
+    async def get_user_map_type_stats(self, user_id: str, guild_id: str) -> List[Dict]:
+        """사용자의 맵 타입별 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL
+                    GROUP BY mr.map_type
+                    HAVING COUNT(*) >= 3  -- 최소 3경기 이상
+                    ORDER BY winrate DESC
+                ''', (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'map_type': row[0],
+                            'games': row[1], 
+                            'wins': row[2],
+                            'winrate': row[3]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"맵 타입별 통계 조회 실패: {e}")
+            return []
+
+    async def get_user_best_worst_maps(self, user_id: str, guild_id: str) -> Dict:
+        """사용자의 최고/최저 승률 맵 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mr.map_name,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_name IS NOT NULL
+                    GROUP BY mr.map_name
+                    HAVING COUNT(*) >= 3  -- 최소 3경기 이상
+                    ORDER BY winrate DESC
+                ''', (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    if not rows:
+                        return {}
+                    
+                    # 최고/최저 맵 추출
+                    best_map = rows[0]  # 첫 번째 = 최고 승률
+                    worst_map = rows[-1]  # 마지막 = 최저 승률
+                    
+                    result = {
+                        'best_map': {
+                            'name': best_map[0],
+                            'games': best_map[1],
+                            'wins': best_map[2], 
+                            'winrate': best_map[3]
+                        }
+                    }
+                    
+                    # 최고와 최저가 다른 경우에만 최저 맵 추가
+                    if len(rows) > 1 and best_map[0] != worst_map[0]:
+                        result['worst_map'] = {
+                            'name': worst_map[0],
+                            'games': worst_map[1],
+                            'wins': worst_map[2],
+                            'winrate': worst_map[3]
+                        }
+                    
+                    return result
+                    
+        except Exception as e:
+            print(f"최고/최저 맵 조회 실패: {e}")
+            return {}
+
+    async def get_user_position_map_stats(self, user_id: str, guild_id: str) -> List[Dict]:
+        """사용자의 포지션-맵타입 조합별 성과 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mp.position,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL 
+                        AND mp.position IS NOT NULL
+                    GROUP BY mp.position, mr.map_type
+                    HAVING COUNT(*) >= 3  -- 최소 3경기 이상
+                    ORDER BY mp.position, winrate DESC
+                ''', (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'position': row[0],
+                            'map_type': row[1],
+                            'games': row[2],
+                            'wins': row[3],
+                            'winrate': row[4]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"포지션-맵 조합 통계 조회 실패: {e}")
+            return []
+
+    async def get_server_map_type_rankings(self, guild_id: str, map_type: str, min_games: int = 3) -> List[Dict]:
+        """서버 맵 타입별 랭킹 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mp.user_id,
+                        mp.username,
+                        ru.current_season_tier,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    LEFT JOIN registered_users ru ON mp.user_id = ru.user_id AND mr.guild_id = ru.guild_id
+                    WHERE mr.guild_id = ? AND mr.map_type = ?
+                    GROUP BY mp.user_id, mp.username
+                    HAVING COUNT(*) >= ?
+                    ORDER BY winrate DESC, games DESC
+                    LIMIT 50
+                ''', (guild_id, map_type, min_games)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1],
+                            'tier': row[2],
+                            'games': row[3],
+                            'wins': row[4],
+                            'winrate': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"맵 타입별 랭킹 조회 실패: {e}")
+            return []
+
+    async def get_server_specific_map_rankings(self, guild_id: str, map_name: str, min_games: int = 3) -> List[Dict]:
+        """서버 특정 맵별 랭킹 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mp.user_id,
+                        mp.username,
+                        ru.current_season_tier,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    LEFT JOIN registered_users ru ON mp.user_id = ru.user_id AND mr.guild_id = ru.guild_id
+                    WHERE mr.guild_id = ? AND mr.map_name = ?
+                    GROUP BY mp.user_id, mp.username
+                    HAVING COUNT(*) >= ?
+                    ORDER BY winrate DESC, games DESC
+                    LIMIT 50
+                ''', (guild_id, map_name, min_games)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1], 
+                            'tier': row[2],
+                            'games': row[3],
+                            'wins': row[4],
+                            'winrate': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"특정 맵 랭킹 조회 실패: {e}")
+            return []
+
+    async def get_server_rankings(self, guild_id: str, sort_by: str = "winrate", 
+                                position: str = "all", min_games: int = 5) -> List[Dict]:
+        """기존 서버 랭킹 메서드 (맵 타입 정렬 지원 추가)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 맵 타입별 정렬인지 확인
+                if sort_by.endswith('_winrate'):
+                    map_type_name = sort_by.replace('_winrate', '')
+                    # 맵 타입명 매핑
+                    map_type_map = {
+                        'escort': '호위',
+                        'control': '쟁탈', 
+                        'hybrid': '혼합',
+                        'push': '밀기',
+                        'flashpoint': '플래시포인트',
+                        'clash': '격돌'
+                    }
+                    
+                    if map_type_name in map_type_map:
+                        return await self.get_server_map_type_rankings(
+                            guild_id, map_type_map[map_type_name], min_games=3
+                        )
+                
+                # 기존 일반 랭킹 로직
+                base_query = '''
+                    SELECT 
+                        us.user_id,
+                        ru.username,
+                        ru.current_season_tier,
+                        us.total_games,
+                        us.total_wins,
+                        ROUND(us.total_wins * 100.0 / us.total_games, 1) as winrate
+                    FROM user_statistics us
+                    LEFT JOIN registered_users ru ON us.user_id = ru.user_id AND us.guild_id = ru.guild_id
+                    WHERE us.guild_id = ? AND us.total_games >= ?
+                '''
+                
+                params = [guild_id, min_games]
+                
+                # 포지션 필터 적용
+                if position != "all":
+                    if position == "tank":
+                        base_query += " AND us.tank_games >= ?"
+                        params.append(min_games)
+                    elif position == "dps": 
+                        base_query += " AND us.dps_games >= ?"
+                        params.append(min_games)
+                    elif position == "support":
+                        base_query += " AND us.support_games >= ?"
+                        params.append(min_games)
+                
+                # 정렬 기준 적용
+                if sort_by == "winrate":
+                    base_query += " ORDER BY winrate DESC, us.total_games DESC"
+                elif sort_by == "games":
+                    base_query += " ORDER BY us.total_games DESC, winrate DESC"
+                elif sort_by == "wins":
+                    base_query += " ORDER BY us.total_wins DESC, winrate DESC"
+                
+                base_query += " LIMIT 50"
+                
+                async with db.execute(base_query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1] or 'Unknown',
+                            'tier': row[2],
+                            'total_games': row[3],
+                            'wins': row[4], 
+                            'winrate': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"서버 랭킹 조회 실패: {e}")
+            return []
+
+    async def get_server_map_popularity(self, guild_id: str, map_type: str = "all", limit: int = 10) -> List[Dict]:
+        """서버 인기 맵 랭킹 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                if map_type == "all":
+                    query = '''
+                        SELECT 
+                            map_name,
+                            map_type,
+                            COUNT(*) as play_count,
+                            ROUND(COUNT(*) * 100.0 / (
+                                SELECT COUNT(*) FROM match_results 
+                                WHERE guild_id = ? AND map_name IS NOT NULL
+                            ), 1) as play_percentage
+                        FROM match_results 
+                        WHERE guild_id = ? AND map_name IS NOT NULL
+                        GROUP BY map_name, map_type
+                        ORDER BY play_count DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, guild_id, limit)
+                else:
+                    query = '''
+                        SELECT 
+                            map_name,
+                            map_type,
+                            COUNT(*) as play_count,
+                            ROUND(COUNT(*) * 100.0 / (
+                                SELECT COUNT(*) FROM match_results 
+                                WHERE guild_id = ? AND map_type = ? AND map_name IS NOT NULL
+                            ), 1) as play_percentage
+                        FROM match_results 
+                        WHERE guild_id = ? AND map_type = ? AND map_name IS NOT NULL
+                        GROUP BY map_name, map_type
+                        ORDER BY play_count DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, map_type, guild_id, map_type, limit)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'map_name': row[0],
+                            'map_type': row[1], 
+                            'play_count': row[2],
+                            'play_percentage': row[3]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"서버 맵 인기도 조회 실패: {e}")
+            return []
+
+    async def get_server_map_balance(self, guild_id: str, min_games: int = 3) -> List[Dict]:
+        """서버 맵별 밸런스 분석 (A팀 vs B팀 승률)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        map_name,
+                        map_type,
+                        COUNT(*) as total_games,
+                        SUM(CASE WHEN winning_team = 'team_a' THEN 1 ELSE 0 END) as team_a_wins,
+                        SUM(CASE WHEN winning_team = 'team_b' THEN 1 ELSE 0 END) as team_b_wins,
+                        ROUND(SUM(CASE WHEN winning_team = 'team_a' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as team_a_winrate,
+                        ROUND(SUM(CASE WHEN winning_team = 'team_b' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as team_b_winrate,
+                        ABS(50.0 - (SUM(CASE WHEN winning_team = 'team_a' THEN 1 ELSE 0 END) * 100.0 / COUNT(*))) as balance_score
+                    FROM match_results 
+                    WHERE guild_id = ? AND map_name IS NOT NULL
+                    GROUP BY map_name, map_type
+                    HAVING COUNT(*) >= ?
+                    ORDER BY balance_score ASC  -- 0에 가까울수록 균형잡힘
+                ''', (guild_id, min_games)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'map_name': row[0],
+                            'map_type': row[1],
+                            'total_games': row[2],
+                            'team_a_wins': row[3],
+                            'team_b_wins': row[4],
+                            'team_a_winrate': row[5],
+                            'team_b_winrate': row[6],
+                            'balance_score': row[7],
+                            'balance_rating': self._get_balance_rating(row[7])
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"서버 맵 밸런스 조회 실패: {e}")
+            return []
+
+    async def get_server_map_meta(self, guild_id: str, min_games: int = 5) -> List[Dict]:
+        """서버 맵 메타 분석 (맵별 포지션 승률)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mr.map_name,
+                        mr.map_type,
+                        mp.position,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mr.guild_id = ? AND mr.map_name IS NOT NULL AND mp.position IS NOT NULL
+                    GROUP BY mr.map_name, mr.map_type, mp.position
+                    HAVING COUNT(*) >= ?
+                    ORDER BY mr.map_name, winrate DESC
+                ''', (guild_id, min_games)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    # 맵별로 그룹화해서 반환
+                    map_meta = {}
+                    for row in rows:
+                        map_name = row[0]
+                        if map_name not in map_meta:
+                            map_meta[map_name] = {
+                                'map_name': row[0],
+                                'map_type': row[1],
+                                'positions': []
+                            }
+                        
+                        map_meta[map_name]['positions'].append({
+                            'position': row[2],
+                            'games': row[3],
+                            'wins': row[4],
+                            'winrate': row[5]
+                        })
+                    
+                    return list(map_meta.values())
+                    
+        except Exception as e:
+            print(f"서버 맵 메타 조회 실패: {e}")
+            return []
+
+    async def get_server_map_overview(self, guild_id: str) -> Dict:
+        """서버 맵 통계 전체 개요"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 전체 통계
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as total_matches,
+                        COUNT(DISTINCT map_name) as unique_maps,
+                        COUNT(DISTINCT map_type) as unique_map_types
+                    FROM match_results
+                    WHERE guild_id = ? AND map_name IS NOT NULL
+                ''', (guild_id,)) as cursor:
+                    overview = await cursor.fetchone()
+                
+                # 맵 타입별 분포
+                async with db.execute('''
+                    SELECT 
+                        map_type,
+                        COUNT(*) as count,
+                        ROUND(COUNT(*) * 100.0 / (
+                            SELECT COUNT(*) FROM match_results 
+                            WHERE guild_id = ? AND map_name IS NOT NULL
+                        ), 1) as percentage
+                    FROM match_results
+                    WHERE guild_id = ? AND map_name IS NOT NULL
+                    GROUP BY map_type
+                    ORDER BY count DESC
+                ''', (guild_id, guild_id)) as cursor:
+                    type_distribution = await cursor.fetchall()
+                
+                if not overview or overview[0] == 0:
+                    return {}
+                
+                return {
+                    'total_matches': overview[0],
+                    'unique_maps': overview[1],
+                    'unique_map_types': overview[2],
+                    'type_distribution': [
+                        {
+                            'map_type': row[0],
+                            'count': row[1],
+                            'percentage': row[2]
+                        }
+                        for row in type_distribution
+                    ]
+                }
+                    
+        except Exception as e:
+            print(f"서버 맵 개요 조회 실패: {e}")
+            return {}
+
+    def _get_balance_rating(self, balance_score: float) -> str:
+        """밸런스 점수를 등급으로 변환"""
+        if balance_score <= 5.0:
+            return "완벽"
+        elif balance_score <= 10.0:
+            return "좋음"
+        elif balance_score <= 20.0:
+            return "보통"
+        else:
+            return "불균형"
+
+    async def get_user_detailed_map_stats(self, user_id: str, guild_id: str, map_type: str = None) -> List[Dict]:
+        """사용자의 상세 맵별 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                base_query = '''
+                    SELECT 
+                        mr.map_name,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate,
+                        MAX(mr.match_date) as last_played
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_name IS NOT NULL
+                '''
+                
+                params = [user_id, guild_id]
+                
+                if map_type and map_type != "all":
+                    base_query += " AND mr.map_type = ?"
+                    params.append(map_type)
+                
+                base_query += '''
+                    GROUP BY mr.map_name, mr.map_type
+                    ORDER BY games DESC, winrate DESC
+                '''
+                
+                async with db.execute(base_query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'map_name': row[0],
+                            'map_type': row[1],
+                            'games': row[2],
+                            'wins': row[3],
+                            'winrate': row[4],
+                            'last_played': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"상세 맵별 통계 조회 실패: {e}")
+            return []
+
+    async def get_user_position_map_matrix(self, user_id: str, guild_id: str) -> List[Dict]:
+        """사용자의 포지션-맵 매트릭스 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mp.position,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL 
+                        AND mp.position IS NOT NULL
+                    GROUP BY mp.position, mr.map_type
+                    ORDER BY mp.position, mr.map_type
+                ''', (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'position': row[0],
+                            'map_type': row[1],
+                            'games': row[2],
+                            'wins': row[3],
+                            'winrate': row[4]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"포지션-맵 매트릭스 조회 실패: {e}")
+            return []
+
+    async def get_map_improvement_suggestions(self, user_id: str, guild_id: str) -> Dict:
+        """맵/포지션 개선 제안 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 가장 약한 맵 타입 찾기
+                async with db.execute('''
+                    SELECT 
+                        mr.map_type,
+                        COUNT(*) as games,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL
+                    GROUP BY mr.map_type
+                    HAVING COUNT(*) >= 3
+                    ORDER BY winrate ASC
+                    LIMIT 1
+                ''', (user_id, guild_id)) as cursor:
+                    weak_type_row = await cursor.fetchone()
+                
+                # 가장 약한 개별 맵 찾기
+                async with db.execute('''
+                    SELECT 
+                        mr.map_name,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_name IS NOT NULL
+                    GROUP BY mr.map_name, mr.map_type
+                    HAVING COUNT(*) >= 2
+                    ORDER BY winrate ASC
+                    LIMIT 1
+                ''', (user_id, guild_id)) as cursor:
+                    weak_map_row = await cursor.fetchone()
+                
+                # 개선이 필요한 포지션-맵 조합 찾기
+                async with db.execute('''
+                    SELECT 
+                        mp.position,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL 
+                        AND mp.position IS NOT NULL
+                    GROUP BY mp.position, mr.map_type
+                    HAVING COUNT(*) >= 2
+                    ORDER BY winrate ASC
+                    LIMIT 1
+                ''', (user_id, guild_id)) as cursor:
+                    weak_combo_row = await cursor.fetchone()
+                
+                result = {}
+                
+                if weak_type_row:
+                    result['weak_type'] = {
+                        'map_type': weak_type_row[0],
+                        'games': weak_type_row[1],
+                        'winrate': weak_type_row[2]
+                    }
+                
+                if weak_map_row:
+                    result['weak_map'] = {
+                        'map_name': weak_map_row[0],
+                        'map_type': weak_map_row[1], 
+                        'games': weak_map_row[2],
+                        'winrate': weak_map_row[3]
+                    }
+                
+                if weak_combo_row:
+                    result['weak_combo'] = {
+                        'position': weak_combo_row[0],
+                        'map_type': weak_combo_row[1],
+                        'games': weak_combo_row[2],
+                        'winrate': weak_combo_row[3]
+                    }
+                
+                return result
+                    
+        except Exception as e:
+            print(f"개선 제안 조회 실패: {e}")
+            return {}
+
+    async def get_map_teammates_recommendations(self, user_id: str, guild_id: str, map_type: str = None) -> List[Dict]:
+        """특정 맵에서 잘하는 추천 팀원들 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                base_query = '''
+                    SELECT 
+                        mp.user_id,
+                        mp.username,
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(mp.won) as wins,
+                        ROUND(SUM(mp.won) * 100.0 / COUNT(*), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id != ? AND mr.guild_id = ? 
+                        AND mr.map_type IS NOT NULL
+                '''
+                
+                params = [user_id, guild_id]
+                
+                if map_type and map_type != "all":
+                    base_query += " AND mr.map_type = ?"
+                    params.append(map_type)
+                
+                base_query += '''
+                    GROUP BY mp.user_id, mp.username, mr.map_type
+                    HAVING COUNT(*) >= 3
+                    ORDER BY winrate DESC, games DESC
+                    LIMIT 10
+                '''
+                
+                async with db.execute(base_query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1],
+                            'map_type': row[2],
+                            'games': row[3],
+                            'wins': row[4],
+                            'winrate': row[5]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"추천 팀원 조회 실패: {e}")
+            return []
+
+    async def get_teammate_pair_stats(self, user_id: str, guild_id: str, 
+                                    my_position: str, teammate_position: str) -> List[TeammatePairStats]:
+        """특정 포지션 페어의 승률 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 같은 팀에서 함께 플레이한 경기들 조회
+                query = '''
+                    SELECT 
+                        teammate.user_id as teammate_id,
+                        teammate.username as teammate_name,
+                        COUNT(DISTINCT me.match_id) as total_games,
+                        SUM(CASE WHEN me.won = 1 THEN 1 ELSE 0 END) as wins
+                    FROM match_participants me
+                    JOIN match_participants teammate ON (
+                        me.match_id = teammate.match_id 
+                        AND me.team = teammate.team 
+                        AND me.user_id != teammate.user_id
+                    )
+                    JOIN match_results mr ON me.match_id = mr.id
+                    WHERE me.user_id = ? 
+                        AND mr.guild_id = ?
+                        AND me.position = ? 
+                        AND teammate.position = ?
+                    GROUP BY teammate.user_id, teammate.username
+                    HAVING COUNT(*) >= 1
+                    ORDER BY wins DESC, total_games DESC
+                '''
+                
+                async with db.execute(query, (user_id, guild_id, my_position, teammate_position)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    pair_stats = []
+                    for row in rows:
+                        teammate_id, teammate_name, total_games, wins = row
+                        winrate = round((wins / total_games) * 100, 1) if total_games > 0 else 0.0
+                        
+                        stats = TeammatePairStats(
+                            teammate_id=teammate_id,
+                            teammate_name=teammate_name,
+                            my_position=my_position,
+                            teammate_position=teammate_position,
+                            total_games=total_games,
+                            wins=wins,
+                            winrate=winrate
+                        )
+                        pair_stats.append(stats)
+                    
+                    return pair_stats
+                    
+        except Exception as e:
+            print(f"팀메이트 페어 통계 조회 실패: {e}")
+            return []
+
+    async def get_user_team_winrate_analysis(self, user_id: str, guild_id: str) -> Optional[TeamWinrateAnalysis]:
+        """사용자의 전체 팀 승률 분석"""
+        try:
+            # 각 포지션별 페어 통계 조회
+            tank_pairs = []
+            support_pairs = []
+            dps_pairs = []
+            
+            # 내가 딜러/힐러일 때 탱커 페어 승률
+            tank_pairs_as_dps = await self.get_teammate_pair_stats(user_id, guild_id, '딜러', '탱커')
+            tank_pairs_as_support = await self.get_teammate_pair_stats(user_id, guild_id, '힐러', '탱커')
+            tank_pairs = self._merge_pair_stats(tank_pairs_as_dps + tank_pairs_as_support)
+            
+            # 내가 힐러일 때 힐러 페어 승률  
+            support_pairs = await self.get_teammate_pair_stats(user_id, guild_id, '힐러', '힐러')
+            
+            # 내가 딜러일 때 딜러 페어 승률
+            dps_pairs = await self.get_teammate_pair_stats(user_id, guild_id, '딜러', '딜러')
+            
+            # 사용자 정보 조회
+            user_info = await self.get_registered_user_info(guild_id, user_id)
+            username = user_info.get('username', 'Unknown') if user_info else 'Unknown'
+            
+            # 베스트 페어 선정
+            best_pairs = self._select_best_pairs(tank_pairs, support_pairs, dps_pairs)
+
+            # 실제 고유 경기 수 조회
+            actual_team_games = await self.get_user_actual_team_games(user_id, guild_id)
+
+            return TeamWinrateAnalysis(
+                user_id=user_id,
+                username=username,
+                tank_pairs=tank_pairs,
+                support_pairs=support_pairs,
+                dps_pairs=dps_pairs,
+                best_pairs=best_pairs,
+                actual_team_games=actual_team_games
+            )
+            
+        except Exception as e:
+            print(f"팀 승률 분석 실패: {e}")
+            return None
+
+    async def get_best_pairs_summary(self, user_id: str, guild_id: str) -> Optional[BestPairSummary]:
+        """베스트 페어 요약만 조회 (내정보 명령어용)"""
+        try:
+            analysis = await self.get_user_team_winrate_analysis(user_id, guild_id)
+            return analysis.best_pairs if analysis else None
+        except Exception as e:
+            print(f"베스트 페어 요약 조회 실패: {e}")
+            return None
+
+    def _merge_pair_stats(self, pair_list: List[TeammatePairStats]) -> List[TeammatePairStats]:
+        """같은 팀메이트의 통계를 병합 (딜러+힐러로 탱커와 함께한 경우)"""
+        merged = {}
+        
+        for pair in pair_list:
+            key = pair.teammate_id
+            
+            if key in merged:
+                # 기존 통계와 병합
+                existing = merged[key]
+                existing.total_games += pair.total_games
+                existing.wins += pair.wins
+                # 승률 재계산
+                existing.winrate = round((existing.wins / existing.total_games) * 100, 1) if existing.total_games > 0 else 0.0
+            else:
+                merged[key] = pair
+        
+        # 승률순으로 정렬
+        return sorted(merged.values(), key=lambda x: (-x.winrate, -x.total_games))
+
+    def _select_best_pairs(self, tank_pairs: List[TeammatePairStats], 
+                        support_pairs: List[TeammatePairStats], 
+                        dps_pairs: List[TeammatePairStats]) -> BestPairSummary:
+        """베스트 페어 선정 (최소 3경기 이상)"""
+        
+        def get_best_pair(pairs: List[TeammatePairStats]) -> Optional[TeammatePairStats]:
+            # 3경기 이상 + 승률 높은 순으로 선정
+            qualified = [p for p in pairs if p.total_games >= 3]
+            return qualified[0] if qualified else None
+        
+        return BestPairSummary(
+            tank_pair=get_best_pair(tank_pairs),
+            support_pair=get_best_pair(support_pairs),
+            dps_pair=get_best_pair(dps_pairs)
+        )
+
+    def get_position_display_name(self, position: str) -> str:
+        """포지션 표시명 변환"""
+        position_map = {
+            '탱': '탱커',
+            '딜': '딜러', 
+            '힐': '힐러'
+        }
+        return position_map.get(position, position)
+
+    def format_pair_winrate(self, pair: TeammatePairStats, show_emoji: bool = True) -> str:
+        """페어 승률 포맷팅"""
+        emoji = ""
+        if show_emoji:
+            if pair.winrate >= 70:
+                emoji = " 🔥"
+            elif pair.winrate <= 40:
+                emoji = " ⚠️"
+        
+        return f"{pair.teammate_name}: {pair.winrate}% ({pair.wins}승 {pair.total_games - pair.wins}패){emoji}"
+
+    async def debug_team_winrate_data(self, user_id: str, guild_id: str) -> Dict:
+        """팀 승률 데이터 디버깅용"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 사용자의 모든 경기 데이터 조회
+                async with db.execute('''
+                    SELECT mp.match_id, mp.position, mp.won, mp.team,
+                        GROUP_CONCAT(teammate.username || ':' || teammate.position) as teammates
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    LEFT JOIN match_participants teammate ON (
+                        mp.match_id = teammate.match_id 
+                        AND mp.team = teammate.team 
+                        AND mp.user_id != teammate.user_id
+                    )
+                    WHERE mp.user_id = ? AND mr.guild_id = ?
+                    GROUP BY mp.match_id, mp.position, mp.won, mp.team
+                ''', (user_id, guild_id)) as cursor:
+                    matches = await cursor.fetchall()
+                    
+                    debug_info = {
+                        'total_matches': len(matches),
+                        'matches': [],
+                        'positions_played': set(),
+                        'teammates_by_position': {}
+                    }
+                    
+                    for match in matches:
+                        match_id, position, won, team, teammates_str = match
+                        teammates = teammates_str.split(',') if teammates_str else []
+                        
+                        debug_info['matches'].append({
+                            'match_id': match_id,
+                            'my_position': position,
+                            'won': bool(won),
+                            'team': team,
+                            'teammates': teammates
+                        })
+                        
+                        if position:
+                            debug_info['positions_played'].add(position)
+                    
+                    debug_info['positions_played'] = list(debug_info['positions_played'])
+                    
+                    return debug_info
+                    
+        except Exception as e:
+            print(f"팀 승률 디버깅 실패: {e}")
+            return {'error': str(e)}
+
+    async def get_user_map_type_stats(self, user_id: str, guild_id: str):
+        """사용자의 맵 타입별 통계 (database.py에 추가)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                query = '''
+                    SELECT 
+                        mr.map_type,
+                        COUNT(*) as games,
+                        SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                        ROUND(AVG(CASE WHEN mp.won = 1 THEN 100.0 ELSE 0.0 END), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? AND mr.map_type IS NOT NULL
+                    GROUP BY mr.map_type
+                    HAVING COUNT(*) >= 3
+                    ORDER BY winrate DESC, games DESC
+                '''
+                
+                async with db.execute(query, (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'map_type': row[0],
+                            'games': row[1],
+                            'wins': row[2],
+                            'winrate': row[3]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"맵 타입별 통계 조회 실패: {e}")
+            return []
+
+    async def get_user_best_worst_maps(self, user_id: str, guild_id: str, limit: int = 3):
+        """사용자의 베스트/워스트 맵 (database.py에 추가)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                query = '''
+                    SELECT 
+                        mr.map_name,
+                        COUNT(*) as games,
+                        SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                        ROUND(AVG(CASE WHEN mp.won = 1 THEN 100.0 ELSE 0.0 END), 1) as winrate
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ? AND mr.map_name IS NOT NULL
+                    GROUP BY mr.map_name
+                    HAVING COUNT(*) >= 3
+                    ORDER BY winrate DESC, games DESC
+                '''
+                
+                async with db.execute(query, (user_id, guild_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    maps_data = [
+                        {
+                            'map_name': row[0],
+                            'games': row[1],
+                            'wins': row[2],
+                            'winrate': row[3]
+                        }
+                        for row in rows
+                    ]
+                    
+                    return {
+                        'best': maps_data[:limit] if maps_data else [],
+                        'worst': maps_data[-limit:] if len(maps_data) > limit else []
+                    }
+                    
+        except Exception as e:
+            print(f"베스트/워스트 맵 조회 실패: {e}")
+            return {'best': [], 'worst': []}
+
+    async def get_user_recent_matches(self, user_id: str, guild_id: str, limit: int = 5):
+        """사용자의 최근 경기"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                query = '''
+                    SELECT 
+                        mp.won,
+                        mp.position,
+                        mr.match_date
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ?
+                    ORDER BY mr.match_date DESC
+                    LIMIT ?
+                '''
+                
+                async with db.execute(query, (user_id, guild_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'won': bool(row[0]),
+                            'position': row[1],
+                            'match_date': row[2]
+                        }
+                        for row in rows
+                    ]
+                    
+        except Exception as e:
+            print(f"최근 경기 조회 실패: {e}")
+            return []
+
+    async def get_user_actual_team_games(self, user_id: str, guild_id: str) -> int:
+        """사용자의 실제 고유 팀 경기 수"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT COUNT(DISTINCT mp.match_id) as actual_games
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ?
+                ''', (user_id, guild_id)) as cursor:
+                    result = await cursor.fetchone()
+                    return result[0] if result else 0
+        except Exception as e:
+            print(f"실제 팀 경기 수 조회 실패: {e}")
+            return 0
