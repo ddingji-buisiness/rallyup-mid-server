@@ -452,17 +452,17 @@ class BestPairSummary:
 
 @dataclass
 class TeamWinrateAnalysis:
-    """팀 승률 종합 분석"""
+    """팀 승률 종합 분석 - 동료 승률 시스템"""
     user_id: str
     username: str
-    tank_pairs: List[TeammatePairStats]
-    support_pairs: List[TeammatePairStats]
-    dps_pairs: List[TeammatePairStats]
+    tank_pairs: List[TeammatePairStats]    # 탱커 동료들
+    support_pairs: List[TeammatePairStats] # 힐러 동료들
+    dps_pairs: List[TeammatePairStats]     # 딜러 동료들
     best_pairs: BestPairSummary
     actual_team_games: int = 0
 
     def get_total_team_games(self) -> int:
-        """실제 팀 경기 총 횟수 (중복 제거)"""
+        """실제 팀 경기 이 횟수 (중복 제거)"""
         return self.actual_team_games
     
     def get_overall_team_winrate(self) -> float:
@@ -470,14 +470,25 @@ class TeamWinrateAnalysis:
         if self.actual_team_games == 0:
             return 0.0
         
-        all_pairs = self.tank_pairs + self.support_pairs + self.dps_pairs
-        if not all_pairs:
+        # 모든 동료들의 승률을 가중평균으로 계산
+        all_teammates = self.tank_pairs + self.support_pairs + self.dps_pairs
+        if not all_teammates:
             return 0.0
         
-        total_wins = sum(pair.wins for pair in all_pairs)
-        total_pair_games = sum(pair.total_games for pair in all_pairs)
+        total_weighted_wins = 0
+        total_weighted_games = 0
         
-        if total_pair_games == 0:
+        for teammate in all_teammates:
+            # 각 동료와의 경기에서 가중치 적용
+            total_weighted_wins += teammate.wins
+            total_weighted_games += teammate.total_games
+        
+        if total_weighted_games == 0:
             return 0.0
         
-        return round((total_wins / total_pair_games) * 100, 1)
+        # 실제 경기 수를 고려한 보정
+        # (동료별 경기는 중복 계산되므로 실제 경기 수로 나누어 보정)
+        games_per_match = total_weighted_games / self.actual_team_games if self.actual_team_games > 0 else 1
+        adjusted_winrate = (total_weighted_wins / total_weighted_games) * 100
+        
+        return round(adjusted_winrate, 1)

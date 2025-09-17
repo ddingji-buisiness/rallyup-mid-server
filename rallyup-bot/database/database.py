@@ -4424,30 +4424,19 @@ class DatabaseManager:
             return []
 
     async def get_user_team_winrate_analysis(self, user_id: str, guild_id: str) -> Optional[TeamWinrateAnalysis]:
-        """사용자의 전체 팀 승률 분석"""
+        """사용자의 전체 팀 승률 분석 - 동료 승률 시스템"""
         try:
-            # 각 포지션별 페어 통계 조회
-            tank_pairs = []
-            support_pairs = []
-            dps_pairs = []
-            
-            # 내가 딜러/힐러일 때 탱커 페어 승률
-            tank_pairs_as_dps = await self.get_teammate_pair_stats(user_id, guild_id, '딜러', '탱커')
-            tank_pairs_as_support = await self.get_teammate_pair_stats(user_id, guild_id, '힐러', '탱커')
-            tank_pairs = self._merge_pair_stats(tank_pairs_as_dps + tank_pairs_as_support)
-            
-            # 내가 힐러일 때 힐러 페어 승률  
-            support_pairs = await self.get_teammate_pair_stats(user_id, guild_id, '힐러', '힐러')
-            
-            # 내가 딜러일 때 딜러 페어 승률
-            dps_pairs = await self.get_teammate_pair_stats(user_id, guild_id, '딜러', '딜러')
+            # 각 포지션별 동료 승률 조회 (내 포지션 무관)
+            tank_teammates = await self.get_teammate_stats_by_position(user_id, guild_id, '탱커')
+            dps_teammates = await self.get_teammate_stats_by_position(user_id, guild_id, '딜러')
+            support_teammates = await self.get_teammate_stats_by_position(user_id, guild_id, '힐러')
             
             # 사용자 정보 조회
             user_info = await self.get_registered_user_info(guild_id, user_id)
             username = user_info.get('username', 'Unknown') if user_info else 'Unknown'
             
-            # 베스트 페어 선정
-            best_pairs = self._select_best_pairs(tank_pairs, support_pairs, dps_pairs)
+            # 베스트 동료 선정
+            best_pairs = self._select_best_teammates(tank_teammates, support_teammates, dps_teammates)
 
             # 실제 고유 경기 수 조회
             actual_team_games = await self.get_user_actual_team_games(user_id, guild_id)
@@ -4455,9 +4444,9 @@ class DatabaseManager:
             return TeamWinrateAnalysis(
                 user_id=user_id,
                 username=username,
-                tank_pairs=tank_pairs,
-                support_pairs=support_pairs,
-                dps_pairs=dps_pairs,
+                tank_pairs=tank_teammates,      # 이제 "탱커 동료" 의미
+                support_pairs=support_teammates, # 이제 "힐러 동료" 의미  
+                dps_pairs=dps_teammates,        # 이제 "딜러 동료" 의미
                 best_pairs=best_pairs,
                 actual_team_games=actual_team_games
             )
@@ -4689,17 +4678,84 @@ class DatabaseManager:
             return []
 
     async def get_user_actual_team_games(self, user_id: str, guild_id: str) -> int:
-        """사용자의 실제 고유 팀 경기 수"""
+        """사용자의 실제 고유 경기 수 조회"""
         try:
-            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
-                    SELECT COUNT(DISTINCT mp.match_id) as actual_games
+                    SELECT COUNT(DISTINCT mr.id)
                     FROM match_participants mp
                     JOIN match_results mr ON mp.match_id = mr.id
                     WHERE mp.user_id = ? AND mr.guild_id = ?
                 ''', (user_id, guild_id)) as cursor:
                     result = await cursor.fetchone()
                     return result[0] if result else 0
+                    
         except Exception as e:
             print(f"실제 팀 경기 수 조회 실패: {e}")
             return 0
+
+    async def get_teammate_stats_by_position(self, user_id: str, guild_id: str, teammate_position: str) -> List[TeammatePairStats]:
+        """특정 포지션 동료들과의 승률 통계 조회 (내 포지션 무관)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                query = '''
+                    SELECT 
+                        teammate.user_id as teammate_id,
+                        teammate.username as teammate_name,
+                        COUNT(*) as total_games,
+                        SUM(me.won) as wins
+                    FROM match_participants me
+                    JOIN match_participants teammate ON (
+                        me.match_id = teammate.match_id 
+                        AND me.team = teammate.team 
+                        AND me.user_id != teammate.user_id
+                    )
+                    JOIN match_results mr ON me.match_id = mr.id
+                    WHERE me.user_id = ? 
+                        AND mr.guild_id = ?
+                        AND teammate.position = ?  -- 동료의 포지션만 지정
+                    GROUP BY teammate.user_id, teammate.username
+                    HAVING COUNT(*) >= 1
+                    ORDER BY (SUM(me.won) * 100.0 / COUNT(*)) DESC, COUNT(*) DESC
+                '''
+                
+                async with db.execute(query, (user_id, guild_id, teammate_position)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    teammate_stats = []
+                    for row in rows:
+                        teammate_id, teammate_name, total_games, wins = row
+                        winrate = round((wins / total_games) * 100, 1) if total_games > 0 else 0.0
+                        
+                        stats = TeammatePairStats(
+                            teammate_id=teammate_id,
+                            teammate_name=teammate_name,
+                            my_position="모든포지션",  # 내 포지션은 무관
+                            teammate_position=teammate_position,
+                            total_games=total_games,
+                            wins=wins,
+                            winrate=winrate
+                        )
+                        teammate_stats.append(stats)
+                    
+                    return teammate_stats
+                    
+        except Exception as e:
+            print(f"동료 포지션별 승률 조회 실패 ({teammate_position}): {e}")
+            return []
+
+    def _select_best_teammates(self, tank_teammates: List[TeammatePairStats], 
+                            support_teammates: List[TeammatePairStats], 
+                            dps_teammates: List[TeammatePairStats]) -> BestPairSummary:
+        """베스트 동료 선정 (최소 3경기 이상)"""
+        
+        def get_best_teammate(teammates: List[TeammatePairStats]) -> Optional[TeammatePairStats]:
+            # 3경기 이상 + 승률 높은 순으로 선정
+            qualified = [t for t in teammates if t.total_games >= 3]
+            return qualified[0] if qualified else None
+        
+        return BestPairSummary(
+            tank_pair=get_best_teammate(tank_teammates),    # 베스트 탱커 동료
+            support_pair=get_best_teammate(support_teammates), # 베스트 힐러 동료
+            dps_pair=get_best_teammate(dps_teammates)       # 베스트 딜러 동료
+        )
