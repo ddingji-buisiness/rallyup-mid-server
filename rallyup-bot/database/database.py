@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 from utils.time_utils import TimeUtils
 
 import discord
-from database.models import BestPairSummary, ClanScrim, ClanTeam, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup
+from database.models import BestPairSummary, ClanScrim, ClanTeam, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup, WordleAttempt, WordleGame, WordleGuess, WordleRating
 import uuid
 import asyncio
 
@@ -25,6 +25,7 @@ class DatabaseManager:
             await self.initialize_clan_tables()
             await self.initialize_server_settings_tables()
             await self.create_bamboo_tables()
+            await self.initialize_wordle_tables()
 
             # users 테이블
             await db.execute('''
@@ -41,6 +42,8 @@ class DatabaseManager:
                     support_wins INTEGER DEFAULT 0,
                     score INTEGER DEFAULT 1000,
                     total_sessions INTEGER DEFAULT 0,
+                    wordle_points INTEGER DEFAULT 10000,
+                    daily_points_claimed TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -84,6 +87,8 @@ class DatabaseManager:
                     approved_by TEXT NOT NULL,
                     registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN DEFAULT TRUE,
+                    wordle_points INTEGER DEFAULT 10000,
+                    daily_points_claimed TEXT,
                     UNIQUE(guild_id, user_id)
                 )
             ''')
@@ -4759,3 +4764,766 @@ class DatabaseManager:
             support_pair=get_best_teammate(support_teammates), # 베스트 힐러 동료
             dps_pair=get_best_teammate(dps_teammates)       # 베스트 딜러 동료
         )
+    
+    async def initialize_wordle_tables(self):
+        """띵지워들 관련 테이블 초기화"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                # 1. 기존 users 테이블에 워들 관련 컬럼 추가
+                await self._add_wordle_columns_to_users(db)
+                
+                # 2. 워들 게임 테이블
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS wordle_games (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id TEXT NOT NULL,
+                        word TEXT NOT NULL,
+                        hint TEXT,
+                        creator_id TEXT NOT NULL,
+                        creator_username TEXT NOT NULL,
+                        bet_points INTEGER NOT NULL DEFAULT 0,
+                        total_pool INTEGER NOT NULL DEFAULT 0,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        is_completed BOOLEAN DEFAULT FALSE,
+                        winner_id TEXT,
+                        winner_username TEXT,
+                        creator_reward_paid BOOLEAN DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL,
+                        completed_at TIMESTAMP
+                    )
+                ''')
+                
+                # 3. 워들 도전 기록 테이블
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS wordle_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        game_id INTEGER NOT NULL,
+                        user_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        bet_amount INTEGER NOT NULL,
+                        remaining_points INTEGER NOT NULL,
+                        points_per_failure INTEGER NOT NULL,
+                        attempts_used INTEGER DEFAULT 0,
+                        is_completed BOOLEAN DEFAULT FALSE,
+                        is_winner BOOLEAN DEFAULT FALSE,
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        FOREIGN KEY (game_id) REFERENCES wordle_games(id)
+                    )
+                ''')
+                
+                # 4. 워들 추측 로그 테이블
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS wordle_guesses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        attempt_id INTEGER NOT NULL,
+                        guess_word TEXT NOT NULL,
+                        result_pattern TEXT NOT NULL,
+                        guess_number INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (attempt_id) REFERENCES wordle_attempts(id)
+                    )
+                ''')
+                
+                # 5. 워들 난이도 평가 테이블
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS wordle_ratings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        game_id INTEGER NOT NULL,
+                        user_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        rating TEXT NOT NULL CHECK (rating IN ('쉬움', '적절함', '어려움')),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (game_id) REFERENCES wordle_games(id),
+                        UNIQUE(game_id, user_id)
+                    )
+                ''')
+                
+                # 6. 인덱스 생성 (성능 최적화)
+                await self._create_wordle_indexes(db)
+                
+                await db.commit()
+                print("✅ 띵지워들 테이블이 성공적으로 생성되었습니다.")
+                
+            except Exception as e:
+                await db.rollback()
+                print(f"❌ 띵지워들 테이블 생성 중 오류: {e}")
+                raise
+
+    async def _add_wordle_columns_to_users(self, db):
+        """기존 users 테이블에 워들 관련 컬럼 추가"""
+        try:
+            # wordle_points 컬럼 추가
+            await db.execute('ALTER TABLE registered_users ADD COLUMN wordle_points INTEGER DEFAULT 10000')
+            print("✅ users 테이블에 wordle_points 컬럼 추가")
+        except Exception:
+            # 이미 컬럼이 존재하는 경우 무시
+            pass
+        
+        try:
+            # daily_points_claimed 컬럼 추가
+            await db.execute('ALTER TABLE registered_users ADD COLUMN daily_points_claimed TEXT')
+            print("✅ users 테이블에 daily_points_claimed 컬럼 추가")
+        except Exception:
+            # 이미 컬럼이 존재하는 경우 무시
+            pass
+
+    async def _create_wordle_indexes(self, db):
+        """워들 관련 테이블 인덱스 생성"""
+        indexes = [
+            # 게임 검색 최적화
+            'CREATE INDEX IF NOT EXISTS idx_wordle_games_active ON wordle_games(is_active, expires_at)',
+            'CREATE INDEX IF NOT EXISTS idx_wordle_games_creator ON wordle_games(creator_id)',
+            'CREATE INDEX IF NOT EXISTS idx_wordle_games_guild ON wordle_games(guild_id)',
+            
+            # 도전 기록 최적화
+            'CREATE INDEX IF NOT EXISTS idx_wordle_attempts_game ON wordle_attempts(game_id)',
+            'CREATE INDEX IF NOT EXISTS idx_wordle_attempts_user ON wordle_attempts(user_id)',
+            
+            # 추측 로그 최적화
+            'CREATE INDEX IF NOT EXISTS idx_wordle_guesses_attempt ON wordle_guesses(attempt_id)',
+            
+            # 평가 최적화
+            'CREATE INDEX IF NOT EXISTS idx_wordle_ratings_game ON wordle_ratings(game_id)',
+        ]
+        
+        for index_sql in indexes:
+            await db.execute(index_sql)
+        
+        print("✅ 띵지워들 인덱스 생성 완료")
+
+    # ==========================================
+    # 유저 포인트 관리
+    # ==========================================
+    
+    async def get_user_points(self, guild_id: str, user_id: str) -> int:
+        """등록된 사용자의 포인트 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT wordle_points FROM registered_users 
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    result = await cursor.fetchone()
+                    return result[0] if result else None  # 미등록시 None 반환
+        except Exception as e:
+            print(f"포인트 조회 실패: {e}")
+            return None
+    
+    async def update_user_points(self, user_id: str, points: int) -> bool:
+        """사용자 포인트 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE users 
+                    SET wordle_points = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ?
+                ''', (points, user_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"포인트 업데이트 실패: {e}")
+            return False
+    
+    async def add_user_points(self, guild_id: str, user_id: str, points: int) -> bool:
+        """등록된 사용자만 포인트 변경 가능"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    UPDATE registered_users 
+                    SET wordle_points = wordle_points + ?
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (points, guild_id, user_id))
+                
+                if cursor.rowcount == 0:
+                    return False  # 등록된 사용자가 아님
+                    
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"포인트 변경 실패: {e}")
+            return False
+    
+    async def claim_daily_points(self, guild_id: str, user_id: str) -> bool:
+        """등록된 사용자만 일일 포인트 수령 가능"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 등록된 사용자인지 확인 + 오늘 이미 받았는지 확인
+                async with db.execute('''
+                    SELECT daily_points_claimed FROM registered_users 
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                if not result:
+                    return False  # 등록된 사용자가 아님
+                    
+                if result[0] == today:
+                    return False  # 이미 오늘 받음
+                
+                # 일일 포인트 지급
+                await db.execute('''
+                    UPDATE registered_users 
+                    SET wordle_points = wordle_points + 1000,
+                        daily_points_claimed = ?
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (today, guild_id, user_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"일일 포인트 지급 실패: {e}")
+            return False
+    
+    # ==========================================
+    # 게임 관리
+    # ==========================================
+    
+    async def create_game(self, game: WordleGame) -> Optional[int]:
+        """새 게임 생성"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO wordle_games (
+                        guild_id, word, hint, creator_id, creator_username,
+                        bet_points, total_pool, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    game.guild_id, game.word, game.hint, game.creator_id,
+                    game.creator_username, game.bet_points, game.bet_points,
+                    datetime.now(), game.expires_at
+                ))
+                
+                game_id = cursor.lastrowid
+                await db.commit()
+                return game_id
+        except Exception as e:
+            print(f"게임 생성 실패: {e}")
+            return None
+    
+    async def get_active_games(self, guild_id: str) -> List[Dict]:
+        """활성 게임 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT id, word, hint, creator_id, creator_username, bet_points, total_pool,
+                            created_at, expires_at
+                    FROM wordle_games
+                    WHERE guild_id = ? AND is_active = 1 AND is_completed = 0
+                      AND expires_at > CURRENT_TIMESTAMP
+                    ORDER BY created_at ASC
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'id': row[0],
+                            'word': row[1],
+                            'hint': row[2],
+                            'creator_id': row[3],
+                            'creator_username': row[4],
+                            'bet_points': row[5],
+                            'total_pool': row[6],
+                            'created_at': row[7],
+                            'expires_at': row[8]
+                        }
+                        for row in rows
+                    ]
+        except Exception as e:
+            print(f"활성 게임 조회 실패: {e}")
+            return []
+    
+    async def get_game_by_id(self, game_id: int) -> Optional[Dict]:
+        """ID로 게임 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM wordle_games WHERE id = ?
+                ''', (game_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+        except Exception as e:
+            print(f"게임 조회 실패: {e}")
+            return None
+    
+    async def delete_game(self, game_id: int, creator_id: str) -> bool:
+        """게임 삭제 (본인만 가능)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    DELETE FROM wordle_games 
+                    WHERE id = ? AND creator_id = ? AND is_completed = 0
+                ''', (game_id, creator_id))
+                
+                affected = cursor.rowcount
+                await db.commit()
+                return affected > 0
+        except Exception as e:
+            print(f"게임 삭제 실패: {e}")
+            return False
+    
+    async def complete_game(self, game_id: int, winner_id: Optional[str] = None, 
+                           winner_username: Optional[str] = None) -> bool:
+        """게임 완료 처리"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE wordle_games 
+                    SET is_completed = 1, is_active = 0,
+                        winner_id = ?, winner_username = ?,
+                        completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (winner_id, winner_username, game_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"게임 완료 처리 실패: {e}")
+            return False
+    
+    async def add_to_pool(self, game_id: int, amount: int) -> bool:
+        """게임 포인트 풀에 포인트 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE wordle_games 
+                    SET total_pool = total_pool + ?
+                    WHERE id = ?
+                ''', (amount, game_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"포인트 풀 업데이트 실패: {e}")
+            return False
+    
+    # ==========================================
+    # 도전 기록 관리
+    # ==========================================
+    
+    async def create_attempt(self, attempt: WordleAttempt) -> Optional[int]:
+        """새 도전 기록 생성"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute('''
+                    INSERT INTO wordle_attempts (
+                        game_id, user_id, username, bet_amount, 
+                        remaining_points, points_per_failure, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    attempt.game_id, attempt.user_id, attempt.username,
+                    attempt.bet_amount, attempt.remaining_points,
+                    attempt.points_per_failure, datetime.now()
+                ))
+                
+                attempt_id = cursor.lastrowid
+                await db.commit()
+                return attempt_id
+        except Exception as e:
+            print(f"도전 기록 생성 실패: {e}")
+            return None
+    
+    async def get_user_attempt(self, game_id: int, user_id: str) -> Optional[Dict]:
+        """사용자의 특정 게임 도전 기록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM wordle_attempts 
+                    WHERE game_id = ? AND user_id = ?
+                ''', (game_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+        except Exception as e:
+            print(f"도전 기록 조회 실패: {e}")
+            return None
+    
+    async def update_attempt_progress(self, attempt_id: int, remaining_points: int, 
+                                    attempts_used: int) -> bool:
+        """도전 진행 상황 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE wordle_attempts 
+                    SET remaining_points = ?, attempts_used = ?
+                    WHERE id = ?
+                ''', (remaining_points, attempts_used, attempt_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"도전 진행 상황 업데이트 실패: {e}")
+            return False
+    
+    async def complete_attempt(self, attempt_id: int, is_winner: bool) -> bool:
+        """도전 완료 처리"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE wordle_attempts 
+                    SET is_completed = 1, is_winner = ?, completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (is_winner, attempt_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"도전 완료 처리 실패: {e}")
+            return False
+    
+    # ==========================================
+    # 추측 기록 관리
+    # ==========================================
+    
+    async def add_guess(self, guess: WordleGuess) -> bool:
+        """추측 기록 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO wordle_guesses (
+                        attempt_id, guess_word, result_pattern, 
+                        guess_number, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    guess.attempt_id, guess.guess_word, guess.result_pattern,
+                    guess.guess_number, datetime.now()
+                ))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"추측 기록 추가 실패: {e}")
+            return False
+    
+    async def get_attempt_guesses(self, attempt_id: int) -> List[Dict]:
+        """특정 도전의 모든 추측 기록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT guess_word, result_pattern, guess_number, created_at
+                    FROM wordle_guesses
+                    WHERE attempt_id = ?
+                    ORDER BY guess_number ASC
+                ''', (attempt_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'guess_word': row[0],
+                            'result_pattern': row[1],
+                            'guess_number': row[2],
+                            'created_at': row[3]
+                        }
+                        for row in rows
+                    ]
+        except Exception as e:
+            print(f"추측 기록 조회 실패: {e}")
+            return []
+    
+    # ==========================================
+    # 난이도 평가 관리
+    # ==========================================
+    
+    async def add_rating(self, rating: WordleRating) -> bool:
+        """난이도 평가 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO wordle_ratings (
+                        game_id, user_id, username, rating, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    rating.game_id, rating.user_id, rating.username,
+                    rating.rating, datetime.now()
+                ))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"난이도 평가 추가 실패: {e}")
+            return False
+    
+    async def get_game_ratings(self, game_id: int) -> Dict[str, int]:
+        """게임의 난이도 평가 집계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT rating, COUNT(*) 
+                    FROM wordle_ratings 
+                    WHERE game_id = ?
+                    GROUP BY rating
+                ''', (game_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    ratings = {"쉬움": 0, "적절함": 0, "어려움": 0}
+                    for rating, count in rows:
+                        ratings[rating] = count
+                    
+                    return ratings
+        except Exception as e:
+            print(f"난이도 평가 조회 실패: {e}")
+            return {"쉬움": 0, "적절함": 0, "어려움": 0}
+    
+    # ==========================================
+    # 만료 처리
+    # ==========================================
+    
+    async def get_expired_games(self) -> List[Dict]:
+        """만료된 게임들 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT id, creator_id, bet_points, total_pool
+                    FROM wordle_games
+                    WHERE is_active = 1 AND is_completed = 0 
+                      AND expires_at <= CURRENT_TIMESTAMP
+                ''') as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'id': row[0],
+                            'creator_id': row[1], 
+                            'bet_points': row[2],
+                            'total_pool': row[3]
+                        }
+                        for row in rows
+                    ]
+        except Exception as e:
+            print(f"만료 게임 조회 실패: {e}")
+            return []
+    
+    async def expire_game(self, game_id: int) -> bool:
+        """게임 만료 처리"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE wordle_games 
+                    SET is_active = 0, completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (game_id,))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"게임 만료 처리 실패: {e}")
+            return False
+        
+    # ==========================================
+    # 출제자 보상 시스템
+    # ==========================================
+    
+    async def calculate_creator_reward(self, game_id: int) -> int:
+        """난이도 평가를 바탕으로 출제자 보상 계산"""
+        try:
+            ratings = await self.get_game_ratings(game_id)
+            total_ratings = sum(ratings.values())
+            
+            if total_ratings == 0:
+                return 50  # 기본 참여 보상
+            
+            # 적절함이 50% 이상이면 200점, 아니면 50점
+            appropriate_percentage = (ratings["적절함"] / total_ratings) * 100
+            
+            if appropriate_percentage >= 50:
+                return 200
+            else:
+                return 50
+                
+        except Exception as e:
+            print(f"출제자 보상 계산 실패: {e}")
+            return 50
+    
+    async def award_creator_points(self, game_id: int) -> bool:
+        """출제자에게 보상 지급"""
+        try:
+            game = await self.get_game_by_id(game_id)
+            if not game or not game['is_completed']:
+                return False
+            
+            guild_id = game['guild_id']
+
+            reward = await self.calculate_creator_reward(game_id)
+            creator_id = game['creator_id']
+            
+            # 포인트 지급
+            success = await self.add_user_points(guild_id, creator_id, reward)
+            
+            if success:
+                print(f"출제자 보상 지급 완료: {creator_id} -> {reward}점")
+            
+            return success
+            
+        except Exception as e:
+            print(f"출제자 보상 지급 실패: {e}")
+            return False
+    
+    # ==========================================
+    # 안전한 포인트 트랜잭션
+    # ==========================================
+    
+    async def safe_transfer_points(self, from_user_id: str, to_user_id: str, amount: int) -> bool:
+        """안전한 포인트 이전 (트랜잭션)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('BEGIN TRANSACTION')
+                
+                try:
+                    # 송금자 포인트 확인
+                    async with db.execute('''
+                        SELECT wordle_points FROM users WHERE discord_id = ?
+                    ''', (from_user_id,)) as cursor:
+                        result = await cursor.fetchone()
+                        if not result or result[0] < amount:
+                            await db.execute('ROLLBACK')
+                            return False
+                    
+                    # 송금자 포인트 차감
+                    await db.execute('''
+                        UPDATE users 
+                        SET wordle_points = wordle_points - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    ''', (amount, from_user_id))
+                    
+                    # 수취자 포인트 추가 (없으면 생성)
+                    await db.execute('''
+                        INSERT OR IGNORE INTO users (discord_id, username, wordle_points)
+                        VALUES (?, 'Unknown', 0)
+                    ''', (to_user_id,))
+                    
+                    await db.execute('''
+                        UPDATE users 
+                        SET wordle_points = wordle_points + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    ''', (amount, to_user_id))
+                    
+                    await db.execute('COMMIT')
+                    return True
+                    
+                except Exception as e:
+                    await db.execute('ROLLBACK')
+                    print(f"포인트 이전 트랜잭션 실패: {e}")
+                    return False
+                    
+        except Exception as e:
+            print(f"포인트 이전 실패: {e}")
+            return False
+    
+    async def safe_reward_winner(self, game_id: int, winner_id: str, total_pool: int) -> bool:
+        """안전한 승자 보상 지급"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('BEGIN TRANSACTION')
+                
+                try:
+                    # 게임 상태 확인
+                    async with db.execute('''
+                        SELECT is_completed, total_pool FROM wordle_games WHERE id = ?
+                    ''', (game_id,)) as cursor:
+                        result = await cursor.fetchone()
+                        if not result or result[0]:  # 이미 완료된 게임
+                            await db.execute('ROLLBACK')
+                            return False
+                    
+                    # 승자에게 포인트 지급
+                    await db.execute('''
+                        INSERT OR IGNORE INTO users (discord_id, username, wordle_points)
+                        VALUES (?, 'Winner', 0)
+                    ''', (winner_id,))
+                    
+                    await db.execute('''
+                        UPDATE users 
+                        SET wordle_points = wordle_points + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    ''', (total_pool, winner_id))
+                    
+                    await db.execute('COMMIT')
+                    return True
+                    
+                except Exception as e:
+                    await db.execute('ROLLBACK')
+                    print(f"승자 보상 트랜잭션 실패: {e}")
+                    return False
+                    
+        except Exception as e:
+            print(f"승자 보상 실패: {e}")
+            return False
+    
+    # ==========================================
+    # 통계 및 랭킹
+    # ==========================================
+    
+    async def get_top_players(self, limit: int = 10) -> List[Dict]:
+        """포인트 상위 플레이어 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id, username, wordle_points
+                    FROM registered_users
+                    WHERE wordle_points > 0 AND is_active = TRUE
+                    ORDER BY wordle_points DESC
+                    LIMIT ?
+                ''', (limit,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    return [
+                        {
+                            'user_id': row[0],
+                            'username': row[1],
+                            'points': row[2],
+                            'rank': i + 1
+                        }
+                        for i, row in enumerate(rows)
+                    ]
+        except Exception as e:
+            print(f"상위 플레이어 조회 실패: {e}")
+            return []
+    
+    async def get_user_stats(self, guild_id: str, user_id: str) -> Dict:
+        """사용자 게임 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기본 포인트 조회
+                points = await self.get_user_points(guild_id, user_id)
+                
+                # 게임 통계 조회
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as games_created,
+                        COUNT(CASE WHEN is_completed = 1 AND winner_id IS NOT NULL THEN 1 END) as games_solved
+                    FROM wordle_games 
+                    WHERE creator_id = ?
+                ''', (user_id,)) as cursor:
+                    creator_stats = await cursor.fetchone()
+                
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as games_attempted,
+                        COUNT(CASE WHEN is_winner = 1 THEN 1 END) as games_won,
+                        AVG(attempts_used) as avg_attempts
+                    FROM wordle_attempts
+                    WHERE user_id = ? AND is_completed = 1
+                ''', (user_id,)) as cursor:
+                    player_stats = await cursor.fetchone()
+                
+                return {
+                    'points': points,
+                    'games_created': creator_stats[0] if creator_stats else 0,
+                    'games_solved': creator_stats[1] if creator_stats else 0,
+                    'games_attempted': player_stats[0] if player_stats else 0,
+                    'games_won': player_stats[1] if player_stats else 0,
+                    'avg_attempts': round(player_stats[2], 1) if player_stats and player_stats[2] else 0,
+                    'win_rate': round((player_stats[1] / player_stats[0]) * 100, 1) if player_stats and player_stats[0] > 0 else 0
+                }
+                
+        except Exception as e:
+            print(f"사용자 통계 조회 실패: {e}")
+            return {'points': 0, 'games_created': 0, 'games_solved': 0, 'games_attempted': 0, 'games_won': 0, 'avg_attempts': 0, 'win_rate': 0}

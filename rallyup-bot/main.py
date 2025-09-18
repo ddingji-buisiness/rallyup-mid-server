@@ -7,6 +7,7 @@ import os
 from database.database import DatabaseManager
 from scheduler.bamboo_scheduler import BambooForestScheduler
 from scheduler.recruitment_scheduler import RecruitmentScheduler
+from scheduler.wordle_scheduler import WordleScheduler
 
 load_dotenv()
 
@@ -29,6 +30,7 @@ class RallyUpBot(commands.Bot):
         self.db_manager = DatabaseManager()
         self.bamboo_scheduler = BambooForestScheduler(self)
         self.recruitment_scheduler = None
+        self.wordle_scheduler = None
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
@@ -45,6 +47,11 @@ class RallyUpBot(commands.Bot):
                 self.recruitment_scheduler = RecruitmentScheduler(self)
                 await self.recruitment_scheduler.start()
                 logger.info("내전 모집 스케줄러 시작")
+
+            if not self.wordle_scheduler:
+                self.wordle_scheduler = WordleScheduler(self)
+                await self.wordle_scheduler.start()
+                logger.info("🎯 띵지워들 스케줄러 시작")
 
             try:
                 print("슬래시 커맨드 동기화 중...")
@@ -71,7 +78,8 @@ class RallyUpBot(commands.Bot):
             'commands.bamboo_forest',
             'commands.scrim_recruitment',
             'commands.scrim_result_recording',
-            'commands.simple_user_management'
+            'commands.simple_user_management',
+            'commands.wordle_game'
         ]
         
         for command_module in commands_to_load:
@@ -214,6 +222,10 @@ class RallyUpBot(commands.Bot):
             if self.recruitment_scheduler:
                 await self.recruitment_scheduler.stop()
                 logger.info("내전 모집 스케줄러 종료")
+
+            if self.wordle_scheduler:
+                await self.wordle_scheduler.stop()
+                logger.info("띵지워들 스케줄러 종료")
 
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")

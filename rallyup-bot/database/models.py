@@ -16,6 +16,11 @@ class User:
     support_games: int = 0
     support_wins: int = 0
     score: int = 1000
+
+    # 띵지워들 
+    wordle_points: int = 10000 
+    daily_points_claimed: Optional[str] = None 
+
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -492,3 +497,120 @@ class TeamWinrateAnalysis:
         adjusted_winrate = (total_weighted_wins / total_weighted_games) * 100
         
         return round(adjusted_winrate, 1)
+
+@dataclass
+class WordleGame:
+    """등록된 띵지워들 게임"""
+    id: Optional[int] = None
+    guild_id: str = ""
+    word: str = ""  # 정답 단어 (5글자)
+    hint: Optional[str] = None  # 힌트
+    creator_id: str = ""  # 출제자 Discord ID
+    creator_username: str = ""
+    bet_points: int = 0  # 출제자가 베팅한 포인트
+    total_pool: int = 0  # 현재 총 포인트 풀 (출제자 베팅 + 누적 실패분)
+    
+    # 게임 상태
+    is_active: bool = True
+    is_completed: bool = False
+    winner_id: Optional[str] = None  # 정답자 ID
+    winner_username: Optional[str] = None
+    
+    # 시간 관련
+    created_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None  # 24시간 후 만료
+    completed_at: Optional[datetime] = None
+
+@dataclass
+class WordleAttempt:
+    """띵지워들 도전 기록"""
+    id: Optional[int] = None
+    game_id: int = 0
+    user_id: str = ""  # 도전자 Discord ID
+    username: str = ""
+    
+    # 베팅 관련
+    bet_amount: int = 0  # 도전자가 베팅한 포인트
+    remaining_points: int = 0  # 남은 포인트 (실패할 때마다 차감)
+    points_per_failure: int = 0  # 실패당 차감 포인트 (베팅액의 10%)
+    
+    # 게임 진행 상황
+    attempts_used: int = 0  # 사용한 시도 횟수
+    is_completed: bool = False  # 정답 맞춤 또는 포인트 소진으로 완료
+    is_winner: bool = False  # 정답을 맞췄는지 여부
+    
+    # 시간 관련
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+@dataclass
+class WordleGuess:
+    """띵지워들 추측 기록"""
+    id: Optional[int] = None
+    attempt_id: int = 0  # WordleAttempt의 ID
+    guess_word: str = ""  # 추측한 단어
+    result_pattern: str = ""  # 결과 패턴 (예: "12021" - 1:정답, 2:다른위치, 0:없음)
+    guess_number: int = 0  # 몇 번째 추측인지 (1, 2, 3...)
+    
+    created_at: Optional[datetime] = None
+
+@dataclass
+class WordleRating:
+    """띵지워들 난이도 평가"""
+    id: Optional[int] = None
+    game_id: int = 0
+    user_id: str = ""  # 평가자 Discord ID
+    username: str = ""
+    rating: str = ""  # "쉬움", "적절함", "어려움"
+    
+    created_at: Optional[datetime] = None
+
+@dataclass
+class WordleUserStats:
+    """띵지워들 사용자 통계 (분석용)"""
+    user_id: str
+    username: str
+    
+    # 출제 통계
+    games_created: int = 0
+    games_solved: int = 0  # 출제한 게임 중 정답자가 나온 횟수
+    avg_difficulty_rating: float = 0.0  # 평균 난이도 평가
+    total_creator_earnings: int = 0  # 출제자로서 번 포인트
+    
+    # 도전 통계
+    games_attempted: int = 0
+    games_won: int = 0  # 정답 맞춘 횟수
+    avg_attempts_to_solve: float = 0.0  # 평균 시도 횟수
+    total_points_won: int = 0  # 도전자로서 번 포인트
+    total_points_lost: int = 0  # 도전자로서 잃은 포인트
+    
+    # 종합 통계
+    current_points: int = 0
+    win_rate: float = 0.0  # 도전 성공률
+    
+    last_activity: Optional[datetime] = None
+
+@dataclass
+class WordleGameStats:
+    """띵지워들 게임별 통계 (분석용)"""
+    game_id: int
+    word: str
+    creator_username: str
+    
+    # 참여 통계
+    total_attempts: int = 0  # 총 도전자 수
+    total_guesses: int = 0  # 총 추측 횟수
+    avg_attempts_per_challenger: float = 0.0
+    
+    # 난이도 평가
+    easy_votes: int = 0
+    appropriate_votes: int = 0
+    hard_votes: int = 0
+    difficulty_consensus: Optional[str] = None  # 최종 난이도 평가
+    
+    # 결과
+    was_solved: bool = False
+    solver_username: Optional[str] = None
+    final_pool_amount: int = 0
+    
+    completed_at: Optional[datetime] = None
