@@ -320,7 +320,7 @@ class WordleGameCommands(commands.Cog):
     
     async def _handle_ranking(self, interaction: discord.Interaction):
         """랭킹 확인 처리"""
-        top_players = await self.bot.db_manager.get_top_players(50)
+        top_players = await self.bot.db_manager.get_top_players(30)
         embed = WordleUI.create_ranking_embed(top_players)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -338,7 +338,7 @@ class WordleGameCommands(commands.Cog):
         user_stats = await self.bot.db_manager.get_user_stats(guild_id, user_id)
 
         # 랭킹 정보도 함께 조회
-        top_players = await self.bot.db_manager.get_top_players(50)
+        top_players = await self.bot.db_manager.get_top_players(30)
         user_rank = None
         for i, player in enumerate(top_players):
             if player['user_id'] == user_id:
@@ -400,7 +400,7 @@ class StatsView(discord.ui.View):
         user_stats = await self.bot.db_manager.get_user_stats(guild_id, self.user_id)
         username = interaction.user.display_name
 
-        top_players = await self.bot.db_manager.get_top_players(50)
+        top_players = await self.bot.db_manager.get_top_players(30)
         user_rank = None
         for i, player in enumerate(top_players):
             if player['user_id'] == self.user_id:
@@ -442,7 +442,7 @@ class HelpView(discord.ui.View):
     
     @discord.ui.button(label="🏆 랭킹 보기", style=discord.ButtonStyle.success)
     async def show_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
-        top_players = await self.bot.db_manager.get_top_players(50)
+        top_players = await self.bot.db_manager.get_top_players(30)
         embed = WordleUI.create_ranking_embed(top_players)
         
         await interaction.response.edit_message(embed=embed, view=None)

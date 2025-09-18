@@ -336,7 +336,7 @@ class WordleUI:
 
         # 통합된 랭킹 표시 (최대 30명)
         ranking_text = ""
-        for i, player in enumerate(rankings[:40]):
+        for i, player in enumerate(rankings[:30]):
             rank_emoji = WordleUI.get_rank_emoji(i + 1)
             points_formatted = WordleUI.format_points(player['points'])
             ranking_text += f"{rank_emoji} **{player['username']}** - {points_formatted}점\n"
