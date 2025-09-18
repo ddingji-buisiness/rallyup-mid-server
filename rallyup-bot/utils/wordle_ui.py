@@ -333,10 +333,10 @@ class WordleUI:
             embed.description = "아직 랭킹 데이터가 없습니다."
             embed.color = WordleUI.COLORS['info']
             return embed
-        
-        # 통합된 랭킹 표시 (최대 15명)
+
+        # 통합된 랭킹 표시 (최대 30명)
         ranking_text = ""
-        for i, player in enumerate(rankings[:15]):
+        for i, player in enumerate(rankings[:30]):
             rank_emoji = WordleUI.get_rank_emoji(i + 1)
             points_formatted = WordleUI.format_points(player['points'])
             ranking_text += f"{rank_emoji} **{player['username']}** - {points_formatted}점\n"
