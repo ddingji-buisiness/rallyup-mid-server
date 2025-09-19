@@ -277,10 +277,11 @@ active_sessions: Dict[str, ScrimResultSession] = {}
 class RecruitmentSelectView(discord.ui.View):
     """마감된 내전 모집 선택 View"""
     
-    def __init__(self, bot, completed_recruitments: List[Dict]):
+    def __init__(self, bot, completed_recruitments: List[Dict], guild_id: str):
         super().__init__(timeout=300)
         self.bot = bot
-        
+        self.guild_id = guild_id
+
         # 마감된 모집 리스트 드롭다운
         options = []
         for recruitment in completed_recruitments[:25]:  # Discord 제한
@@ -325,75 +326,378 @@ class RecruitmentSelectView(discord.ui.View):
             )
 
             # 'joined' 상태만 필터링
-            participants = [p for p in all_participants if p.get('status') == 'joined']
-            
-            if len(participants) < 10:
-                await interaction.response.send_message(
-                    f"참가자가 {len(participants)}명으로 부족합니다. (최소 10명 필요)",
-                    ephemeral=True
-                )
-                return
+            base_participants = [p for p in all_participants if p.get('status') == 'joined']
             
             # 기존 경기 기록 확인
             max_match_number = await self.bot.db_manager.get_max_match_number(selected_recruitment_id)
             
+            # 모집 정보 가져오기
+            recruitment = await self.bot.db_manager.get_recruitment_by_id(selected_recruitment_id)
+            
+            # 참가자 관리 화면으로 이동
+            participant_view = ParticipantManagementView(
+                bot=self.bot,
+                guild_id=self.guild_id,
+                recruitment_id=selected_recruitment_id,
+                recruitment_info=recruitment,
+                base_participants=base_participants,
+                max_match_number=max_match_number
+            )
+            
+            await participant_view.show_management_screen(interaction)
+            
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+
+class ParticipantManagementView(discord.ui.View):
+    """참가자 관리 메인 화면"""
+    
+    def __init__(self, bot, guild_id: str, recruitment_id: str, recruitment_info: Dict, 
+                 base_participants: List[Dict], max_match_number: int):
+        super().__init__(timeout=600)  # 10분 제한
+        self.bot = bot
+        self.guild_id = guild_id
+        self.recruitment_id = recruitment_id
+        self.recruitment_info = recruitment_info
+        self.base_participants = base_participants.copy()  # 원본 참가자 (참가 버튼 누른 사람들)
+        self.current_participants = base_participants.copy()  # 현재 참가자 리스트 (수정 가능)
+        self.max_match_number = max_match_number
+        
+        self.setup_buttons()
+    
+    def setup_buttons(self):
+        """버튼 설정"""
+        self.clear_items()
+        
+        # 참가자 추가 버튼
+        add_button = discord.ui.Button(
+            label="➕ 참가자 추가",
+            style=discord.ButtonStyle.primary,
+            emoji="👤"
+        )
+        add_button.callback = self.add_participant_callback
+        self.add_item(add_button)
+        
+        # 참가자 제거 버튼 (참가자가 있을 때만)
+        if self.current_participants:
+            remove_button = discord.ui.Button(
+                label="➖ 참가자 제거",
+                style=discord.ButtonStyle.secondary,
+                emoji="🗑️"
+            )
+            remove_button.callback = self.remove_participant_callback
+            self.add_item(remove_button)
+        
+        # 참가자 리스트 초기화 버튼
+        reset_button = discord.ui.Button(
+            label="🔄 기본 리스트로 초기화",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔄"
+        )
+        reset_button.callback = self.reset_participants_callback
+        self.add_item(reset_button)
+        
+        # 최종 확정 버튼 (10명 이상일 때만 활성화)
+        confirm_button = discord.ui.Button(
+            label=f"✅ 참가자 확정 ({len(self.current_participants)}명)",
+            style=discord.ButtonStyle.success if len(self.current_participants) >= 10 else discord.ButtonStyle.danger,
+            disabled=len(self.current_participants) < 10,
+            emoji="✅"
+        )
+        confirm_button.callback = self.confirm_participants_callback
+        self.add_item(confirm_button)
+    
+    async def show_management_screen(self, interaction: discord.Interaction):
+        """참가자 관리 화면 표시"""
+        embed = self.create_management_embed()
+        self.setup_buttons()
+        
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    def create_management_embed(self) -> discord.Embed:
+        """참가자 관리 화면 임베드 생성"""
+        embed = discord.Embed(
+            title="👥 참가자 관리",
+            description=f"**{self.recruitment_info['title']}** 내전 참가자를 관리합니다.",
+            color=0x0099ff
+        )
+        
+        # 기본 정보
+        scrim_date = datetime.fromisoformat(self.recruitment_info['scrim_date'])
+        embed.add_field(
+            name="📅 내전 정보",
+            value=f"**일시**: {scrim_date.strftime('%Y년 %m월 %d일 %H:%M')}\n"
+                  f"**모집 ID**: `{self.recruitment_id}`",
+            inline=False
+        )
+        
+        # 참가자 현황
+        embed.add_field(
+            name="📊 참가자 현황",
+            value=f"**현재 참가자**: {len(self.current_participants)}명\n"
+                  f"**기본 참가자**: {len(self.base_participants)}명 (참가 버튼)\n"
+                  f"**필요 인원**: 10명 이상",
+            inline=True
+        )
+        
+        # 상태 표시
+        if len(self.current_participants) >= 10:
+            status = "✅ 내전 진행 가능"
+            status_color = "🟢"
+        else:
+            status = f"❌ {10 - len(self.current_participants)}명 부족"
+            status_color = "🔴"
+        
+        embed.add_field(
+            name="🚦 상태",
+            value=f"{status_color} {status}",
+            inline=True
+        )
+        
+        # 현재 참가자 목록
+        if self.current_participants:
+            participant_list = []
+            for i, participant in enumerate(self.current_participants[:20], 1):
+                # 기본 참가자인지 추가된 참가자인지 구분
+                is_base = participant in self.base_participants
+                icon = "🔹" if is_base else "➕"
+                participant_list.append(f"{icon} {i}. {participant['username']}")
+            
+            participant_text = '\n'.join(participant_list)
+            if len(self.current_participants) > 20:
+                participant_text += f"\n... 외 {len(self.current_participants) - 20}명"
+            
+            embed.add_field(
+                name="👤 현재 참가자 목록",
+                value=participant_text,
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="👤 현재 참가자 목록",
+                value="참가자가 없습니다.",
+                inline=False
+            )
+        
+        # 범례
+        embed.add_field(
+            name="📝 범례",
+            value="🔹 참가 버튼을 누른 기본 참가자\n➕ 수동으로 추가된 참가자",
+            inline=False
+        )
+        
+        return embed
+    
+    async def add_participant_callback(self, interaction: discord.Interaction):
+        """참가자 추가 버튼 클릭"""
+        # 전체 등록 유저 목록에서 현재 참가자를 제외한 사용자들 가져오기
+        all_users = await self.bot.db_manager.get_registered_users_list(self.guild_id, limit=100)
+        
+        # 현재 참가자가 아닌 사용자들만 필터링
+        current_user_ids = {p['user_id'] for p in self.current_participants}
+        available_users = [user for user in all_users if user['user_id'] not in current_user_ids]
+        
+        if not available_users:
+            await interaction.response.send_message(
+                "❌ 추가할 수 있는 유저가 없습니다.", ephemeral=True
+            )
+            return
+        
+        # 유저 선택 드롭다운 표시
+        user_selection_view = UserSelectionView(
+            parent_view=self,
+            available_users=available_users,
+            selection_type="add"
+        )
+        
+        embed = discord.Embed(
+            title="➕ 참가자 추가",
+            description="추가할 참가자를 선택해주세요.",
+            color=0x00ff88
+        )
+        
+        await interaction.response.send_message(embed=embed, view=user_selection_view, ephemeral=True)
+    
+    async def remove_participant_callback(self, interaction: discord.Interaction):
+        """참가자 제거 버튼 클릭"""
+        if not self.current_participants:
+            await interaction.response.send_message(
+                "❌ 제거할 참가자가 없습니다.", ephemeral=True
+            )
+            return
+        
+        # 현재 참가자들에서 선택
+        user_selection_view = UserSelectionView(
+            parent_view=self,
+            available_users=self.current_participants,
+            selection_type="remove"
+        )
+        
+        embed = discord.Embed(
+            title="➖ 참가자 제거",
+            description="제거할 참가자를 선택해주세요.",
+            color=0xff6666
+        )
+        
+        await interaction.response.send_message(embed=embed, view=user_selection_view, ephemeral=True)
+    
+    async def reset_participants_callback(self, interaction: discord.Interaction):
+        """참가자 리스트 초기화"""
+        self.current_participants = self.base_participants.copy()
+        await self.show_management_screen(interaction)
+    
+    async def confirm_participants_callback(self, interaction: discord.Interaction):
+        """참가자 최종 확정"""
+        if len(self.current_participants) < 10:
+            await interaction.response.send_message(
+                f"❌ 참가자가 {len(self.current_participants)}명으로 부족합니다. (최소 10명 필요)",
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer()
+        
+        try:
             # 새 결과 기록 세션 생성
             session = ScrimResultSession(
-                recruitment_id=selected_recruitment_id,
-                participants=participants,
+                recruitment_id=self.recruitment_id,
+                participants=self.current_participants,
                 created_by=str(interaction.user.id)
             )
             
             # 세션 저장
-            active_sessions[str(interaction.guild_id)] = session
+            active_sessions[self.guild_id] = session
             
             # 성공 메시지
-            recruitment = await self.bot.db_manager.get_recruitment_by_id(selected_recruitment_id)
             embed = discord.Embed(
                 title="✅ 내전 결과 기록 세션 시작!",
-                description=f"**{recruitment['title']}** 내전의 결과 기록을 시작합니다.",
+                description=f"**{self.recruitment_info['title']}** 내전의 결과 기록을 시작합니다.",
                 color=0x00ff88
             )
             
-            participant_list = []
-            for i, p in enumerate(session.participants, 1):
-                participant_list.append(f"{i}. {p['username']}")
+            embed.add_field(
+                name="👥 확정된 참가자",
+                value=f"총 **{len(self.current_participants)}명**",
+                inline=True
+            )
             
             embed.add_field(
-                name=f"👥 참가자 목록 ({len(session.participants)}명)",
-                value="\n".join(participant_list),
-                inline=False
+                name="🎯 다음 단계",
+                value=f"`/팀세팅 1` 명령어로 1경기 팀 구성을 시작하세요.",
+                inline=True
             )
             
-            # 기존 경기 기록이 있는 경우 안내
-            if max_match_number is not None:
-                next_match_number = max_match_number + 1
+            # 추가/제거된 참가자 요약
+            added_users = [p for p in self.current_participants if p not in self.base_participants]
+            removed_users = [p for p in self.base_participants if p not in self.current_participants]
+            
+            summary_text = []
+            if added_users:
+                summary_text.append(f"➕ 추가: {len(added_users)}명")
+            if removed_users:
+                summary_text.append(f"➖ 제거: {len(removed_users)}명")
+            
+            if summary_text:
                 embed.add_field(
-                    name="📊 기존 경기 기록 발견",
-                    value=f"이 내전에는 이미 **{max_match_number}경기**까지 기록되어 있습니다.\n"
-                        f"**다음 경기번호는 {next_match_number}번부터 시작하세요.**",
-                    inline=False
-                )
-                embed.add_field(
-                    name="🔄 다음 단계",
-                    value=f"`/팀세팅 {next_match_number}` 명령어로 경기 팀을 구성해주세요.",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="🔄 다음 단계",
-                    value="`/팀세팅 1` 명령어로 첫 번째 경기의 팀을 구성해주세요.",
+                    name="📝 변경 사항",
+                    value=" | ".join(summary_text),
                     inline=False
                 )
             
-            embed.set_footer(text=f"세션 ID: {session.session_id[:8]}...")
-            
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
             
         except Exception as e:
-            await interaction.response.send_message(
-                f"세션 시작 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            await interaction.followup.send(
+                f"❌ 세션 생성 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
+
+class UserSelectionView(discord.ui.View):
+    """유저 선택 드롭다운 (추가/제거용)"""
+    
+    def __init__(self, parent_view: ParticipantManagementView, available_users: List[Dict], 
+                 selection_type: str):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+        self.available_users = available_users
+        self.selection_type = selection_type  # "add" or "remove"
+        
+        self.setup_select()
+    
+    def setup_select(self):
+        """드롭다운 설정"""
+        if not self.available_users:
+            return
+        
+        # 최대 25개까지만 표시 (Discord 제한)
+        options = []
+        for user in self.available_users[:25]:
+            # 유저 정보 포맷팅
+            description_parts = []
+            if user.get('main_position'):
+                description_parts.append(user['main_position'])
+            if user.get('current_season_tier'):
+                description_parts.append(user['current_season_tier'])
+            
+            description = " | ".join(description_parts) if description_parts else "정보 없음"
+            
+            options.append(discord.SelectOption(
+                label=user['username'],
+                description=description[:100],  # Discord 제한
+                value=user['user_id'],
+                emoji="👤" if self.selection_type == "add" else "🗑️"
+            ))
+        
+        if options:
+            placeholder = "추가할 유저를 선택하세요" if self.selection_type == "add" else "제거할 유저를 선택하세요"
+            
+            self.user_select = discord.ui.Select(
+                placeholder=placeholder,
+                options=options,
+                max_values=min(len(options), 5)  # 최대 5명까지 한 번에 선택
+            )
+            self.user_select.callback = self.user_select_callback
+            self.add_item(self.user_select)
+    
+    async def user_select_callback(self, interaction: discord.Interaction):
+        """유저 선택 처리"""
+        selected_user_ids = self.user_select.values
+        
+        if self.selection_type == "add":
+            # 참가자 추가
+            for user_id in selected_user_ids:
+                user_data = next((u for u in self.available_users if u['user_id'] == user_id), None)
+                if user_data and user_data not in self.parent_view.current_participants:
+                    self.parent_view.current_participants.append(user_data)
+            
+            action_text = f"➕ {len(selected_user_ids)}명의 참가자를 추가했습니다."
+            
+        else:  # remove
+            # 참가자 제거
+            for user_id in selected_user_ids:
+                self.parent_view.current_participants = [
+                    p for p in self.parent_view.current_participants 
+                    if p['user_id'] != user_id
+                ]
+            
+            action_text = f"➖ {len(selected_user_ids)}명의 참가자를 제거했습니다."
+        
+        # 원래 화면으로 돌아가기
+        await interaction.response.edit_message(
+            content=f"✅ {action_text}",
+            embed=None,
+            view=None
+        )
+        
+        # 부모 뷰 업데이트 (새로운 메시지로)
+        embed = self.parent_view.create_management_embed()
+        self.parent_view.setup_buttons()
+        
+        await interaction.followup.send(embed=embed, view=self.parent_view)
 
 class TeamSetupView(discord.ui.View):
     """팀 구성 설정 View - A팀과 B팀 각각 선택"""
@@ -1279,7 +1583,7 @@ class ScrimResultCommands(commands.Cog):
                 return
             
             # 내전 선택 View 표시
-            view = RecruitmentSelectView(self.bot, completed_recruitments)
+            view = RecruitmentSelectView(self.bot, completed_recruitments, guild_id)
             embed = discord.Embed(
                 title="📋 내전 결과 기록 시작",
                 description="결과를 기록할 내전을 선택해주세요.",

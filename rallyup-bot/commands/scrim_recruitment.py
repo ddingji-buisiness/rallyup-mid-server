@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 import re
 
 def get_upcoming_weekday(weekday: int) -> datetime:
@@ -152,6 +152,212 @@ class DateTimeModal(discord.ui.Modal):
             ephemeral=True
         )
 
+class CustomTimeModal(discord.ui.Modal):
+    """커스텀 시간 입력을 위한 Modal"""
+    
+    def __init__(self, parent_view):
+        super().__init__(title="⏰ 커스텀 시간 입력")
+        self.parent_view = parent_view
+        
+        self.time_input = discord.ui.TextInput(
+            label="시간 입력 (24시간 형식)",
+            placeholder="예: 14:30, 09:15, 21:45",
+            required=True,
+            max_length=5
+        )
+        self.add_item(self.time_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """시간 입력 처리 - 수정됨"""
+        time_str = self.time_input.value.strip()
+        
+        # 시간 형식 검증
+        if not self._validate_time_format(time_str):
+            await interaction.response.send_message(
+                "❌ 올바른 시간 형식이 아닙니다.\n"
+                "24시간 형식으로 입력해주세요. (예: 14:30, 09:15, 21:45)",
+                ephemeral=True
+            )
+            return
+        
+        # 부모 뷰에 선택된 시간 전달
+        self.parent_view.selected_time = time_str
+        print(f"DEBUG: CustomTimeModal에서 시간 설정됨: {time_str}")
+        
+        # 다음 단계 활성화 (중요: edit_message 전에 호출)
+        self.parent_view._update_ui_state()
+        
+        # 성공 메시지와 함께 UI 업데이트
+        await interaction.response.edit_message(
+            content=f"✅ 선택된 시간: **{self._format_time_display(time_str)}**\n"
+                   f"이제 모집 마감시간을 선택해주세요.",
+            view=self.parent_view  # 업데이트된 뷰를 다시 전달
+        )
+    
+    def _validate_time_format(self, time_str: str) -> bool:
+        """시간 형식 검증 (HH:MM)"""
+        pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        if not re.match(pattern, time_str):
+            return False
+        
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except ValueError:
+            return False
+    
+    def _format_time_display(self, time_str: str) -> str:
+        """시간을 사용자 친화적 형식으로 포맷팅"""
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            time_obj = time(hour, minute)
+            
+            if hour == 0:
+                return f"자정 ({time_str})"
+            elif hour < 12:
+                return f"오전 {hour}시 {minute:02d}분 ({time_str})"
+            elif hour == 12:
+                return f"정오 ({time_str})"
+            else:
+                return f"오후 {hour-12}시 {minute:02d}분 ({time_str})"
+        except:
+            return time_str
+        
+class CustomDeadlineModal(discord.ui.Modal):
+    """커스텀 마감시간 입력을 위한 Modal"""
+    
+    def __init__(self, parent_view):
+        super().__init__(title="⏰ 커스텀 마감시간 입력")
+        self.parent_view = parent_view
+        
+        self.datetime_input = discord.ui.TextInput(
+            label="마감 날짜와 시간 입력",
+            placeholder="예: 12-25 14:30, 2024-12-25 14:30",
+            required=True,
+            max_length=20,
+            style=discord.TextStyle.short
+        )
+        self.add_item(self.datetime_input)
+        
+        # 도움말 추가
+        self.help_input = discord.ui.TextInput(
+            label="입력 형식 안내 (읽기 전용)",
+            placeholder="형식: MM-DD HH:MM 또는 YYYY-MM-DD HH:MM",
+            required=False,
+            max_length=1,
+            style=discord.TextStyle.short
+        )
+        self.add_item(self.help_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """마감시간 입력 처리"""
+        datetime_str = self.datetime_input.value.strip()
+        
+        # 날짜시간 형식 검증 및 파싱
+        parsed_datetime = self._parse_deadline_datetime(datetime_str)
+        if not parsed_datetime:
+            await interaction.response.send_message(
+                "❌ 올바른 날짜시간 형식이 아닙니다.\n"
+                "형식: `MM-DD HH:MM` 또는 `YYYY-MM-DD HH:MM`\n"
+                "예: `12-25 14:30`, `2024-12-25 14:30`",
+                ephemeral=True
+            )
+            return
+        
+        # 현재 시간보다 미래인지 확인
+        if parsed_datetime <= datetime.now():
+            await interaction.response.send_message(
+                "❌ 마감시간은 현재 시간보다 미래여야 합니다.",
+                ephemeral=True
+            )
+            return
+        
+        # 내전 시간과 비교 (내전 시간이 설정된 경우)
+        if self.parent_view.selected_date and self.parent_view.selected_time:
+            scrim_datetime = self.parent_view._calculate_datetime()
+            if parsed_datetime >= scrim_datetime:
+                await interaction.response.send_message(
+                    "❌ 마감시간은 내전 시간보다 이전이어야 합니다.\n"
+                    f"내전 시간: {scrim_datetime.strftime('%Y-%m-%d %H:%M')}",
+                    ephemeral=True
+                )
+                return
+        
+        # 부모 뷰에 선택된 마감시간 전달 (특별한 형식으로 저장)
+        self.parent_view.selected_deadline = f"custom_datetime_{parsed_datetime.isoformat()}"
+        print(f"DEBUG: CustomDeadlineModal에서 마감시간 설정됨: {self.parent_view.selected_deadline}")
+
+        self.parent_view._update_ui_state()
+
+        # 성공 메시지와 함께 UI 업데이트
+        await interaction.response.edit_message(
+            content=f"✅ 선택된 마감시간: **{self._format_datetime_display(parsed_datetime)}**\n"
+                   f"모든 정보가 설정되었습니다! 등록 버튼을 눌러주세요.",
+            view=self.parent_view
+        )
+    
+    def _parse_deadline_datetime(self, datetime_str: str) -> datetime:
+        """마감시간 문자열을 datetime 객체로 파싱"""
+        try:
+            current_year = datetime.now().year
+            
+            # 공백으로 날짜와 시간 분리
+            parts = datetime_str.strip().split()
+            if len(parts) != 2:
+                return None
+            
+            date_part, time_part = parts
+            
+            # 날짜 부분 파싱
+            if '-' in date_part:
+                date_components = date_part.split('-')
+                if len(date_components) == 2:  # MM-DD 형식
+                    month, day = map(int, date_components)
+                    year = current_year
+                elif len(date_components) == 3:  # YYYY-MM-DD 형식
+                    year, month, day = map(int, date_components)
+                else:
+                    return None
+            else:
+                return None
+            
+            # 시간 부분 파싱 (HH:MM)
+            if ':' not in time_part:
+                return None
+            
+            hour, minute = map(int, time_part.split(':'))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return None
+            
+            # datetime 객체 생성
+            result = datetime(year, month, day, hour, minute)
+            
+            # 올해 날짜가 이미 지났으면 내년으로 조정 (MM-DD 형식의 경우)
+            if len(date_components) == 2 and result < datetime.now():
+                result = result.replace(year=current_year + 1)
+            
+            return result
+            
+        except (ValueError, TypeError):
+            return None
+    
+    def _format_datetime_display(self, dt: datetime) -> str:
+        """날짜시간을 사용자 친화적 형식으로 포맷팅"""
+        weekdays = ['월', '화', '수', '목', '금', '토', '일']
+        weekday = weekdays[dt.weekday()]
+        
+        hour = dt.hour
+        if hour == 0:
+            time_str = "자정"
+        elif hour < 12:
+            time_str = f"오전 {hour}시 {dt.minute:02d}분"
+        elif hour == 12:
+            time_str = f"정오 {dt.minute:02d}분" if dt.minute > 0 else "정오"
+        else:
+            time_str = f"오후 {hour-12}시 {dt.minute:02d}분"
+        
+        return f"{dt.strftime('%Y년 %m월 %d일')} ({weekday}) {time_str}"
+
 class DateTimeSelectionView(discord.ui.View):
     """날짜/시간 선택을 위한 View"""
     
@@ -164,58 +370,98 @@ class DateTimeSelectionView(discord.ui.View):
         self.selected_date = None
         self.selected_time = None
         self.selected_deadline = None
-        
-        # 날짜 선택 드롭다운을 동적으로 생성
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """UI 컴포넌트 설정"""
+        # 날짜 선택
         self.date_select = discord.ui.Select(
             placeholder="📅 내전 날짜를 선택하세요",
-            options=generate_date_options()
+            options= generate_date_options(),
+            row=0
         )
         self.date_select.callback = self.select_date_callback
         self.add_item(self.date_select)
         
-        # 시간 선택 드롭다운
+        # 개선된 시간 선택 드롭다운
         self.time_select = discord.ui.Select(
-            placeholder="🕐 내전 시간을 선택하세요",
+            placeholder="🕕 내전 시간을 선택하세요",
             disabled=True,
-            options=[
-                discord.SelectOption(label="오후 5시 (17:00)", value="17:00", emoji="🕐"),
-                discord.SelectOption(label="오후 6시 (18:00)", value="18:00", emoji="🕐"),
-                discord.SelectOption(label="오후 7시 (19:00)", value="19:00", emoji="🕐"),
-                discord.SelectOption(label="오후 8시 (20:00)", value="20:00", emoji="🕐"),
-                discord.SelectOption(label="오후 9시 (21:00)", value="21:00", emoji="🕐"),
-                discord.SelectOption(label="오후 10시 (22:00)", value="22:00", emoji="🕐"),
-                discord.SelectOption(label="오후 11시 (23:00)", value="23:00", emoji="🕐"),
-                discord.SelectOption(label="자정 (00:00)", value="00:00", emoji="🕐"),
-            ]
+            options=self._generate_time_options(),
+            row=1
         )
         self.time_select.callback = self.select_time_callback
         self.add_item(self.time_select)
         
-        # 마감시간 선택 드롭다운
+        # 마감시간 선택 (기존 로직 유지)
         self.deadline_select = discord.ui.Select(
             placeholder="⏰ 모집 마감시간을 선택하세요",
             disabled=True,
-            options=[
-                discord.SelectOption(label="내전 하루 전", value="1day_before", emoji="⏰"),
-                discord.SelectOption(label="내전 3시간 전", value="3hour_before", emoji="⏰"),
-                discord.SelectOption(label="내전 2시간 전", value="2hour_before", emoji="⏰"),
-                discord.SelectOption(label="내전 1시간 전", value="1hour_before", emoji="⏰"),
-                discord.SelectOption(label="내전 당일 오후 5시", value="same_day_5pm", emoji="⏰"),
-                discord.SelectOption(label="내전 당일 오후 6시", value="same_day_6pm", emoji="⏰"),
-            ]
+            options=self._generate_deadline_options(),
+            row=2
         )
         self.deadline_select.callback = self.select_deadline_callback
         self.add_item(self.deadline_select)
         
-        # 등록 버튼
+        # 등록 버튼 (기존 로직 유지)
         self.register_button = discord.ui.Button(
             label="📝 내전 모집 등록",
             style=discord.ButtonStyle.success,
             disabled=True,
-            row=4
+            row=3
         )
         self.register_button.callback = self.register_recruitment_callback
         self.add_item(self.register_button)
+
+    def _generate_time_options(self) -> list:
+        """시간 선택 옵션 생성 (커스텀 입력 옵션 포함)"""
+        options = [
+            # 기존 인기 시간대들
+            discord.SelectOption(label="오후 5시 (17:00)", value="17:00", emoji="🕕"),
+            discord.SelectOption(label="오후 6시 (18:00)", value="18:00", emoji="🕕"),
+            discord.SelectOption(label="오후 7시 (19:00)", value="19:00", emoji="🕕"),
+            discord.SelectOption(label="오후 8시 (20:00)", value="20:00", emoji="🕕"),
+            discord.SelectOption(label="오후 9시 (21:00)", value="21:00", emoji="🕕"),
+            discord.SelectOption(label="오후 10시 (22:00)", value="22:00", emoji="🕕"),
+            discord.SelectOption(label="오후 11시 (23:00)", value="23:00", emoji="🕕"),
+            discord.SelectOption(label="자정 (00:00)", value="00:00", emoji="🕕"),
+            
+            # 커스텀 시간 입력 옵션 (맨 마지막)
+            discord.SelectOption(
+                label="🛠️ 직접 입력하기", 
+                value="custom_time", 
+                emoji="⏰",
+                description="원하는 시간을 직접 입력합니다"
+            ),
+        ]
+        return options
+    
+    def _generate_deadline_options(self) -> list:
+        """마감시간 옵션 생성 (커스텀 입력 옵션 포함)"""
+        options = [
+            # 기존 상대적 마감시간들
+            discord.SelectOption(label="내전 하루 전", value="1day_before", emoji="⏰"),
+            discord.SelectOption(label="내전 3시간 전", value="3hour_before", emoji="⏰"),
+            discord.SelectOption(label="내전 2시간 전", value="2hour_before", emoji="⏰"),
+            discord.SelectOption(label="내전 1시간 전", value="1hour_before", emoji="⏰"),
+            discord.SelectOption(label="내전 당일 오후 5시", value="same_day_5pm", emoji="⏰"),
+            discord.SelectOption(label="내전 당일 오후 6시", value="same_day_6pm", emoji="⏰"),
+            
+            # 추가 옵션들
+            discord.SelectOption(label="내전 당일 오후 3시", value="same_day_3pm", emoji="⏰"),
+            discord.SelectOption(label="내전 당일 오후 4시", value="same_day_4pm", emoji="⏰"),
+            discord.SelectOption(label="내전 6시간 전", value="6hour_before", emoji="⏰"),
+            discord.SelectOption(label="내전 12시간 전", value="12hour_before", emoji="⏰"),
+            
+            # 커스텀 마감시간 입력 옵션 (맨 마지막)
+            discord.SelectOption(
+                label="🛠️ 정확한 시간 입력", 
+                value="custom_deadline", 
+                emoji="📅",
+                description="정확한 날짜와 시간을 직접 입력합니다"
+            ),
+        ]
+        return options
 
     async def select_date_callback(self, interaction: discord.Interaction):
         """날짜 선택 처리"""
@@ -234,24 +480,86 @@ class DateTimeSelectionView(discord.ui.View):
         )
 
     async def select_time_callback(self, interaction: discord.Interaction):
-        """시간 선택 처리"""
-        self.selected_time = self.time_select.values[0]
-        self.deadline_select.disabled = False
+        """시간 선택 콜백"""
+        selected_value = self.time_select.values[0]
         
-        await interaction.response.edit_message(
-            content=f"✅ **날짜**: {self.selected_date}\n✅ **시간**: {self.selected_time}\n⏰ 모집 마감시간을 선택해주세요:",
-            view=self
-        )
+        if selected_value == "custom_time":
+            modal = CustomTimeModal(self)
+            await interaction.response.send_modal(modal)
+        else:
+            self.selected_time = selected_value
+            
+            # UI 업데이트
+            await interaction.response.edit_message(
+                content=f"✅ 선택된 시간: **{self._format_display_time(selected_value)}**\n"
+                       f"이제 모집 마감시간을 선택해주세요.",
+                view=self
+            )
+            
+            self._update_ui_state()
+
+    def _update_ui_state(self):
+        """UI 상태 업데이트 - 수정됨"""
+        print(f"DEBUG: _update_ui_state 호출됨")
+        print(f"DEBUG: selected_date={self.selected_date}, selected_time={self.selected_time}, selected_deadline={self.selected_deadline}")
+        
+        # 날짜와 시간이 모두 선택되었으면 마감시간 드롭다운 활성화
+        if self.selected_date and self.selected_time:
+            self.deadline_select.disabled = False
+            print(f"DEBUG: 마감시간 드롭다운 활성화됨")
+        
+        # 모든 정보가 설정되었으면 등록 버튼 활성화
+        if self.selected_date and self.selected_time and self.selected_deadline:
+            self.register_button.disabled = False
+            print(f"DEBUG: 등록 버튼 활성화됨")
+
+    def _format_display_time(self, time_str: str) -> str:
+        """시간 표시 형식 개선"""
+        time_map = {
+            "17:00": "오후 5시", "18:00": "오후 6시", "19:00": "오후 7시",
+            "20:00": "오후 8시", "21:00": "오후 9시", "22:00": "오후 10시",
+            "23:00": "오후 11시", "00:00": "자정", "13:00": "오후 1시",
+            "14:00": "오후 2시", "15:00": "오후 3시", "16:00": "오후 4시"
+        }
+        return time_map.get(time_str, time_str)
+    
+    def _format_deadline_display(self, deadline_value: str) -> str:
+        """마감시간 표시 형식 개선"""
+        deadline_map = {
+            "1day_before": "내전 하루 전",
+            "3hour_before": "내전 3시간 전", 
+            "2hour_before": "내전 2시간 전",
+            "1hour_before": "내전 1시간 전",
+            "same_day_5pm": "내전 당일 오후 5시",
+            "same_day_6pm": "내전 당일 오후 6시",
+            "same_day_3pm": "내전 당일 오후 3시",
+            "same_day_4pm": "내전 당일 오후 4시",
+            "6hour_before": "내전 6시간 전",
+            "12hour_before": "내전 12시간 전"
+        }
+        return deadline_map.get(deadline_value, deadline_value)
 
     async def select_deadline_callback(self, interaction: discord.Interaction):
-        """마감시간 선택 처리"""
-        self.selected_deadline = self.deadline_select.values[0]
-        self.register_button.disabled = False
+        """마감시간 선택 콜백 (커스텀 입력 지원)"""
+        selected_value = self.deadline_select.values[0]
         
-        await interaction.response.edit_message(
-            content=f"✅ **날짜**: {self.selected_date}\n✅ **시간**: {self.selected_time}\n✅ **마감**: {self.selected_deadline}\n\n🎯 모든 정보가 설정되었습니다! 등록 버튼을 눌러주세요.",
-            view=self
-        )
+        if selected_value == "custom_deadline":
+            # 커스텀 마감시간 입력 Modal 띄우기
+            modal = CustomDeadlineModal(self)
+            await interaction.response.send_modal(modal)
+        else:
+            # 기존 로직 - 미리 정의된 마감시간 선택
+            self.selected_deadline = selected_value
+            
+            await interaction.response.edit_message(
+                content=f"✅ **날짜**: {self.selected_date}\n"
+                       f"✅ **시간**: {self.selected_time}\n"
+                       f"✅ **마감**: {self._format_deadline_display(selected_value)}\n\n"
+                       f"🎯 모든 정보가 설정되었습니다! 등록 버튼을 눌러주세요.",
+                view=self
+            )
+            
+            self._update_ui_state()
 
     async def register_recruitment_callback(self, interaction: discord.Interaction):
         """최종 등록 처리"""
@@ -464,22 +772,38 @@ class DateTimeSelectionView(discord.ui.View):
         return datetime.combine(target_date, datetime.min.time().replace(hour=hour, minute=minute))
     
     def _calculate_deadline(self, scrim_datetime: datetime) -> datetime:
-        """마감시간 계산"""
-        if self.selected_deadline == "1day_before":
-            return scrim_datetime - timedelta(days=1)
-        elif self.selected_deadline == "3hour_before":
-            return scrim_datetime - timedelta(hours=3)
-        elif self.selected_deadline == "2hour_before":
-            return scrim_datetime - timedelta(hours=2)
-        elif self.selected_deadline == "1hour_before":
-            return scrim_datetime - timedelta(hours=1)
-        elif self.selected_deadline == "same_day_5pm":
-            return datetime.combine(scrim_datetime.date(), datetime.min.time().replace(hour=17))
-        elif self.selected_deadline == "same_day_6pm":
-            return datetime.combine(scrim_datetime.date(), datetime.min.time().replace(hour=18))
+        """마감시간 계산 (커스텀 시간 지원)"""
+        if self.selected_deadline.startswith("custom_datetime_"):
+            # 커스텀 날짜시간 파싱
+            iso_string = self.selected_deadline.replace("custom_datetime_", "")
+            return datetime.fromisoformat(iso_string)
+        
+        # 기존 상대적 마감시간 계산
+        deadline_map = {
+            "1day_before": timedelta(days=1),
+            "3hour_before": timedelta(hours=3),
+            "2hour_before": timedelta(hours=2), 
+            "1hour_before": timedelta(hours=1),
+            "6hour_before": timedelta(hours=6),
+            "12hour_before": timedelta(hours=12),
+            "same_day_3pm": None,  # 특별 처리
+            "same_day_4pm": None,
+            "same_day_5pm": None,
+            "same_day_6pm": None
+        }
+        
+        if self.selected_deadline in ["same_day_3pm", "same_day_4pm", "same_day_5pm", "same_day_6pm"]:
+            # 당일 특정 시간
+            hour_map = {
+                "same_day_3pm": 15, "same_day_4pm": 16,
+                "same_day_5pm": 17, "same_day_6pm": 18
+            }
+            hour = hour_map[self.selected_deadline]
+            return datetime.combine(scrim_datetime.date(), datetime.min.time().replace(hour=hour))
         else:
-            # 기본값: 1시간 전
-            return scrim_datetime - timedelta(hours=1)
+            # 상대적 시간
+            delta = deadline_map.get(self.selected_deadline, timedelta(hours=1))
+            return scrim_datetime - delta
     
     def _create_recruitment_embed_and_view(self, recruitment_id: str, 
                                                scrim_datetime: datetime, 
