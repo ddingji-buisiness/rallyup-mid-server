@@ -123,7 +123,7 @@ class DateTimeModal(discord.ui.Modal):
         # 제목 입력
         self.title_input = discord.ui.TextInput(
             label="내전 제목",
-            placeholder="예: 금요일 랭크 내전",
+            placeholder="예: 금요일 정기 내전",
             required=True,
             max_length=50
         )
@@ -297,13 +297,25 @@ class DateTimeSelectionView(discord.ui.View):
             )
             
             channel = self.bot.get_channel(int(self.channel_id))
+
             if channel:
-                await channel.send(embed=embed, view=view)
+                message = await channel.send(embed=embed, view=view)
+            
+                result = await self.bot.db_manager.update_recruitment_message_info(
+                    recruitment_id, str(message.id), str(channel.id)
+                )
+
+                self.bot.add_view(view)
+
+                dm_stats = await self._send_dm_notifications(
+                    interaction.guild, recruitment_id, embed, scrim_datetime
+                )
                 
                 await interaction.followup.send(
                     f"✅ **{self.title}** 내전 모집이 성공적으로 등록되었습니다!\n"
                     f"📅 **일시**: {scrim_datetime.strftime('%Y년 %m월 %d일 %H:%M')}\n"
-                    f"⏰ **마감**: {deadline_datetime.strftime('%Y년 %m월 %d일 %H:%M')}",
+                    f"⏰ **마감**: {deadline_datetime.strftime('%Y년 %m월 %d일 %H:%M')}\n\n"
+                    f"🔔 **DM 알림 결과**: {dm_stats['success']}명 성공, {dm_stats['failed']}명 실패",
                     ephemeral=True
                 )
             else:
@@ -315,6 +327,109 @@ class DateTimeSelectionView(discord.ui.View):
             await interaction.followup.send(
                 f"❌ 등록 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
+
+    async def _send_dm_notifications(self, guild: discord.Guild, recruitment_id: str,
+                                     embed: discord.Embed, scrim_datetime: datetime) -> dict:
+        """서버 멤버들에게 내전 모집 DM 알림 전송"""
+        success_count = 0
+        failed_count = 0
+
+        try:
+            print(f"🔔 {guild.name} 서버 멤버들에게 내전 모집 DM 알림 전송을 시작합니다...")
+
+            members = [member for member in guild.members if not member.bot]
+            print(f"대상 멤버 수: {len(members)}명 (봇 제외)")
+
+            # DM 용 임베드 생성
+            dm_embed = await self._create_dm_notification_embed(embed, guild, scrim_datetime)
+
+            import asyncio
+
+            async def send_single_dm(member):
+                nonlocal success_count, failed_count
+                try:
+                    await member.send(embed=dm_embed)
+                    success_count += 1
+                    print(f"✅ {member.display_name}님에게 DM 알림 전송 성공")
+                except discord.Forbidden:
+                    failed_count += 1
+                    print(f"❌ {member.display_name}님에게 DM 알림 전송 실패 (DM 차단)")
+                except discord.HTTPException as e:
+                    failed_count += 1
+                    print(f"❌ {member.display_name}님에게 DM 알림 전송 실패 (HTTP 오류: {str(e)})")
+                except Exception as e:
+                    failed_count += 1
+                    print(f"❌ {member.display_name}님에게 DM 알림 전송 실패 (기타 오류: {str(e)})")
+
+                await asyncio.sleep(0.1)
+
+            tasks = [send_single_dm(member) for member in members]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            print(f"🔔 DM 알림 전송 완료: 성공 {success_count}명, 실패 {failed_count}명")
+
+            return {
+                'success': success_count,
+                'failed': failed_count,
+                'total': len(members)
+            }
+
+        except Exception as e:
+            print("❌ DM 알림 전송 중 오류 발생:", str(e))
+            return {
+                'success': success_count,
+                'failed': failed_count,
+                'total': len(members)
+            }
+
+    async def _create_dm_notification_embed(self, original_embed: discord.Embed, 
+                                           guild: discord.Guild, scrim_datetime: datetime) -> discord.Embed:
+        """DM 알림용 임베드 생성"""
+        dm_embed = discord.Embed(
+            title=f"🎮 새로운 내전 모집 알림",
+            description=f"**{guild.name}** 서버에서 새로운 내전 모집이 등록되었습니다!",
+            color=0x00ff88,
+            timestamp=datetime.utcnow()
+        )       
+
+        dm_embed.add_field(
+            name="📅 내전 제목",
+            value=self.title,
+            inline=False
+        )
+
+        dm_embed.add_field(
+            name="📝 상세 내용",
+            value=self.content or "내전 참가자를 모집합니다!",
+            inline=False
+        )
+
+        dm_embed.add_field(
+            name="📅 일정",
+            value=f"**내전 일시**: {scrim_datetime.strftime('%Y년 %m월 %d일 (%A) %H:%M')}\n"
+                  f"**모집 마감**: {self._calculate_deadline(scrim_datetime).strftime('%Y년 %m월 %d일 %H:%M')}",
+            inline=False
+        )
+
+        dm_embed.add_field(
+            name="🍬 참여 방법",
+            value=f"**{guild.name}** 서버의 내전 채널로 이동해서\n"
+                   "모집 공지의 버튼을 클릭하여 참가/불참을 표시해주세요!",
+            inline=False
+        )
+
+        dm_embed.add_field(
+            name="⚡️ 빠른 참여",
+            value="서버에서 해당 모집글을 찾아 **참가** 버튼을 눌러주세요!",
+            inline=False
+        )
+
+        dm_embed.set_footer(
+            text=f"{guild.name} | RallyUp Bot",
+            icon_url=guild.icon.url if guild.icon else None
+        )
+
+        return dm_embed
     
     def _calculate_datetime(self) -> datetime:
         """선택된 날짜/시간을 datetime 객체로 변환"""
@@ -400,6 +515,70 @@ class DateTimeSelectionView(discord.ui.View):
         
         return embed, view
 
+class JoinButton(discord.ui.Button):
+    def __init__(self, recruitment_id: str):
+        super().__init__(
+            label="✅ 참가",
+            style=discord.ButtonStyle.success,
+            custom_id=f"join_scrim_{recruitment_id}"
+        )
+        self.recruitment_id = recruitment_id
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if hasattr(view, '_handle_participation'):
+            await view._handle_participation(interaction, "joined")
+        else:
+            await interaction.response.send_message("오류가 발생했습니다.", ephemeral=True)
+
+class DeclineButton(discord.ui.Button):
+    def __init__(self, recruitment_id: str):
+        super().__init__(
+            label="❌ 불참",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"decline_scrim_{recruitment_id}"
+        )
+        self.recruitment_id = recruitment_id
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if hasattr(view, '_handle_participation'):
+            await view._handle_participation(interaction, "declined")
+        else:
+            await interaction.response.send_message("오류가 발생했습니다.", ephemeral=True)
+
+class LateJoinButton(discord.ui.Button):
+    def __init__(self, recruitment_id: str):
+        super().__init__(
+            label="⏰ 늦참",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"late_join_scrim_{recruitment_id}"
+        )
+        self.recruitment_id = recruitment_id
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if hasattr(view, '_handle_participation'):
+            await view._handle_participation(interaction, "late_join")
+        else:
+            await interaction.response.send_message("오류가 발생했습니다.", ephemeral=True)
+
+class ParticipantsButton(discord.ui.Button):
+    def __init__(self, recruitment_id: str):
+        super().__init__(
+            label="📋 참가자 목록",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"show_participants_{recruitment_id}"
+        )
+        self.recruitment_id = recruitment_id
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if hasattr(view, '_show_participants_list'):
+            await view._show_participants_list(interaction)
+        else:
+            await interaction.response.send_message("오류가 발생했습니다.", ephemeral=True)
+
 class RecruitmentView(discord.ui.View):
     """내전 모집 참가/불참 버튼 View"""
     
@@ -407,42 +586,47 @@ class RecruitmentView(discord.ui.View):
         super().__init__(timeout=None)  # 시간 제한 없음 (마감시간까지 유효)
         self.bot = bot
         self.recruitment_id = recruitment_id
-    
-    @discord.ui.button(
-        label="✅ 참가",
-        style=discord.ButtonStyle.success,
-        custom_id="join_scrim"
-    )
-    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """참가 버튼 클릭 처리"""
-        await self._handle_participation(interaction, "joined")
-    
-    @discord.ui.button(
-        label="❌ 불참", 
-        style=discord.ButtonStyle.danger,
-        custom_id="decline_scrim"
-    )
-    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """불참 버튼 클릭 처리"""
-        await self._handle_participation(interaction, "declined")
 
-    @discord.ui.button(
-        label="⏰ 늦참",
-        style=discord.ButtonStyle.primary,
-        custom_id="late_join_scrim"
-    )
-    async def late_join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """늦참 버튼 클릭 처리"""
-        await self._handle_participation(interaction, "late_join")
+        self.add_item(JoinButton(recruitment_id))
+        self.add_item(DeclineButton(recruitment_id))
+        self.add_item(LateJoinButton(recruitment_id))
+        self.add_item(ParticipantsButton(recruitment_id))
     
-    @discord.ui.button(
-        label="📋 참가자 목록",
-        style=discord.ButtonStyle.secondary,
-        custom_id="show_participants"
-    ) 
-    async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """참가자 목록 보기"""
-        await self._show_participants_list(interaction)
+    # @discord.ui.button(
+    #     label="✅ 참가",
+    #     style=discord.ButtonStyle.success,
+    #     custom_id="join_scrim"
+    # )
+    # async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    #     """참가 버튼 클릭 처리"""
+    #     await self._handle_participation(interaction, "joined")
+    
+    # @discord.ui.button(
+    #     label="❌ 불참", 
+    #     style=discord.ButtonStyle.danger,
+    #     custom_id="decline_scrim"
+    # )
+    # async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    #     """불참 버튼 클릭 처리"""
+    #     await self._handle_participation(interaction, "declined")
+
+    # @discord.ui.button(
+    #     label="⏰ 늦참",
+    #     style=discord.ButtonStyle.primary,
+    #     custom_id="late_join_scrim"
+    # )
+    # async def late_join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    #     """늦참 버튼 클릭 처리"""
+    #     await self._handle_participation(interaction, "late_join")
+    
+    # @discord.ui.button(
+    #     label="📋 참가자 목록",
+    #     style=discord.ButtonStyle.secondary,
+    #     custom_id="show_participants"
+    # ) 
+    # async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    #     """참가자 목록 보기"""
+    #     await self._show_participants_list(interaction)
     
     async def _handle_participation(self, interaction: discord.Interaction, status: str):
         """참가/불참 처리 공통 로직"""
@@ -592,7 +776,7 @@ class RecruitmentView(discord.ui.View):
             participants = await self.bot.db_manager.get_recruitment_participants(self.recruitment_id)
             
             joined_count = len([p for p in participants if p['status'] == 'joined'])
-            late_join_count = len([p for p in participants if p['status'] == 'late_join'])  # 늦참자 추가
+            late_join_count = len([p for p in participants if p['status'] == 'late_join']) 
             declined_count = len([p for p in participants if p['status'] == 'declined'])
             
             # 업데이트된 임베드 생성
