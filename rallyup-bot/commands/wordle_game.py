@@ -734,7 +734,7 @@ class EnhancedGuessModal(discord.ui.Modal):
 
         self.guess_input = discord.ui.TextInput(
             label="5글자 한글 단어를 입력하세요",
-            placeholder="예: 사과나무딸기",
+            placeholder="예: 정빈이바보",
             min_length=5,
             max_length=5,
             required=True,

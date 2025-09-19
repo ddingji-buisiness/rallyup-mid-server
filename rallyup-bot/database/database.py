@@ -1,17 +1,21 @@
 import aiosqlite
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from utils.time_utils import TimeUtils
 
 import discord
-from database.models import BestPairSummary, ClanScrim, ClanTeam, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup, WordleAttempt, WordleGame, WordleGuess, WordleRating
+from database.models import BestPairSummary, ClanScrim, ClanTeam, ScrimRecruitment, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup, WordleAttempt, WordleGame, WordleGuess, WordleRating
 import uuid
 import asyncio
 
 class DatabaseManager:
     def __init__(self, db_path: str = "database/rallyup.db"):
         self.db_path = db_path
+
+    def generate_uuid(self) -> str:
+        """UUID 생성"""
+        return str(uuid.uuid4())
     
     async def initialize(self):
         """데이터베이스 초기화"""
@@ -26,6 +30,8 @@ class DatabaseManager:
             await self.initialize_server_settings_tables()
             await self.create_bamboo_tables()
             await self.initialize_wordle_tables()
+            await self.create_inter_guild_scrim_tables()
+            # await self.migrate_add_late_join_status()
 
             # users 테이블
             await db.execute('''
@@ -235,7 +241,7 @@ class DatabaseManager:
                     recruitment_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     username TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('joined', 'declined')),
+                    status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
                     joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
@@ -4893,10 +4899,6 @@ class DatabaseManager:
         
         print("✅ 띵지워들 인덱스 생성 완료")
 
-    # ==========================================
-    # 유저 포인트 관리
-    # ==========================================
-    
     async def get_user_points(self, guild_id: str, user_id: str) -> int:
         """등록된 사용자의 포인트 조회"""
         try:
@@ -4977,11 +4979,7 @@ class DatabaseManager:
         except Exception as e:
             print(f"일일 포인트 지급 실패: {e}")
             return False
-    
-    # ==========================================
-    # 게임 관리
-    # ==========================================
-    
+
     async def create_game(self, game: WordleGame) -> Optional[int]:
         """새 게임 생성"""
         try:
@@ -5103,10 +5101,6 @@ class DatabaseManager:
             print(f"포인트 풀 업데이트 실패: {e}")
             return False
     
-    # ==========================================
-    # 도전 기록 관리
-    # ==========================================
-    
     async def create_attempt(self, attempt: WordleAttempt) -> Optional[int]:
         """새 도전 기록 생성"""
         try:
@@ -5179,10 +5173,6 @@ class DatabaseManager:
             print(f"도전 완료 처리 실패: {e}")
             return False
     
-    # ==========================================
-    # 추측 기록 관리
-    # ==========================================
-    
     async def add_guess(self, guess: WordleGuess) -> bool:
         """추측 기록 추가"""
         try:
@@ -5228,10 +5218,6 @@ class DatabaseManager:
             print(f"추측 기록 조회 실패: {e}")
             return []
     
-    # ==========================================
-    # 난이도 평가 관리
-    # ==========================================
-    
     async def add_rating(self, rating: WordleRating) -> bool:
         """난이도 평가 추가"""
         try:
@@ -5271,10 +5257,6 @@ class DatabaseManager:
         except Exception as e:
             print(f"난이도 평가 조회 실패: {e}")
             return {"쉬움": 0, "적절함": 0, "어려움": 0}
-    
-    # ==========================================
-    # 만료 처리
-    # ==========================================
     
     async def get_expired_games(self) -> List[Dict]:
         """만료된 게임들 조회"""
@@ -5317,10 +5299,6 @@ class DatabaseManager:
             print(f"게임 만료 처리 실패: {e}")
             return False
         
-    # ==========================================
-    # 출제자 보상 시스템
-    # ==========================================
-    
     async def calculate_creator_reward(self, game_id: int) -> int:
         """난이도 평가를 바탕으로 출제자 보상 계산"""
         try:
@@ -5365,11 +5343,7 @@ class DatabaseManager:
         except Exception as e:
             print(f"출제자 보상 지급 실패: {e}")
             return False
-    
-    # ==========================================
-    # 안전한 포인트 트랜잭션
-    # ==========================================
-    
+
     async def safe_transfer_points(self, from_user_id: str, to_user_id: str, amount: int) -> bool:
         """안전한 포인트 이전 (트랜잭션)"""
         try:
@@ -5457,10 +5431,6 @@ class DatabaseManager:
             print(f"승자 보상 실패: {e}")
             return False
     
-    # ==========================================
-    # 통계 및 랭킹
-    # ==========================================
-    
     async def get_top_players(self, limit: int = 10) -> List[Dict]:
         """포인트 상위 플레이어 조회"""
         try:
@@ -5527,3 +5497,981 @@ class DatabaseManager:
         except Exception as e:
             print(f"사용자 통계 조회 실패: {e}")
             return {'points': 0, 'games_created': 0, 'games_solved': 0, 'games_attempted': 0, 'games_won': 0, 'avg_attempts': 0, 'win_rate': 0}
+
+    async def create_inter_guild_scrim_tables(self):
+        """길드 간 스크림 관련 테이블 생성 (내전과 별도)"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 길드 간 스크림 모집 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inter_guild_scrims (
+                    id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT,
+                    description TEXT,
+                    tier_range TEXT NOT NULL,
+                    opponent_team TEXT,
+                    scrim_date TEXT NOT NULL,
+                    deadline_date TEXT NOT NULL,
+                    channel_id TEXT,
+                    max_participants INTEGER DEFAULT 5,
+                    status TEXT DEFAULT 'active' CHECK (status IN ('active', 'closed', 'cancelled')),
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 길드 간 스크림 참가자 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inter_guild_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scrim_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
+                    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (scrim_id) REFERENCES inter_guild_scrims(id),
+                    UNIQUE(scrim_id, user_id)
+                )
+            ''')
+            
+            # 길드 간 스크림 경기 결과 테이블 (향후 확장용)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inter_guild_matches (
+                    id TEXT PRIMARY KEY,
+                    scrim_id TEXT NOT NULL,
+                    match_number INTEGER NOT NULL DEFAULT 1,
+                    our_team_score INTEGER DEFAULT 0,
+                    opponent_team_score INTEGER DEFAULT 0,
+                    winning_team TEXT NOT NULL CHECK (winning_team IN ('our_team', 'opponent_team')),
+                    map_name TEXT,
+                    match_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                    created_by TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    FOREIGN KEY (scrim_id) REFERENCES inter_guild_scrims(id)
+                )
+            ''')
+            
+            # 길드 간 스크림 경기 참가자 테이블 (향후 확장용)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inter_guild_match_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    position TEXT NOT NULL CHECK (position IN ('탱커', '딜러', '힐러')),
+                    won BOOLEAN NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (match_id) REFERENCES inter_guild_matches(id)
+                )
+            ''')
+
+            # 스크림 시간 조합 테이블 (복수 날짜/시간 지원)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_time_slots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scrim_id TEXT NOT NULL,
+                    date_str TEXT NOT NULL,
+                    time_slot TEXT NOT NULL,
+                    date_display TEXT NOT NULL,
+                    is_custom_time BOOLEAN DEFAULT FALSE,
+                    finalized BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (scrim_id) REFERENCES inter_guild_scrims(id),
+                    UNIQUE(scrim_id, date_str, time_slot)
+                )
+            ''')
+            
+            # 포지션별 참가자 테이블 (기존 inter_guild_participants 확장)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_position_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scrim_id TEXT NOT NULL,
+                    time_slot_id INTEGER NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    position TEXT NOT NULL CHECK (position IN ('탱커', '딜러', '힐러', '플렉스')),
+                    status TEXT DEFAULT 'joined' CHECK (status IN ('joined', 'declined')),
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (scrim_id) REFERENCES inter_guild_scrims(id),
+                    FOREIGN KEY (time_slot_id) REFERENCES scrim_time_slots(id),
+                    UNIQUE(time_slot_id, user_id, position)
+                )
+            ''')
+            
+            # 글로벌 클랜 공유 테이블 (기존 clan_teams와 별도)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS global_shared_clans (
+                    clan_name TEXT PRIMARY KEY,
+                    origin_guild_id TEXT NOT NULL,
+                    origin_guild_name TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    usage_count INTEGER DEFAULT 1,
+                    verified BOOLEAN DEFAULT FALSE
+                )
+            ''')
+            
+            # 서버별 클랜 매핑 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS guild_clan_mapping (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    clan_name TEXT NOT NULL,
+                    is_primary BOOLEAN DEFAULT FALSE,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (clan_name) REFERENCES global_shared_clans(clan_name),
+                    UNIQUE(guild_id, clan_name)
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_inter_guild_scrims_guild_status ON inter_guild_scrims(guild_id, status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_inter_guild_scrims_deadline ON inter_guild_scrims(deadline_date, status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_inter_guild_participants_scrim ON inter_guild_participants(scrim_id, status)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_inter_guild_matches_scrim ON inter_guild_matches(scrim_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_scrim_time_slots_scrim ON scrim_time_slots(scrim_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_position_participants_time_slot ON scrim_position_participants(time_slot_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_position_participants_user ON scrim_position_participants(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_global_clans_usage ON global_shared_clans(usage_count DESC)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_guild_clan_mapping_guild ON guild_clan_mapping(guild_id)')
+
+            await db.commit()
+            print("🎯 길드 간 스크림 테이블이 생성되었습니다.")
+            
+    async def create_scrim(self, scrim_data: Dict[str, Any]) -> str:
+        """새 길드 간 스크림 모집 생성"""
+        async with aiosqlite.connect(self.db_path) as db:
+            scrim_id = self.generate_uuid()
+            created_at = datetime.now(timezone.utc).isoformat()
+            
+            await db.execute('''
+                INSERT INTO inter_guild_scrims 
+                (id, guild_id, title, content, tier_range, opponent_team, 
+                 scrim_date, deadline_date, channel_id, max_participants, 
+                 status, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                scrim_id, scrim_data['guild_id'], scrim_data['title'],
+                scrim_data['content'], scrim_data['tier_range'], scrim_data['opponent_team'],
+                scrim_data['scrim_date'], scrim_data['deadline_date'], scrim_data['channel_id'],
+                5, 'active', scrim_data['created_by'], created_at
+            ))
+            
+            await db.commit()
+            return scrim_id
+
+    async def get_scrim_by_id(self, scrim_id: str) -> Optional[Dict[str, Any]]:
+        """ID로 길드 간 스크림 모집 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT * FROM inter_guild_scrims WHERE id = ?
+            ''', (scrim_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    columns = [description[0] for description in cursor.description]
+                    return dict(zip(columns, row))
+                return None
+
+    async def get_active_scrims(self, guild_id: str) -> List[Dict[str, Any]]:
+        """활성 길드 간 스크림 모집 목록 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT s.*, 
+                       COUNT(p.id) as participant_count
+                FROM inter_guild_scrims s
+                LEFT JOIN inter_guild_participants p ON s.id = p.scrim_id 
+                    AND p.status = 'joined'
+                WHERE s.guild_id = ? AND s.status = 'active'
+                GROUP BY s.id
+                ORDER BY s.scrim_date ASC
+            ''', (guild_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def add_participant(self, scrim_id: str, user_id: str, 
+                            username: str, status: str = 'joined') -> bool:
+        """길드 간 스크림 참가자 추가/업데이트"""
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.now(timezone.utc).isoformat()
+            
+            await db.execute('''
+                INSERT OR REPLACE INTO inter_guild_participants 
+                (scrim_id, user_id, username, status, joined_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (scrim_id, user_id, username, status, now, now))
+            
+            await db.commit()
+            return True
+
+    async def get_participants(self, scrim_id: str) -> List[Dict[str, Any]]:
+        """길드 간 스크림 모집 참가자 목록 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT * FROM inter_guild_participants 
+                WHERE scrim_id = ?
+                ORDER BY joined_at ASC
+            ''', (scrim_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def update_scrim_status(self, scrim_id: str, status: str) -> bool:
+        """길드 간 스크림 모집 상태 업데이트"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE inter_guild_scrims 
+                SET status = ? 
+                WHERE id = ?
+            ''', (status, scrim_id))
+            
+            await db.commit()
+            return True
+
+    async def get_expired_scrims(self) -> List[Dict[str, Any]]:
+        """마감 시간이 지난 길드 간 스크림 모집 조회"""
+        current_time = datetime.now(timezone.utc).isoformat()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT * FROM inter_guild_scrims 
+                WHERE status = 'active' 
+                AND deadline_date < ?
+            ''', (current_time,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def get_scrim_statistics(self, guild_id: str) -> Dict[str, Any]:
+        """길드 간 스크림 모집 통계 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 전체 통계
+            async with db.execute('''
+                SELECT 
+                    COUNT(CASE WHEN status = 'active' THEN 1 END) as active_count,
+                    COUNT(CASE WHEN status = 'closed' THEN 1 END) as completed_count,
+                    COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_count,
+                    COUNT(*) as total_count
+                FROM inter_guild_scrims
+                WHERE guild_id = ?
+            ''', (guild_id,)) as cursor:
+                stats_row = await cursor.fetchone()
+            
+            # 참가자 통계
+            async with db.execute('''
+                SELECT AVG(participant_count) as avg_participants
+                FROM (
+                    SELECT COUNT(p.id) as participant_count
+                    FROM inter_guild_scrims s
+                    LEFT JOIN inter_guild_participants p ON s.id = p.scrim_id 
+                        AND p.status = 'joined'
+                    WHERE s.guild_id = ? AND s.status IN ('closed', 'cancelled')
+                    GROUP BY s.id
+                )
+            ''', (guild_id,)) as cursor:
+                avg_row = await cursor.fetchone()
+            
+            return {
+                'active': stats_row[0] if stats_row else 0,
+                'completed': stats_row[1] if stats_row else 0,
+                'cancelled': stats_row[2] if stats_row else 0,
+                'total': stats_row[3] if stats_row else 0,
+                'avg_participants': round(avg_row[0], 1) if avg_row and avg_row[0] else 0
+            }
+
+    async def delete_scrim(self, scrim_id: str) -> bool:
+        """길드 간 스크림 모집 삭제 (관련 데이터도 함께 삭제)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 참가자 데이터 먼저 삭제
+            await db.execute('DELETE FROM inter_guild_participants WHERE scrim_id = ?', (scrim_id,))
+            
+            # 스크림 모집 삭제
+            await db.execute('DELETE FROM inter_guild_scrims WHERE id = ?', (scrim_id,))
+            
+            await db.commit()
+            return True
+
+    async def get_user_participation_history(self, guild_id: str, user_id: str) -> List[Dict]:
+        """특정 사용자의 길드 간 스크림 참가 이력"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT s.title, s.scrim_date, s.status as scrim_status,
+                        p.status as participation_status, p.joined_at
+                    FROM inter_guild_scrims s
+                    JOIN inter_guild_participants p ON s.id = p.scrim_id
+                    WHERE s.guild_id = ? AND p.user_id = ?
+                    ORDER BY s.scrim_date DESC
+                    LIMIT 20
+                ''', (guild_id, user_id)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 사용자 참가 이력 조회 실패: {e}")
+            return []
+
+    async def cleanup_old_scrims(self, days_old: int = 30) -> int:
+        """오래된 길드 간 스크림 데이터 정리"""
+        try:
+            from datetime import timedelta
+            cutoff_date = (datetime.now() - timedelta(days=days_old)).isoformat()
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 오래된 참가자 데이터 삭제
+                await db.execute('''
+                    DELETE FROM inter_guild_participants 
+                    WHERE scrim_id IN (
+                        SELECT id FROM inter_guild_scrims 
+                        WHERE created_at < ? AND status IN ('closed', 'cancelled')
+                    )
+                ''', (cutoff_date,))
+                
+                # 오래된 스크림 모집 삭제
+                cursor = await db.execute('''
+                    DELETE FROM inter_guild_scrims 
+                    WHERE created_at < ? AND status IN ('closed', 'cancelled')
+                ''', (cutoff_date,))
+                
+                deleted_count = cursor.rowcount
+                await db.commit()
+                
+                return deleted_count
+                
+        except Exception as e:
+            print(f"❌ 오래된 데이터 정리 실패: {e}")
+            return 0
+
+    async def get_available_clans_for_dropdown(self, guild_id: str) -> List[Dict[str, str]]:
+        """드롭다운용 클랜 목록 조회 (등록된 클랜 + 글로벌 클랜)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. 현재 서버에 등록된 클랜들
+            async with db.execute('''
+                SELECT clan_name, 'local' as source 
+                FROM clan_teams 
+                WHERE guild_id = ? AND is_active = TRUE
+                ORDER BY clan_name
+            ''', (guild_id,)) as cursor:
+                local_clans = await cursor.fetchall()
+            
+            # 2. 글로벌 공유 클랜들 (사용 빈도순)
+            async with db.execute('''
+                SELECT clan_name, 'global' as source 
+                FROM global_shared_clans 
+                WHERE clan_name NOT IN (
+                    SELECT clan_name FROM clan_teams WHERE guild_id = ?
+                )
+                ORDER BY usage_count DESC, clan_name
+                LIMIT 50
+            ''', (guild_id,)) as cursor:
+                global_clans = await cursor.fetchall()
+            
+            # 결과 조합
+            all_clans = []
+            
+            # 로컬 클랜들 먼저 (우선순위)
+            for clan_name, source in local_clans:
+                all_clans.append({
+                    'name': clan_name,
+                    'value': clan_name,
+                    'source': source,
+                    'display': f"🏠 {clan_name} (우리서버)"
+                })
+            
+            # 글로벌 클랜들
+            for clan_name, source in global_clans:
+                all_clans.append({
+                    'name': clan_name,
+                    'value': clan_name,
+                    'source': source,
+                    'display': f"🌐 {clan_name}"
+                })
+            
+            return all_clans
+
+    async def get_our_clan_name(self, guild_id: str) -> Optional[str]:
+        """현재 서버의 대표 클랜명 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 가장 최근에 등록된 클랜을 대표 클랜으로 사용
+            async with db.execute('''
+                SELECT clan_name 
+                FROM clan_teams 
+                WHERE guild_id = ? AND is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 1
+            ''', (guild_id,)) as cursor:
+                result = await cursor.fetchone()
+                return result[0] if result else None
+
+    async def create_enhanced_scrim(self, scrim_data: Dict[str, Any]) -> str:
+        """향상된 스크림 모집 생성"""
+        
+        # 재시도 로직 추가
+        for attempt in range(3):
+            try:
+                async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                    await db.execute('PRAGMA journal_mode=WAL')
+                    await db.execute('PRAGMA synchronous=NORMAL')  # 성능 개선
+                    await db.execute('PRAGMA busy_timeout=30000')   # 30초 대기
+                    
+                    scrim_id = str(uuid.uuid4())
+                    created_at = datetime.now(timezone.utc).isoformat()
+                    
+                    # 트랜잭션 시작
+                    await db.execute('BEGIN IMMEDIATE')
+                    
+                    try:
+                        # 기본 스크림 정보 저장
+                        await db.execute('''
+                            INSERT INTO inter_guild_scrims 
+                            (id, guild_id, title, content, tier_range, opponent_team, 
+                            scrim_date, deadline_date, channel_id, max_participants, 
+                            status, created_by, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            scrim_id, scrim_data['guild_id'], scrim_data['title'],
+                            scrim_data.get('description', ''), scrim_data['tier_range'], 
+                            scrim_data['opponent_team'], scrim_data['primary_date'],
+                            scrim_data['deadline_date'], scrim_data['channel_id'],
+                            50, 'active', scrim_data['created_by'], created_at
+                        ))
+                        
+                        # 시간 조합들 배치 저장
+                        time_data = []
+                        for time_combo in scrim_data['time_combinations']:
+                            time_data.append((
+                                scrim_id, time_combo['date'], time_combo['time'],
+                                time_combo['date_display'], time_combo.get('is_custom', False)
+                            ))
+                        
+                        await db.executemany('''
+                            INSERT INTO scrim_time_slots 
+                            (scrim_id, date_str, time_slot, date_display, is_custom_time)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', time_data)
+                        
+                        # 글로벌 클랜 업데이트
+                        now = datetime.now(timezone.utc).isoformat()
+                        await db.execute('''
+                            INSERT OR REPLACE INTO global_shared_clans 
+                            (clan_name, origin_guild_id, last_used, usage_count)
+                            VALUES (?, ?, ?, 
+                                    COALESCE((SELECT usage_count FROM global_shared_clans WHERE clan_name = ?), 0) + 1)
+                        ''', (scrim_data['opponent_team'], scrim_data['guild_id'], now, scrim_data['opponent_team']))
+                        
+                        await db.commit()
+                        return scrim_id
+                        
+                    except Exception as e:
+                        await db.rollback()
+                        raise e
+                        
+            except aiosqlite.OperationalError as e:
+                if "database is locked" in str(e).lower() and attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))  # 0.5초, 1초 대기
+                    continue
+                raise e
+            except Exception as e:
+                raise e
+    
+        raise Exception("데이터베이스 락 해제 실패 - 잠시 후 다시 시도해주세요")
+
+    async def update_global_clan_usage(self, clan_name: str, guild_id: str):
+        """글로벌 클랜 사용 횟수 업데이트"""
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.now(timezone.utc).isoformat()
+            
+            await db.execute('''
+                INSERT OR REPLACE INTO global_shared_clans 
+                (clan_name, origin_guild_id, last_used, usage_count)
+                VALUES (
+                    ?, ?, ?, 
+                    COALESCE((SELECT usage_count FROM global_shared_clans WHERE clan_name = ?), 0) + 1
+                )
+            ''', (clan_name, guild_id, now, clan_name))
+            
+            await db.commit()
+
+    async def get_scrim_info(self, scrim_id: str) -> Optional[Dict[str, Any]]:
+        """스크림 기본 정보 조회 (마감기한 체크용)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT id, guild_id, title, description, tier_range, opponent_team,
+                        primary_date, deadline_date, channel_id, created_by, status,
+                        created_at, updated_at
+                    FROM inter_guild_scrims 
+                    WHERE id = ?
+                ''', (scrim_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [description[0] for description in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+        except Exception as e:
+            print(f"❌ get_scrim_info 오류: {e}")
+            return None
+
+    async def get_scrim_time_slots(self, scrim_id: str) -> List[Dict[str, Any]]:
+        """스크림의 시간 조합 목록 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT id, date_str, time_slot, date_display, is_custom_time
+                FROM scrim_time_slots 
+                WHERE scrim_id = ?
+                ORDER BY date_str, time_slot
+            ''', (scrim_id,)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def add_position_participant(self, scrim_id: str, time_slot_id: int, 
+                                     user_id: str, username: str, position: str) -> bool:
+        """포지션별 참가자 추가"""
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.now(timezone.utc).isoformat()
+            
+            try:
+                await db.execute('''
+                    INSERT OR REPLACE INTO scrim_position_participants 
+                    (scrim_id, time_slot_id, user_id, username, position, status, joined_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'joined', ?, ?)
+                ''', (scrim_id, time_slot_id, user_id, username, position, now, now))
+                
+                await db.commit()
+                return True
+            except Exception as e:
+                print(f"❌ 참가자 추가 실패: {e}")
+                return False
+
+    async def remove_position_participant(self, scrim_id: str, time_slot_id: int, 
+                                        user_id: str, position: str) -> bool:
+        """포지션별 참가자 제거"""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute('''
+                    DELETE FROM scrim_position_participants 
+                    WHERE scrim_id = ? AND time_slot_id = ? AND user_id = ? AND position = ?
+                ''', (scrim_id, time_slot_id, user_id, position))
+                
+                await db.commit()
+                return True
+            except Exception as e:
+                print(f"❌ 참가자 제거 실패: {e}")
+                return False
+
+    async def get_position_participants(self, time_slot_id: int) -> Dict[str, List[Dict]]:
+        """특정 시간대의 포지션별 참가자 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT user_id, username, position, joined_at
+                FROM scrim_position_participants 
+                WHERE time_slot_id = ? AND status = 'joined'
+                ORDER BY joined_at
+            ''', (time_slot_id,)) as cursor:
+                rows = await cursor.fetchall()
+                
+                # 포지션별로 그룹화
+                participants = {'탱커': [], '딜러': [], '힐러': [], '플렉스': []}
+                for user_id, username, position, joined_at in rows:
+                    participants[position].append({
+                        'user_id': user_id,
+                        'username': username,
+                        'joined_at': joined_at
+                    })
+                
+                return participants
+
+    async def get_user_participation_status(self, scrim_id: str, user_id: str) -> Dict[str, Any]:
+        """사용자의 스크림 참가 현황 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT ts.id as time_slot_id, ts.date_display, ts.time_slot, 
+                       spp.position, spp.joined_at
+                FROM scrim_time_slots ts
+                LEFT JOIN scrim_position_participants spp ON ts.id = spp.time_slot_id 
+                    AND spp.user_id = ? AND spp.status = 'joined'
+                WHERE ts.scrim_id = ?
+                ORDER BY ts.date_str, ts.time_slot
+            ''', (user_id, scrim_id)) as cursor:
+                rows = await cursor.fetchall()
+                
+                participation = {}
+                for time_slot_id, date_display, time_slot, position, joined_at in rows:
+                    key = f"{date_display} {time_slot}"
+                    if key not in participation:
+                        participation[key] = {
+                            'time_slot_id': time_slot_id,
+                            'positions': [],
+                            'joined': False
+                        }
+                    
+                    if position:
+                        participation[key]['positions'].append(position)
+                        participation[key]['joined'] = True
+                
+                return participation
+
+    async def get_enhanced_scrim_summary(self, scrim_id: str) -> Dict[str, Any]:
+        """향상된 스크림 요약 정보 (참가자 현황 포함)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 기본 스크림 정보
+            async with db.execute('''
+                SELECT * FROM inter_guild_scrims WHERE id = ?
+            ''', (scrim_id,)) as cursor:
+                scrim_row = await cursor.fetchone()
+                if not scrim_row:
+                    return None
+                
+                columns = [description[0] for description in cursor.description]
+                scrim_data = dict(zip(columns, scrim_row))
+            
+            # 시간대별 참가자 현황
+            time_slots = await self.get_scrim_time_slots(scrim_id)
+            for slot in time_slots:
+                slot['participants'] = await self.get_position_participants(slot['id'])
+                slot['total_participants'] = sum(len(p) for p in slot['participants'].values())
+            
+            scrim_data['time_slots'] = time_slots
+            scrim_data['total_time_slots'] = len(time_slots)
+            
+            return scrim_data
+
+    async def get_tier_eligible_users(self, guild_id: str, tier_range: str) -> List[Dict[str, str]]:
+        """티어 범위에 해당하는 사용자 목록 조회"""
+        # 티어 계층 정의
+        tier_hierarchy = {
+            "언랭": 0, "브론즈": 1, "실버": 2, "골드": 3,
+            "플래티넘": 4, "다이아": 5, "마스터": 6, "그마": 7, "챔피언": 8
+        }
+        
+        # 티어 범위 파싱
+        if "~" in tier_range:
+            min_tier, max_tier = tier_range.split("~")
+        else:
+            min_tier = max_tier = tier_range
+        
+        min_level = tier_hierarchy.get(min_tier, 0)
+        max_level = tier_hierarchy.get(max_tier, 8)
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 등록된 사용자 중 해당 티어 범위의 사용자들 조회
+            placeholders = ', '.join(['?' for _ in range(min_level, max_level + 1)])
+            tier_names = [tier for tier, level in tier_hierarchy.items() 
+                         if min_level <= level <= max_level]
+            
+            if not tier_names:
+                return []
+            
+            query = f'''
+                SELECT user_id, username, battle_tag, current_season_tier
+                FROM registered_users 
+                WHERE guild_id = ? AND current_season_tier IN ({placeholders})
+                ORDER BY username
+            '''
+            
+            async with db.execute(query, [guild_id] + tier_names) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def send_scrim_notification_to_users(self, eligible_users: List[Dict], scrim_data: Dict) -> int:
+        """해당 티어 사용자들에게 스크림 알림 발송"""
+        success_count = 0
+        
+        for user_data in eligible_users:
+            try:
+                user_id = int(user_data['user_id'])
+                # 실제 DM 발송은 bot 객체가 필요하므로 여기서는 카운트만
+                # 실제 구현에서는 bot.get_user(user_id).send() 사용
+                success_count += 1
+            except Exception as e:
+                print(f"❌ DM 발송 실패 (User ID: {user_data.get('user_id')}): {e}")
+        
+        return success_count
+
+    async def is_scrim_finalized(self, scrim_id: str) -> bool:
+        """스크림이 마감되었는지 확인"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT COUNT(*) FROM scrim_time_slots 
+                    WHERE scrim_id = ? AND finalized = TRUE
+                ''', (scrim_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] > 0 if row else False
+        except Exception as e:
+            print(f"❌ is_scrim_finalized 오류: {e}")
+            return False
+
+    async def finalize_time_slot(self, scrim_id: str, time_slot_id: int) -> bool:
+        """특정 시간대를 확정 상태로 변경"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 해당 시간대를 확정 상태로 변경
+                await db.execute('''
+                    UPDATE scrim_time_slots 
+                    SET finalized = TRUE, updated_at = CURRENT_TIMESTAMP
+                    WHERE scrim_id = ? AND id = ?
+                ''', (scrim_id, time_slot_id))
+                
+                # 스크림 전체 상태를 '부분 마감'으로 변경
+                await db.execute('''
+                    UPDATE inter_guild_scrims 
+                    SET status = 'partially_closed', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (scrim_id,))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute('''
+                        UPDATE scrim_time_slots 
+                        SET finalized = TRUE
+                        WHERE scrim_id = ? AND id = ?
+                    ''', (scrim_id, time_slot_id))
+                    
+                    await db.execute('''
+                        UPDATE inter_guild_scrims 
+                        SET status = 'partially_closed'
+                        WHERE id = ?
+                    ''', (scrim_id,))
+                    
+                    await db.commit()
+                    return True
+            except Exception as e2:
+                print(f"❌ finalize_time_slot 오류: {e2}")
+                return False
+
+    async def is_time_slot_finalized(self, time_slot_id: int) -> bool:
+        """특정 시간대가 확정되었는지 확인"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT finalized FROM scrim_time_slots 
+                    WHERE id = ?
+                ''', (time_slot_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return bool(row[0]) if row else False
+        except Exception as e:
+            print(f"❌ is_time_slot_finalized 오류: {e}")
+            return False
+
+    async def get_finalized_time_slots(self, scrim_id: str) -> List[Dict[str, Any]]:
+        """확정된 시간대 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT id, scrim_id, date_str, time_slot, date_display, is_custom_time, finalized
+                    FROM scrim_time_slots 
+                    WHERE scrim_id = ? AND finalized = TRUE
+                    ORDER BY date_str, time_slot
+                ''', (scrim_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ get_finalized_time_slots 오류: {e}")
+            return []
+
+    async def get_non_finalized_time_slots(self, scrim_id: str) -> List[Dict[str, Any]]:
+        """아직 확정되지 않은 시간대 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT id, scrim_id, date_str, time_slot, date_display, is_custom_time, 
+                        COALESCE(finalized, FALSE) as finalized
+                    FROM scrim_time_slots 
+                    WHERE scrim_id = ? AND COALESCE(finalized, FALSE) = FALSE
+                    ORDER BY date_str, time_slot
+                ''', (scrim_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ get_non_finalized_time_slots 오류: {e}")
+            return []
+
+    async def update_scrim_time_slots_table(self):
+        """기존 테이블에 finalized 컬럼 추가 (마이그레이션용)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # finalized 컬럼이 존재하는지 확인
+                async with db.execute("PRAGMA table_info(scrim_time_slots)") as cursor:
+                    columns = await cursor.fetchall()
+                    column_names = [col[1] for col in columns]
+                    
+                    if 'finalized' not in column_names:
+                        await db.execute('''
+                            ALTER TABLE scrim_time_slots 
+                            ADD COLUMN finalized BOOLEAN DEFAULT FALSE
+                        ''')
+                        print("✅ scrim_time_slots 테이블에 finalized 컬럼이 추가되었습니다.")
+                    
+                    if 'updated_at' not in column_names:
+                        await db.execute('''
+                            ALTER TABLE scrim_time_slots 
+                            ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        ''')
+                        print("✅ scrim_time_slots 테이블에 updated_at 컬럼이 추가되었습니다.")
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ update_scrim_time_slots_table 오류: {e}")
+            return False
+
+    async def get_scrim_finalization_summary(self, scrim_id: str) -> Dict[str, Any]:
+        """스크림 마감 현황 요약 정보"""
+        try:
+            scrim_info = await self.get_scrim_info(scrim_id)
+            if not scrim_info:
+                return None
+            
+            finalized_slots = await self.get_finalized_time_slots(scrim_id)
+            non_finalized_slots = await self.get_non_finalized_time_slots(scrim_id)
+            
+            # 확정된 시간대별 참가자 수 계산
+            finalized_summary = []
+            for slot in finalized_slots:
+                participants = await self.get_position_participants(slot['id'])
+                total_count = sum(len(pos_list) for pos_list in participants.values())
+                finalized_summary.append({
+                    'slot': slot,
+                    'participant_count': total_count,
+                    'participants': participants
+                })
+            
+            return {
+                'scrim_info': scrim_info,
+                'finalized_count': len(finalized_slots),
+                'pending_count': len(non_finalized_slots),
+                'total_slots': len(finalized_slots) + len(non_finalized_slots),
+                'finalized_slots': finalized_summary,
+                'pending_slots': non_finalized_slots,
+                'is_fully_finalized': len(non_finalized_slots) == 0,
+                'is_partially_finalized': len(finalized_slots) > 0
+            }
+            
+        except Exception as e:
+            print(f"❌ get_scrim_finalization_summary 오류: {e}")
+            return None
+
+    async def get_scrim_admin_info(self, scrim_id: str) -> Optional[Dict[str, Any]]:
+        """스크림 관리자 정보 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT created_by, title, opponent_team, guild_id
+                    FROM inter_guild_scrims 
+                    WHERE id = ?
+                ''', (scrim_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return {
+                            'admin_id': row[0],
+                            'title': row[1], 
+                            'opponent_team': row[2],
+                            'guild_id': row[3]
+                        }
+                    return None
+        except Exception as e:
+            print(f"❌ get_scrim_admin_info 오류: {e}")
+            return None
+
+    async def update_recruitment_message_info(self, recruitment_id: str, message_id: str, channel_id: str):
+        """모집 공지의 메시지 ID와 채널 ID를 업데이트합니다."""
+        try:
+            query = """
+            UPDATE scrim_recruitments
+            SET message_id = ?, channel_id = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(query, (message_id, channel_id, recruitment_id))
+                await db.commit()
+                print(f"✅ 메시지 정보 업데이트 성공: {recruitment_id}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 모집 메시지 정보 업데이트 실패: {e}")
+            return False
+
+    # async def migrate_add_late_join_status(self):
+    #     """늦참 상태를 허용하도록 테이블 재생성"""
+    #     try:
+    #         async with aiosqlite.connect(self.db_path) as db:
+    #             # 1. 기존 테이블 구조 확인
+    #             cursor = await db.execute("PRAGMA table_info(scrim_participants)")
+    #             columns = await cursor.fetchall()
+                
+    #             if not columns:
+    #                 # 테이블이 없으면 새로 생성
+    #                 await db.execute('''
+    #                     CREATE TABLE scrim_participants (
+    #                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+    #                         recruitment_id TEXT NOT NULL,
+    #                         user_id TEXT NOT NULL,
+    #                         username TEXT NOT NULL,
+    #                         status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
+    #                         joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    #                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    #                         FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
+    #                         UNIQUE(recruitment_id, user_id)
+    #                     )
+    #                 ''')
+    #                 print("✅ 새 scrim_participants 테이블 생성 완료")
+    #             else:
+    #                 # 2. 기존 데이터 백업
+    #                 await db.execute('''
+    #                     CREATE TABLE scrim_participants_backup AS 
+    #                     SELECT * FROM scrim_participants
+    #                 ''')
+                    
+    #                 # 3. 기존 테이블 삭제
+    #                 await db.execute("DROP TABLE scrim_participants")
+                    
+    #                 # 4. 새로운 제약조건으로 테이블 재생성
+    #                 await db.execute('''
+    #                     CREATE TABLE scrim_participants (
+    #                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+    #                         recruitment_id TEXT NOT NULL,
+    #                         user_id TEXT NOT NULL,
+    #                         username TEXT NOT NULL,
+    #                         status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
+    #                         joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    #                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    #                         FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
+    #                         UNIQUE(recruitment_id, user_id)
+    #                     )
+    #                 ''')
+                    
+    #                 # 5. 백업 데이터 복원
+    #                 await db.execute('''
+    #                     INSERT INTO scrim_participants 
+    #                     SELECT * FROM scrim_participants_backup
+    #                 ''')
+                    
+    #                 # 6. 백업 테이블 삭제
+    #                 await db.execute("DROP TABLE scrim_participants_backup")
+                    
+    #                 print("✅ scrim_participants 테이블 마이그레이션 완료")
+                
+    #             await db.commit()
+                
+    #     except Exception as e:
+    #         print(f"❌ 데이터베이스 마이그레이션 실패: {e}")
+    #         raise

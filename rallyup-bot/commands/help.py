@@ -154,6 +154,17 @@ class HelpCommand(commands.Cog):
             inline=False
         )
 
+        # 스크림 관리
+        embed.add_field(
+            name="🎯 **스크림 관리**",
+            value="```\n"
+                "/스크림공지등록 [채널(옵션)] - 스크림 모집 공지 등록\n"
+                "/스크림모집현황 - 현재 모집중인 스크림 현황\n"
+                "/스크림모집취소 [모집ID] - 스크림 모집 취소\n"
+                "```",
+            inline=False
+        )
+
         embed.add_field(
             name="📊 **내전 결과 기록**",
             value="`/내전결과시작` - 마감된 내전의 결과 기록 시작\n"

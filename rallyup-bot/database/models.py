@@ -614,3 +614,56 @@ class WordleGameStats:
     final_pool_amount: int = 0
     
     completed_at: Optional[datetime] = None
+
+@dataclass
+class ScrimRecruitment:
+    """스크림 모집 데이터 모델"""
+    id: Optional[str] = None
+    guild_id: str = ""
+    title: str = ""
+    content: Optional[str] = None
+    tier_range: str = ""  # "다이아", "플래티넘~다이아" 등
+    opponent_team: Optional[str] = None  # 옵셔널 상대팀 정보
+    scrim_date: str = ""  # ISO 형식 datetime
+    deadline_date: str = ""  # ISO 형식 datetime
+    channel_id: Optional[str] = None  # 공지 채널
+    max_participants: int = 5
+    status: str = "active"  # 'active', 'closed', 'cancelled'
+    created_by: str = ""
+    created_at: Optional[datetime] = None
+
+@dataclass
+class ScrimParticipant:
+    """스크림 참가자 데이터 모델"""
+    id: Optional[int] = None
+    recruitment_id: str = ""
+    user_id: str = ""
+    username: str = ""
+    status: str = ""  # 'joined', 'declined', 'late_join'
+    joined_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+@dataclass
+class ScrimMatch:
+    """스크림 경기 결과 데이터 모델"""
+    id: Optional[str] = None
+    recruitment_id: str = ""
+    match_number: int = 1
+    our_team_score: int = 0
+    opponent_team_score: int = 0
+    winning_team: str = ""  # 'our_team', 'opponent_team'
+    map_name: Optional[str] = None
+    match_date: Optional[datetime] = None
+    created_by: str = ""
+    guild_id: str = ""
+
+@dataclass
+class ScrimMatchParticipant:
+    """스크림 경기 참가자 데이터 모델"""
+    id: Optional[int] = None
+    match_id: str = ""
+    user_id: str = ""
+    username: str = ""
+    position: str = ""  # '탱커', '딜러', '힐러'
+    won: bool = False
+    created_at: Optional[datetime] = None
