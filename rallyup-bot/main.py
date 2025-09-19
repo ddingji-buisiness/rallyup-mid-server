@@ -8,6 +8,8 @@ from database.database import DatabaseManager
 from scheduler.bamboo_scheduler import BambooForestScheduler
 from scheduler.recruitment_scheduler import RecruitmentScheduler
 from scheduler.wordle_scheduler import WordleScheduler
+from scheduler.scrim_scheduler import ScrimScheduler
+from commands.scrim_recruitment import RecruitmentView
 
 load_dotenv()
 
@@ -30,28 +32,34 @@ class RallyUpBot(commands.Bot):
         self.db_manager = DatabaseManager()
         self.bamboo_scheduler = BambooForestScheduler(self)
         self.recruitment_scheduler = None
+        self.scrim_scheduler = None
         self.wordle_scheduler = None
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
         try:
             await self.db_manager.initialize()
-            logger.info("Database initialized successfully")
+            logger.info("데이터베이스 초기화 완료")
 
             await self.load_commands()
             
             await self.bamboo_scheduler.start()
-            logger.info("🎋 Bamboo forest scheduler started")
+            logger.info("대나무숲 스케줄러 시작")
 
             if not self.recruitment_scheduler:
                 self.recruitment_scheduler = RecruitmentScheduler(self)
                 await self.recruitment_scheduler.start()
                 logger.info("내전 모집 스케줄러 시작")
 
+            if not self.scrim_scheduler:
+                self.scrim_scheduler = ScrimScheduler(self)
+                await self.scrim_scheduler.start()
+                logger.info("스크림 스케줄러 시작")
+
             if not self.wordle_scheduler:
                 self.wordle_scheduler = WordleScheduler(self)
                 await self.wordle_scheduler.start()
-                logger.info("🎯 띵지워들 스케줄러 시작")
+                logger.info("띵지워들 스케줄러 시작")
 
             try:
                 print("슬래시 커맨드 동기화 중...")
@@ -79,7 +87,8 @@ class RallyUpBot(commands.Bot):
             'commands.scrim_recruitment',
             'commands.scrim_result_recording',
             'commands.simple_user_management',
-            'commands.wordle_game'
+            'commands.wordle_game',
+            'commands.inter_guild_scrim'
         ]
         
         for command_module in commands_to_load:
@@ -102,14 +111,66 @@ class RallyUpBot(commands.Bot):
         
         # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:
-            logger.info("🎋 Bamboo forest scheduler is running")
+            logger.info("🎋 대나무숲 스케줄러가 실행중입니다.")
         else:
-            logger.warning("🎋 Bamboo forest scheduler is not running!")
+            logger.warning("🎋 대나무숲 스케줄러가 실행되지 않았습니다.")
 
         if self.recruitment_scheduler and self.recruitment_scheduler.is_running:
             logger.info("🕐 내전 모집 스케줄러가 실행 중입니다")
         else:
             logger.warning("🕐 내전 모집 스케줄러가 실행되지 않았습니다!")
+
+        if self.scrim_scheduler and self.scrim_scheduler.running:
+            logger.info("🎯 스크림 스케줄러가 실행 중입니다")
+        else:
+            logger.warning("🎯 스크림 스케줄러가 실행되지 않았습니다!")
+
+        await self.restore_recruitment_views()
+
+    async def restore_recruitment_views(self):
+        try:
+            restored_count = 0
+            
+            for guild in self.guilds:
+                try:
+                    active_recruitments = await self.db_manager.get_active_recruitments(str(guild.id))
+                    logger.info(f"길드 {guild.name}에서 {len(active_recruitments)}개의 활성 모집 발견")
+                    for recruitment in active_recruitments:                        
+                        if recruitment.get('message_id') and recruitment.get('channel_id'):
+                            try:
+                                channel = self.get_channel(int(recruitment['channel_id']))
+                                if channel:
+                                    try:
+                                        from commands.scrim_recruitment import RecruitmentView
+                                    except ImportError as e:
+                                        logger.error(f"RecruitmentView import 실패: {e}")
+                                        continue
+                                    
+                                    view = RecruitmentView(self, recruitment['id'])
+                                    
+                                    self.add_view(view)
+                                    restored_count += 1
+                                else:
+                                    logger.warning(f"채널을 찾을 수 없음: {recruitment['channel_id']}")
+                                    
+                            except Exception as e:
+                                logger.error(f"개별 recruitment view 복원 실패 {recruitment['id']}: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                        else:
+                            logger.warning(f"message_id 또는 channel_id가 없음: {recruitment['id']}")
+                                
+                except Exception as e:
+                    logger.error(f"길드 {guild.name}의 recruitment view 복원 중 오류: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    
+            logger.info(f"✅ {restored_count}개의 Recruitment View가 복원되었습니다.")
+            
+        except Exception as e:
+            logger.error(f"❌ Recruitment View 복원 중 전체 오류: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     async def on_member_join(self, member: discord.Member):
         """신규 멤버가 서버에 입장할 때 자동 역할 배정"""
@@ -222,6 +283,10 @@ class RallyUpBot(commands.Bot):
             if self.recruitment_scheduler:
                 await self.recruitment_scheduler.stop()
                 logger.info("내전 모집 스케줄러 종료")
+
+            if self.scrim_scheduler:
+                await self.scrim_scheduler.stop()
+                logger.info("스크림 스케줄러 종료")
 
             if self.wordle_scheduler:
                 await self.wordle_scheduler.stop()
