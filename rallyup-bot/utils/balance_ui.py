@@ -173,33 +173,55 @@ class ManualTeamSelectionView(discord.ui.View):
     """수동 팀 선택 View (밸런스 체크 모드)"""
     
     def __init__(self, bot, guild_id: str, all_users: List[Dict]):
-        super().__init__(timeout=600)  # 10분 타임아웃
+        super().__init__(timeout=900)  # 15분 타임아웃 (포지션 설정 시간 고려)
         self.bot = bot
         self.guild_id = guild_id
         self.all_users = all_users
+        self.interaction_user = None
+        
+        # 팀 구성
         self.team_a_players = []
         self.team_b_players = []
-        self.interaction_user = None
-        self.current_team = "A"  # 현재 선택 중인 팀
+        
+        # 포지션 배치 (핵심 추가!)
+        self.team_a_positions = {}  # {user_id: position}
+        self.team_b_positions = {}  # {user_id: position}
+        
+        # 현재 단계 추적
+        self.current_step = "select_team_a"  # select_team_a -> select_team_b -> set_positions_a -> set_positions_b -> analyze
+        self.current_team = "A"  # A팀 선택 중
+        self.current_position_player = 0  # 포지션 설정 중인 플레이어 인덱스
         
         # 초기 UI 설정
         self.update_ui()
     
     def update_ui(self):
-        """UI 컴포넌트 업데이트"""
+        """현재 단계에 따른 UI 업데이트"""
         self.clear_items()
         
+        if self.current_step in ["select_team_a", "select_team_b"]:
+            # 팀 선택 단계
+            self.add_team_selection_ui()
+        elif self.current_step in ["set_positions_a", "set_positions_b"]:
+            # 포지션 설정 단계 - 별도 메서드에서 처리
+            pass
+        elif self.current_step == "analyze":
+            # 분석 단계 - 별도 메서드에서 처리
+            pass
+    
+    def add_team_selection_ui(self):
+        """팀 선택 UI 구성 (기존 로직 유지)"""
         # 현재 선택 중인 팀에 따라 드롭다운 추가
-        if self.current_team == "A" and len(self.team_a_players) < 5:
+        if self.current_step == "select_team_a" and len(self.team_a_players) < 5:
             self.add_team_selection_dropdown("A")
-        elif self.current_team == "B" and len(self.team_b_players) < 5:
+        elif self.current_step == "select_team_b" and len(self.team_b_players) < 5:
             self.add_team_selection_dropdown("B")
         
-        # 버튼들 추가
+        # 컨트롤 버튼들 추가
         self.add_control_buttons()
     
     def add_team_selection_dropdown(self, team: str):
-        """팀 선택 드롭다운 추가"""
+        """팀 선택 드롭다운 추가 (기존 로직)"""
         used_user_ids = set()
         used_user_ids.update([p['user_id'] for p in self.team_a_players])
         used_user_ids.update([p['user_id'] for p in self.team_b_players])
@@ -243,36 +265,37 @@ class ManualTeamSelectionView(discord.ui.View):
     
     def add_control_buttons(self):
         """컨트롤 버튼들 추가"""
-        # A팀/B팀 전환 버튼
-        if len(self.team_a_players) < 5:
-            team_a_button = discord.ui.Button(
-                label=f"A팀 선택 ({len(self.team_a_players)}/5)",
-                style=discord.ButtonStyle.primary if self.current_team == "A" else discord.ButtonStyle.secondary,
-                emoji="🔵",
-                disabled=self.current_team == "A"
-            )
-            team_a_button.callback = lambda i: self.switch_team(i, "A")
-            self.add_item(team_a_button)
+        # A팀/B팀 전환 버튼 (팀 선택 단계에서만)
+        if self.current_step == "select_team_a":
+            if len(self.team_a_players) >= 5:
+                # A팀 완료 -> B팀으로 진행
+                next_button = discord.ui.Button(
+                    label="B팀 선택하기",
+                    style=discord.ButtonStyle.primary,
+                    emoji="🔴"
+                )
+                next_button.callback = self.proceed_to_team_b
+                self.add_item(next_button)
         
-        if len(self.team_b_players) < 5 and len(self.team_a_players) > 0:
-            team_b_button = discord.ui.Button(
-                label=f"B팀 선택 ({len(self.team_b_players)}/5)",
-                style=discord.ButtonStyle.danger if self.current_team == "B" else discord.ButtonStyle.secondary,
-                emoji="🔴",
-                disabled=self.current_team == "B"
-            )
-            team_b_button.callback = lambda i: self.switch_team(i, "B")
-            self.add_item(team_b_button)
-        
-        # 밸런스 분석 버튼 (양팀 모두 5명일 때)
-        if len(self.team_a_players) == 5 and len(self.team_b_players) == 5:
-            analyze_button = discord.ui.Button(
-                label="밸런스 분석 시작",
-                style=discord.ButtonStyle.success,
-                emoji="🎯"
-            )
-            analyze_button.callback = self.analyze_balance
-            self.add_item(analyze_button)
+        elif self.current_step == "select_team_b":
+            if len(self.team_b_players) >= 5:
+                # B팀 완료 -> 포지션 설정으로 진행
+                next_button = discord.ui.Button(
+                    label="포지션 설정하기",
+                    style=discord.ButtonStyle.success,
+                    emoji="⚔️"
+                )
+                next_button.callback = self.proceed_to_position_setting
+                self.add_item(next_button)
+                
+                # B팀 -> A팀으로 돌아가기
+                back_button = discord.ui.Button(
+                    label="A팀으로 돌아가기",
+                    style=discord.ButtonStyle.secondary,
+                    emoji="🔵"
+                )
+                back_button.callback = self.back_to_team_a
+                self.add_item(back_button)
         
         # 초기화 버튼
         if self.team_a_players or self.team_b_players:
@@ -293,15 +316,255 @@ class ManualTeamSelectionView(discord.ui.View):
         cancel_button.callback = self.cancel
         self.add_item(cancel_button)
     
-    async def switch_team(self, interaction: discord.Interaction, team: str):
-        """팀 선택 전환"""
-        self.current_team = team
+    async def proceed_to_team_b(self, interaction: discord.Interaction):
+        """A팀 선택 완료 -> B팀 선택으로 진행"""
+        self.current_step = "select_team_b"
+        self.current_team = "B"
+        self.update_ui()
+        
+        embed = self.create_team_status_embed()
+        embed.add_field(
+            name="📋 다음 단계",
+            value="이제 B팀 5명을 선택해주세요.",
+            inline=False
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def back_to_team_a(self, interaction: discord.Interaction):
+        """B팀 -> A팀 선택으로 돌아가기"""
+        self.current_step = "select_team_a"
+        self.current_team = "A"
+        self.update_ui()
+        
+        embed = self.create_team_status_embed()
+        embed.add_field(
+            name="📋 수정 모드",
+            value="A팀 구성을 수정할 수 있습니다.",
+            inline=False
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def proceed_to_position_setting(self, interaction: discord.Interaction):
+        """팀 선택 완료 -> A팀 포지션 설정으로 진행"""
+        self.current_step = "set_positions_a"
+        
+        # A팀 첫 번째 플레이어의 포지션 설정 시작
+        await self.start_position_setting("team_a", interaction)
+    
+    async def start_position_setting(self, team: str, interaction: discord.Interaction):
+        """포지션 설정 시작"""
+        self.current_position_player = 0
+        await self.show_single_player_position(team, interaction)
+    
+    async def show_single_player_position(self, team: str, interaction: discord.Interaction):
+        """개별 플레이어 포지션 선택"""
+        team_players = self.team_a_players if team == "team_a" else self.team_b_players
+        current_player = team_players[self.current_position_player]
+        team_name = "A팀" if team == "team_a" else "B팀"
+        team_color = 0x0099ff if team == "team_a" else 0xff4444
+        
+        embed = discord.Embed(
+            title=f"⚔️ {team_name} 포지션 설정",
+            description=f"**{current_player['username']}**님의 포지션을 선택해주세요\n"
+                       f"({self.current_position_player + 1}/5)",
+            color=team_color
+        )
+        
+        # 현재까지 설정된 포지션 표시
+        current_positions = self.team_a_positions if team == "team_a" else self.team_b_positions
+        if current_positions:
+            pos_text = []
+            for i, player in enumerate(team_players[:self.current_position_player]):
+                position = current_positions.get(player['user_id'], '미설정')
+                emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚" if position == "힐러" else "❓"
+                pos_text.append(f"{emoji} {player['username']} - {position}")
+            
+            if pos_text:
+                embed.add_field(
+                    name="✅ 설정 완료",
+                    value="\n".join(pos_text),
+                    inline=False
+                )
+        
+        # 플레이어 정보 표시
+        embed.add_field(
+            name="🎮 플레이어 정보",
+            value=f"주포지션: {current_player.get('main_position', '미설정')}\n"
+                  f"티어: {current_player.get('current_season_tier', '배치안함')}",
+            inline=True
+        )
+        
+        # 포지션 선택 드롭다운
+        self.clear_items()
+        
+        position_select = discord.ui.Select(
+            placeholder="포지션을 선택하세요",
+            options=[
+                discord.SelectOption(label="🛡️ 탱커", value="탱커", emoji="🛡️"),
+                discord.SelectOption(label="⚔️ 딜러", value="딜러", emoji="⚔️"),
+                discord.SelectOption(label="💚 힐러", value="힐러", emoji="💚")
+            ]
+        )
+        position_select.callback = lambda i: self.position_selected(team, i)
+        self.add_item(position_select)
+        
+        # 이전 플레이어로 돌아가기 (첫 번째 플레이어가 아닌 경우)
+        if self.current_position_player > 0:
+            back_button = discord.ui.Button(
+                label="이전 플레이어",
+                style=discord.ButtonStyle.secondary,
+                emoji="⬅️"
+            )
+            back_button.callback = lambda i: self.previous_player(team, i)
+            self.add_item(back_button)
+        
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def position_selected(self, team: str, interaction: discord.Interaction):
+        """포지션 선택 처리"""
+        selected_position = interaction.data['values'][0]
+        team_players = self.team_a_players if team == "team_a" else self.team_b_players
+        current_player = team_players[self.current_position_player]
+        
+        # 포지션 저장
+        if team == "team_a":
+            self.team_a_positions[current_player['user_id']] = selected_position
+        else:
+            self.team_b_positions[current_player['user_id']] = selected_position
+        
+        # 다음 플레이어로 진행
+        self.current_position_player += 1
+        
+        if self.current_position_player >= 5:
+            # 현재 팀 포지션 설정 완료
+            if team == "team_a":
+                # A팀 완료 -> B팀 포지션 설정으로
+                self.current_step = "set_positions_b"
+                await self.start_position_setting("team_b", interaction)
+            else:
+                # B팀 완료 -> 포지션 검증 후 분석으로
+                await self.validate_and_analyze(interaction)
+        else:
+            # 같은 팀의 다음 플레이어
+            await self.show_single_player_position(team, interaction)
+    
+    async def previous_player(self, team: str, interaction: discord.Interaction):
+        """이전 플레이어로 돌아가기"""
+        self.current_position_player -= 1
+        await self.show_single_player_position(team, interaction)
+    
+    async def validate_and_analyze(self, interaction: discord.Interaction):
+        """포지션 구성 검증 후 분석 실행"""
+        # 팀 구성 검증
+        a_team_valid = self.validate_team_composition(self.team_a_positions)
+        b_team_valid = self.validate_team_composition(self.team_b_positions)
+        
+        if not a_team_valid or not b_team_valid:
+            # 검증 실패 - 재설정 요청
+            await self.show_composition_error(interaction, a_team_valid, b_team_valid)
+        else:
+            # 검증 성공 - 분석 실행
+            await self.execute_analysis(interaction)
+    
+    def validate_team_composition(self, team_positions: Dict) -> bool:
+        """팀 구성 검증: 탱1딜2힐2인지 확인"""
+        position_count = {"탱커": 0, "딜러": 0, "힐러": 0}
+        
+        for position in team_positions.values():
+            position_count[position] += 1
+        
+        return (position_count["탱커"] == 1 and 
+                position_count["딜러"] == 2 and 
+                position_count["힐러"] == 2)
+    
+    async def show_composition_error(self, interaction: discord.Interaction, 
+                                   a_team_valid: bool, b_team_valid: bool):
+        """구성 오류 표시 및 재설정 옵션 제공"""
+        embed = discord.Embed(
+            title="❌ 팀 구성 오류",
+            description="올바른 팀 구성이 아닙니다. 각 팀은 **탱커 1명, 딜러 2명, 힐러 2명**이어야 합니다.",
+            color=0xff4444
+        )
+        
+        # 현재 구성 표시
+        for team_name, positions, valid in [("A팀", self.team_a_positions, a_team_valid), 
+                                          ("B팀", self.team_b_positions, b_team_valid)]:
+            position_count = {"탱커": 0, "딜러": 0, "힐러": 0}
+            for position in positions.values():
+                position_count[position] += 1
+            
+            status_emoji = "✅" if valid else "❌"
+            composition_text = f"🛡️ 탱커: {position_count['탱커']}명\n⚔️ 딜러: {position_count['딜러']}명\n💚 힐러: {position_count['힐러']}명"
+            
+            embed.add_field(
+                name=f"{status_emoji} {team_name}",
+                value=composition_text,
+                inline=True
+            )
+        
+        # 재설정 버튼들
+        self.clear_items()
+        
+        if not a_team_valid:
+            retry_a_button = discord.ui.Button(
+                label="A팀 포지션 재설정",
+                style=discord.ButtonStyle.primary,
+                emoji="🔵"
+            )
+            retry_a_button.callback = self.retry_a_team_positions
+            self.add_item(retry_a_button)
+        
+        if not b_team_valid:
+            retry_b_button = discord.ui.Button(
+                label="B팀 포지션 재설정", 
+                style=discord.ButtonStyle.danger,
+                emoji="🔴"
+            )
+            retry_b_button.callback = self.retry_b_team_positions
+            self.add_item(retry_b_button)
+        
+        # 전체 재시작
+        restart_button = discord.ui.Button(
+            label="처음부터 다시",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔄"
+        )
+        restart_button.callback = self.restart_from_beginning
+        self.add_item(restart_button)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def retry_a_team_positions(self, interaction: discord.Interaction):
+        """A팀 포지션 재설정"""
+        self.team_a_positions.clear()
+        self.current_step = "set_positions_a"
+        await self.start_position_setting("team_a", interaction)
+    
+    async def retry_b_team_positions(self, interaction: discord.Interaction):
+        """B팀 포지션 재설정"""
+        self.team_b_positions.clear()
+        self.current_step = "set_positions_b"
+        await self.start_position_setting("team_b", interaction)
+    
+    async def restart_from_beginning(self, interaction: discord.Interaction):
+        """처음부터 다시 시작"""
+        self.team_a_players.clear()
+        self.team_b_players.clear()
+        self.team_a_positions.clear()
+        self.team_b_positions.clear()
+        self.current_step = "select_team_a"
+        self.current_team = "A"
         self.update_ui()
         
         embed = self.create_team_status_embed()
         await interaction.response.edit_message(embed=embed, view=self)
     
-    async def analyze_balance(self, interaction: discord.Interaction):
+    async def execute_analysis(self, interaction: discord.Interaction):
         """밸런스 분석 실행"""
         await interaction.response.defer()
         
@@ -311,19 +574,24 @@ class ManualTeamSelectionView(discord.ui.View):
             # 로딩 메시지
             embed = discord.Embed(
                 title="⏳ 팀 밸런스 분석 중...",
-                description="하이브리드 스코어링으로 정밀 분석 진행 중입니다.",
+                description="지정된 포지션 기준으로 정밀 분석 진행 중입니다.",
                 color=0xffaa00
             )
             await interaction.edit_original_response(embed=embed, view=None)
             
-            # 밸런스 분석 실행
+            # 밸런스 분석 실행 (포지션 고정)
             balancer = TeamBalancer(mode=BalancingMode.PRECISE)
             result = await asyncio.get_event_loop().run_in_executor(
-                None, balancer.analyze_team_balance, self.team_a_players, self.team_b_players, True
+                None, balancer.analyze_fixed_team_composition, 
+                self.team_a_players, self.team_a_positions,
+                self.team_b_players, self.team_b_positions
             )
             
             # 결과 표시
-            result_view = BalanceCheckResultView(self.bot, result, self.team_a_players, self.team_b_players, self.all_users)
+            result_view = BalanceCheckResultView(
+                self.bot, result, self.team_a_players, self.team_b_players, 
+                self.all_users, self.team_a_positions, self.team_b_positions
+            )
             result_embed = result_view.create_balance_check_embed(result)
             
             await interaction.edit_original_response(embed=result_embed, view=result_view)
@@ -338,8 +606,11 @@ class ManualTeamSelectionView(discord.ui.View):
     
     async def reset_teams(self, interaction: discord.Interaction):
         """팀 구성 초기화"""
-        self.team_a_players = []
-        self.team_b_players = []
+        self.team_a_players.clear()
+        self.team_b_players.clear()
+        self.team_a_positions.clear()
+        self.team_b_positions.clear()
+        self.current_step = "select_team_a"
         self.current_team = "A"
         self.update_ui()
         
@@ -360,80 +631,86 @@ class ManualTeamSelectionView(discord.ui.View):
     
     def create_team_status_embed(self) -> discord.Embed:
         """현재 팀 상태 임베드 생성"""
-        embed = discord.Embed(
-            title="🔍 팀 밸런스 체크 - 팀 구성",
-            color=0x9966ff
-        )
+        if self.current_step.startswith("select"):
+            title = "🔍 팀 밸런스 체크 - 팀 구성"
+        elif self.current_step.startswith("set_positions"):
+            title = "⚔️ 팀 밸런스 체크 - 포지션 설정"
+        else:
+            title = "📊 팀 밸런스 체크"
+            
+        embed = discord.Embed(title=title, color=0x9966ff)
         
         # A팀 정보
         if self.team_a_players:
-            team_a_text = "\n".join([
-                f"• {p['username']} ({p.get('main_position', '미설정')})"
-                for p in self.team_a_players
-            ])
+            team_a_text = []
+            for player in self.team_a_players:
+                position = self.team_a_positions.get(player['user_id'])
+                if position:
+                    emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚"
+                    team_a_text.append(f"{emoji} {player['username']} ({position})")
+                else:
+                    team_a_text.append(f"• {player['username']} ({player.get('main_position', '미설정')})")
+            team_a_display = "\n".join(team_a_text)
         else:
-            team_a_text = "아직 선택된 플레이어가 없습니다."
+            team_a_display = "아직 선택된 플레이어가 없습니다."
         
         embed.add_field(
             name=f"🔵 A팀 ({len(self.team_a_players)}/5)",
-            value=team_a_text,
+            value=team_a_display,
             inline=True
         )
         
         # B팀 정보
         if self.team_b_players:
-            team_b_text = "\n".join([
-                f"• {p['username']} ({p.get('main_position', '미설정')})"
-                for p in self.team_b_players
-            ])
+            team_b_text = []
+            for player in self.team_b_players:
+                position = self.team_b_positions.get(player['user_id'])
+                if position:
+                    emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚"
+                    team_b_text.append(f"{emoji} {player['username']} ({position})")
+                else:
+                    team_b_text.append(f"• {player['username']} ({player.get('main_position', '미설정')})")
+            team_b_display = "\n".join(team_b_text)
         else:
-            team_b_text = "아직 선택된 플레이어가 없습니다."
+            team_b_display = "아직 선택된 플레이어가 없습니다."
         
         embed.add_field(
             name=f"🔴 B팀 ({len(self.team_b_players)}/5)",
-            value=team_b_text,
+            value=team_b_display,
             inline=True
         )
         
         # 진행 상태
-        total_selected = len(self.team_a_players) + len(self.team_b_players)
-        
-        if total_selected == 0:
-            status_text = "🔵 A팀부터 선택을 시작하세요."
-        elif len(self.team_a_players) < 5:
-            status_text = f"🔵 A팀 선택 중 ({5 - len(self.team_a_players)}명 더 필요)"
-        elif len(self.team_b_players) < 5:
-            status_text = f"🔴 B팀 선택 중 ({5 - len(self.team_b_players)}명 더 필요)"
-        else:
-            status_text = "✅ 팀 구성 완료! 밸런스 분석을 시작하세요."
+        step_descriptions = {
+            "select_team_a": "🔵 A팀 5명을 선택해주세요.",
+            "select_team_b": "🔴 B팀 5명을 선택해주세요.",
+            "set_positions_a": "⚔️ A팀 포지션을 설정 중입니다.",
+            "set_positions_b": "⚔️ B팀 포지션을 설정 중입니다.",
+            "analyze": "📊 밸런스 분석을 실행합니다."
+        }
         
         embed.add_field(
-            name="📊 진행 상태",
-            value=status_text,
+            name="📋 진행 상태",
+            value=step_descriptions.get(self.current_step, "진행 중..."),
             inline=False
         )
         
         # 분석 정보
         embed.add_field(
             name="🎯 분석 방식",
-            value="• 내전 데이터가 있는 유저: 실제 승률 + 티어 보정\n"
-                  "• 신규 유저: 오버워치 티어 기반 예측\n"
-                  "• 하이브리드 스코어링으로 정확한 밸런스 분석",
+            value="• 지정된 포지션 기준 분석\n• 내전 데이터 + 티어 정보 활용\n• 실제 팀 구성의 정확한 밸런스 측정",
             inline=False
         )
         
         return embed
 
-class TeamPlayerSelectDropdown(discord.ui.Select):
-    """팀별 플레이어 선택 드롭다운"""
-    
+class TeamPlayerSelectDropdown(discord.ui.Select):    
     def __init__(self, team: str, **kwargs):
         super().__init__(**kwargs)
         self.team = team
         self.parent_view = None
     
     async def callback(self, interaction: discord.Interaction):
-        # 선택된 플레이어들을 해당 팀에 추가
         for user_id in self.values:
             selected_player = next(
                 (p for p in self.parent_view.all_users if p['user_id'] == user_id),
@@ -444,11 +721,6 @@ class TeamPlayerSelectDropdown(discord.ui.Select):
                     self.parent_view.team_a_players.append(selected_player)
                 elif self.team == "B" and len(self.parent_view.team_b_players) < 5:
                     self.parent_view.team_b_players.append(selected_player)
-                
-        if self.team == "A" and len(self.parent_view.team_a_players) == 5:
-            self.parent_view.current_team = "B"
-        elif self.team == "B" and len(self.parent_view.team_b_players) == 5:
-            pass  # B팀도 완료됨
         
         self.parent_view.update_ui()
         
@@ -457,158 +729,141 @@ class TeamPlayerSelectDropdown(discord.ui.Select):
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
         
 class BalanceCheckResultView(discord.ui.View):
-    """밸런스 체크 결과 표시 View"""
+    """밸런스 체크 결과 표시 View (포지션 정보 포함)"""
     
-    def __init__(self, bot, result: BalanceResult, team_a_players: List[Dict], team_b_players: List[Dict], all_users: List[Dict]):
-        super().__init__(timeout=600)  # 10분 타임아웃
+    def __init__(self, bot, result, team_a_players, team_b_players, all_users, 
+                 team_a_positions=None, team_b_positions=None):
+        super().__init__(timeout=600)
         self.bot = bot
         self.result = result
         self.original_team_a = team_a_players
         self.original_team_b = team_b_players
         self.all_users = all_users
+        self.team_a_positions = team_a_positions or {}
+        self.team_b_positions = team_b_positions or {}
         
-        self.add_buttons()
+        # 버튼 추가
+        self.add_result_buttons()
     
-    def add_buttons(self):
-        """버튼들 추가"""
-        # 팀 수정 버튼
-        edit_teams_button = discord.ui.Button(
+    def add_result_buttons(self):
+        """결과 화면 버튼들 추가"""
+        # 팀 구성 수정 버튼
+        edit_button = discord.ui.Button(
             label="팀 구성 수정",
             style=discord.ButtonStyle.secondary,
             emoji="✏️"
         )
-        edit_teams_button.callback = self.edit_teams
-        self.add_item(edit_teams_button)
+        edit_button.callback = self.edit_teams
+        self.add_item(edit_button)
         
         # 새로운 분석 버튼
         new_analysis_button = discord.ui.Button(
             label="새로운 분석",
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.primary,
             emoji="🔄"
         )
         new_analysis_button.callback = self.new_analysis
         self.add_item(new_analysis_button)
         
-        # 추천 개선사항이 있다면 표시
-        if self.result.balance_score < 0.8:  # 밸런스가 완벽하지 않은 경우
+        # 개선 제안 버튼 (밸런스 점수가 낮은 경우)
+        if self.result.balance_score < 0.8:
             suggestion_button = discord.ui.Button(
                 label="개선 제안 보기",
-                style=discord.ButtonStyle.primary,
+                style=discord.ButtonStyle.success,
                 emoji="💡"
             )
             suggestion_button.callback = self.show_suggestions
             self.add_item(suggestion_button)
-        
-        # 확정 버튼
-        confirm_button = discord.ui.Button(
-            label="이 구성으로 확정",
-            style=discord.ButtonStyle.success,
-            emoji="✅"
-        )
-        confirm_button.callback = self.confirm_teams
-        self.add_item(confirm_button)
-        
-        # 취소 버튼
-        cancel_button = discord.ui.Button(
-            label="취소",
-            style=discord.ButtonStyle.danger,
-            emoji="❌"
-        )
-        cancel_button.callback = self.cancel
-        self.add_item(cancel_button)
     
-    def create_balance_check_embed(self, result: BalanceResult) -> discord.Embed:
-        """밸런스 체크 결과 임베드 생성"""
-        # 승률 편차에 따른 색상 및 평가
-        winrate_deviation = abs(result.predicted_winrate_a - 0.5)
-        if winrate_deviation <= 0.05:  # 45-55%
-            color = 0x00ff00
-            balance_emoji = "👑"
-            balance_text = "황금 밸런스!"
-        elif winrate_deviation <= 0.1:  # 40-60%
-            color = 0x99ff99
-            balance_emoji = "🟢"
-            balance_text = "매우 좋은 밸런스"
-        elif winrate_deviation <= 0.15:  # 35-65%
-            color = 0xffaa00
-            balance_emoji = "🟡"
-            balance_text = "양호한 밸런스"
-        elif winrate_deviation <= 0.2:  # 30-70%
-            color = 0xff9900
-            balance_emoji = "🟠"
-            balance_text = "보통 밸런스"
-        else:  # 30% 미만 또는 70% 초과
-            color = 0xff4444
-            balance_emoji = "🔴"
-            balance_text = "재조정 권장"
+    def create_balance_check_embed(self, result) -> discord.Embed:
+        """밸런스 체크 결과 임베드 생성 (포지션 정보 포함)"""
+        # 밸런스 점수에 따른 색상 결정
+        if result.balance_score >= 0.8:
+            color = 0x00ff00  # 초록 (좋음)
+        elif result.balance_score >= 0.6:
+            color = 0xffaa00  # 주황 (보통)
+        else:
+            color = 0xff4444  # 빨강 (나쁨)
         
         embed = discord.Embed(
-            title="🔍 팀 밸런스 분석 결과",
+            title="📊 팀 밸런스 분석 결과",
             color=color
         )
         
-        # A팀 구성
-        team_a_text = (
-            f"🛡️ {result.team_a.tank.username} (탱커 {result.team_a.tank.tank_skill:.1%})\n"
-            f"⚔️ {result.team_a.dps1.username} (딜러 {result.team_a.dps1.dps_skill:.1%})\n"
-            f"⚔️ {result.team_a.dps2.username} (딜러 {result.team_a.dps2.dps_skill:.1%})\n"
-            f"💚 {result.team_a.support1.username} (힐러 {result.team_a.support1.support_skill:.1%})\n"
-            f"💚 {result.team_a.support2.username} (힐러 {result.team_a.support2.support_skill:.1%})"
+        # A팀 구성 (포지션 포함)
+        team_a_text = self.format_team_with_positions(
+            self.original_team_a, self.team_a_positions, result.team_a
         )
-        
-        # B팀 구성
-        team_b_text = (
-            f"🛡️ {result.team_b.tank.username} (탱커 {result.team_b.tank.tank_skill:.1%})\n"
-            f"⚔️ {result.team_b.dps1.username} (딜러 {result.team_b.dps1.dps_skill:.1%})\n"
-            f"⚔️ {result.team_b.dps2.username} (딜러 {result.team_b.dps2.dps_skill:.1%})\n"
-            f"💚 {result.team_b.support1.username} (힐러 {result.team_b.support1.support_skill:.1%})\n"
-            f"💚 {result.team_b.support2.username} (힐러 {result.team_b.support2.support_skill:.1%})"
-        )
-        
         embed.add_field(
-            name=f"🔵 A팀 (예상승률: {result.predicted_winrate_a:.1%})",
+            name="🔵 A팀",
             value=team_a_text,
             inline=True
         )
         
+        # B팀 구성 (포지션 포함)
+        team_b_text = self.format_team_with_positions(
+            self.original_team_b, self.team_b_positions, result.team_b
+        )
         embed.add_field(
-            name=f"🔴 B팀 (예상승률: {1-result.predicted_winrate_a:.1%})",
+            name="🔴 B팀",
             value=team_b_text,
             inline=True
         )
         
-        # 밸런스 분석
-        analysis_text = (
-            f"{balance_emoji} **밸런스 평가**: {balance_text}\n"
-            f"📊 **스킬 차이**: {result.skill_difference:.3f}\n"
-            f"💯 **밸런스 점수**: {result.balance_score:.3f}/1.000"
-        )
+        # 빈 필드 (레이아웃 조정)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        
+        # 밸런스 점수
+        balance_emoji = "🟢" if result.balance_score >= 0.8 else "🟡" if result.balance_score >= 0.6 else "🔴"
+        winrate_text = f"A팀 {result.predicted_winrate_a:.1%} vs B팀 {1-result.predicted_winrate_a:.1%}"
         
         embed.add_field(
-            name="📈 종합 분석",
-            value=analysis_text,
+            name="⚖️ 밸런스 점수",
+            value=f"{balance_emoji} **{result.balance_score:.1%}** (최대 100%)\n"
+                  f"📈 예상 승률: {winrate_text}",
             inline=False
         )
         
         # 포지션별 분석
-        reasoning_text = (
-            f"🛡️ {result.reasoning.get('tank', '')}\n"
-            f"⚔️ {result.reasoning.get('dps', '')}\n"
-            f"💚 {result.reasoning.get('support', '')}"
-        )
+        if result.reasoning:
+            reasoning_text = ""
+            if 'tank' in result.reasoning:
+                reasoning_text += f"🛡️ **탱커**: {result.reasoning['tank']}\n"
+            if 'dps' in result.reasoning:
+                reasoning_text += f"⚔️ **딜러**: {result.reasoning['dps']}\n"
+            if 'support' in result.reasoning:
+                reasoning_text += f"💚 **힐러**: {result.reasoning['support']}\n"
+            
+            if reasoning_text:
+                embed.add_field(
+                    name="🔍 포지션별 분석",
+                    value=reasoning_text,
+                    inline=False
+                )
         
-        embed.add_field(
-            name="🔍 포지션별 분석",
-            value=reasoning_text,
-            inline=False
-        )
+        # 포지션 적합도
+        if 'position_fit' in result.reasoning:
+            embed.add_field(
+                name="🎯 포지션 적합도",
+                value=result.reasoning['position_fit'],
+                inline=False
+            )
         
-        # 하이브리드 스코어링 정보
+        # 종합 평가
+        if 'overall' in result.reasoning:
+            embed.add_field(
+                name="📝 종합 평가",
+                value=result.reasoning['overall'],
+                inline=False
+            )
+        
+        # 분석 정보
         embed.add_field(
-            name="🎯 분석 방식",
-            value="• 경험 많은 유저: 실제 내전 데이터 기반\n"
+            name="📋 분석 방식",
+            value="• 지정된 포지션 기준 정밀 분석\n"
+                  "• 경험 많은 유저: 실제 내전 데이터 기반\n"
                   "• 신규 유저: 오버워치 티어 + 부분 데이터 활용\n"
-                  "• 하이브리드 스코어링으로 정확한 예측",
+                  "• 포지션 적합도 및 숙련도 종합 평가",
             inline=False
         )
         
@@ -620,21 +875,82 @@ class BalanceCheckResultView(discord.ui.View):
                 inline=False
             )
         
+        embed.set_footer(
+            text="🤖 RallyUp Bot 팀 밸런스 분석 시스템"
+        )
+        
         return embed
+    
+    def format_team_with_positions(self, team_players, team_positions, team_composition) -> str:
+        """팀 구성을 포지션과 함께 포맷팅"""
+        if not team_positions:
+            # 포지션 정보가 없는 경우 (기존 방식)
+            return "\n".join([
+                f"• {p['username']} ({p.get('main_position', '미설정')})"
+                for p in team_players
+            ])
+        
+        # 포지션별로 정렬하여 표시
+        position_order = ["탱커", "딜러", "힐러"]
+        formatted_text = []
+        
+        for position in position_order:
+            players_in_position = []
+            for player in team_players:
+                if team_positions.get(player['user_id']) == position:
+                    # 해당 포지션 스킬 점수 표시
+                    skill_score = self.get_player_position_skill(player, position, team_composition)
+                    emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚"
+                    
+                    # 주포지션 일치 여부 표시
+                    main_pos_match = "★" if player.get('main_position') == position else ""
+                    
+                    players_in_position.append(
+                        f"{emoji} {player['username']}{main_pos_match} ({skill_score:.2f})"
+                    )
+            
+            formatted_text.extend(players_in_position)
+        
+        return "\n".join(formatted_text) if formatted_text else "팀 구성 정보를 찾을 수 없습니다."
+    
+    def get_player_position_skill(self, player_dict, position, team_composition) -> float:
+        """플레이어의 특정 포지션 스킬 점수 조회"""
+        # team_composition에서 해당 플레이어 찾기
+        player_id = player_dict['user_id']
+        
+        # TeamComposition에서 해당 플레이어의 스킬 데이터 찾기
+        all_players_in_comp = [
+            team_composition.tank, team_composition.dps1, team_composition.dps2,
+            team_composition.support1, team_composition.support2
+        ]
+        
+        for player_skill_data in all_players_in_comp:
+            if player_skill_data.user_id == player_id:
+                if position == "탱커":
+                    return player_skill_data.tank_skill
+                elif position == "딜러":
+                    return player_skill_data.dps_skill
+                elif position == "힐러":
+                    return player_skill_data.support_skill
+        
+        return 0.5  # 기본값
     
     async def edit_teams(self, interaction: discord.Interaction):
         """팀 구성 수정"""
-        manual_view = ManualTeamSelectionView(self.bot, interaction.guild_id, self.all_users)
+        # 새로운 ManualTeamBalanceView로 돌아가기 (기존 구성 유지)
+        manual_view = ManualTeamBalanceView(self.bot, interaction.guild_id, self.all_users)
         manual_view.team_a_players = self.original_team_a.copy()
         manual_view.team_b_players = self.original_team_b.copy()
-        manual_view.current_team = "A"
+        manual_view.team_a_positions = self.team_a_positions.copy()
+        manual_view.team_b_positions = self.team_b_positions.copy()
+        manual_view.current_step = "select_team_a"
         manual_view.interaction_user = interaction.user
         manual_view.update_ui()
         
         embed = manual_view.create_team_status_embed()
         embed.add_field(
             name="🔄 수정 모드",
-            value="기존 팀 구성을 불러왔습니다. 원하는 플레이어를 변경해보세요.",
+            value="기존 팀 구성을 불러왔습니다. 원하는 플레이어나 포지션을 변경해보세요.",
             inline=False
         )
         
@@ -642,7 +958,7 @@ class BalanceCheckResultView(discord.ui.View):
     
     async def new_analysis(self, interaction: discord.Interaction):
         """새로운 분석 시작"""
-        manual_view = ManualTeamSelectionView(self.bot, interaction.guild_id, self.all_users)
+        manual_view = ManualTeamBalanceView(self.bot, interaction.guild_id, self.all_users)
         manual_view.interaction_user = interaction.user
         
         embed = manual_view.create_team_status_embed()
@@ -653,123 +969,102 @@ class BalanceCheckResultView(discord.ui.View):
         embed = discord.Embed(
             title="💡 팀 밸런스 개선 제안",
             description="현재 팀 구성을 더욱 균형잡히게 만들 수 있는 방법들입니다.",
-            color=0x0099ff
+            color=0x00aa44
         )
         
-        # 간단한 개선 제안 생성
+        # 현재 밸런스 문제점 분석
+        issues = []
         suggestions = []
         
-        # 포지션별 스킬 차이 분석
-        tank_diff = abs(self.result.team_a.tank.tank_skill - self.result.team_b.tank.tank_skill)
-        dps_diff = abs(
-            (self.result.team_a.dps1.dps_skill + self.result.team_a.dps2.dps_skill) / 2 -
-            (self.result.team_b.dps1.dps_skill + self.result.team_b.dps2.dps_skill) / 2
-        )
-        support_diff = abs(
-            (self.result.team_a.support1.support_skill + self.result.team_a.support2.support_skill) / 2 -
-            (self.result.team_b.support1.support_skill + self.result.team_b.support2.support_skill) / 2
-        )
+        if self.result.balance_score < 0.6:
+            issues.append("⚠️ 심각한 팀 밸런스 불균형")
+            suggestions.append("일부 핵심 플레이어의 포지션을 교체해보세요")
+        elif self.result.balance_score < 0.8:
+            issues.append("📊 약간의 팀 밸런스 차이")
+            suggestions.append("1-2명의 포지션 조정으로 개선 가능합니다")
         
-        if tank_diff > 0.1:
-            suggestions.append("🛡️ 탱커 교체를 고려해보세요")
-        if dps_diff > 0.1:
-            suggestions.append("⚔️ 딜러 1명 교체를 고려해보세요")
-        if support_diff > 0.1:
-            suggestions.append("💚 힐러 교체를 고려해보세요")
+        # 포지션별 제안
+        if 'tank' in self.result.reasoning and ("우세" in self.result.reasoning['tank']):
+            suggestions.append("🛡️ 탱커 실력 차이가 큽니다. 다른 포지션과 교체를 고려해보세요")
         
-        if not suggestions:
-            suggestions.append("✨ 현재 구성도 충분히 좋습니다!")
+        if 'dps' in self.result.reasoning and ("우세" in self.result.reasoning['dps']):
+            suggestions.append("⚔️ 딜러진 실력 차이를 줄이기 위해 딜러 배치를 조정해보세요")
         
+        if 'support' in self.result.reasoning and ("우세" in self.result.reasoning['support']):
+            suggestions.append("💚 힐러진 밸런스를 위해 힐러 배치를 재검토해보세요")
+        
+        # 포지션 적합도 개선 제안
+        if self.team_a_positions and self.team_b_positions:
+            mismatches = self.find_position_mismatches()
+            if mismatches:
+                suggestions.extend(mismatches)
+        
+        if issues:
+            embed.add_field(
+                name="🔍 현재 문제점",
+                value="\n".join(issues),
+                inline=False
+            )
+        
+        if suggestions:
+            embed.add_field(
+                name="💡 개선 방법",
+                value="\n".join(f"• {suggestion}" for suggestion in suggestions),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="✅ 개선 제안",
+                value="현재 구성이 이미 상당히 균형잡혀 있습니다!\n다른 플레이어 조합을 시도해볼 수도 있습니다.",
+                inline=False
+            )
+        
+        # 일반적인 팁
         embed.add_field(
-            name="🎯 권장 개선사항",
-            value="\n".join(suggestions),
+            name="🎯 일반적인 팁",
+            value="• 각 플레이어의 주포지션을 최대한 활용하세요\n"
+                  "• 실력이 비슷한 플레이어들을 양팀에 분산 배치하세요\n"
+                  "• 포지션별 숙련도를 고려한 배치가 중요합니다",
             inline=False
-        )
-        
-        embed.add_field(
-            name="📊 현재 밸런스",
-            value=f"A팀 {self.result.predicted_winrate_a:.1%} vs B팀 {1-self.result.predicted_winrate_a:.1%}",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="🎯 목표 범위",
-            value="45% ~ 55% (황금 밸런스)",
-            inline=True
         )
         
         # 뒤로가기 버튼
         back_button = discord.ui.Button(
-            label="결과로 돌아가기",
+            label="분석 결과로 돌아가기",
             style=discord.ButtonStyle.secondary,
             emoji="⬅️"
         )
+        back_button.callback = self.back_to_results
         
-        async def back_callback(back_interaction):
-            result_embed = self.create_balance_check_embed(self.result)
-            await back_interaction.response.edit_message(embed=result_embed, view=self)
-        
-        back_button.callback = back_callback
-        
-        view = discord.ui.View(timeout=300)
+        view = discord.ui.View()
         view.add_item(back_button)
         
         await interaction.response.edit_message(embed=embed, view=view)
     
-    async def confirm_teams(self, interaction: discord.Interaction):
-        """팀 구성 확정"""
-        embed = discord.Embed(
-            title="✅ 팀 구성 확정 완료!",
-            description="선택된 팀 구성이 확정되었습니다.",
-            color=0x00ff00
-        )
+    def find_position_mismatches(self) -> List[str]:
+        """포지션 미스매치 찾기"""
+        mismatches = []
         
-        # 최종 팀 구성 요약
-        team_a_summary = f"{self.result.team_a.tank.username}, {self.result.team_a.dps1.username}, {self.result.team_a.dps2.username}, {self.result.team_a.support1.username}, {self.result.team_a.support2.username}"
-        team_b_summary = f"{self.result.team_b.tank.username}, {self.result.team_b.dps1.username}, {self.result.team_b.dps2.username}, {self.result.team_b.support1.username}, {self.result.team_b.support2.username}"
+        # A팀과 B팀의 포지션 적합도 비교
+        for team_name, team_players, team_positions in [
+            ("A팀", self.original_team_a, self.team_a_positions),
+            ("B팀", self.original_team_b, self.team_b_positions)
+        ]:
+            for player in team_players:
+                assigned_pos = team_positions.get(player['user_id'])
+                main_pos = player.get('main_position')
+                
+                if assigned_pos and main_pos and assigned_pos != main_pos:
+                    mismatches.append(
+                        f"🔄 {team_name} {player['username']}님은 {main_pos} 전문이지만 {assigned_pos}에 배치됨"
+                    )
         
-        embed.add_field(
-            name="🔵 A팀",
-            value=team_a_summary,
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🔴 B팀", 
-            value=team_b_summary,
-            inline=False
-        )
-        
-        # 밸런스 정보
-        winrate_deviation = abs(self.result.predicted_winrate_a - 0.5)
-        if winrate_deviation <= 0.05:
-            balance_status = "👑 황금 밸런스"
-        elif winrate_deviation <= 0.1:
-            balance_status = "🟢 매우 좋은 밸런스"
-        else:
-            balance_status = "🟡 양호한 밸런스"
-        
-        embed.add_field(
-            name="📊 최종 밸런스",
-            value=f"{balance_status}\nA팀 예상 승률: {self.result.predicted_winrate_a:.1%}",
-            inline=False
-        )
-        
-        self.clear_items()
-        await interaction.response.edit_message(embed=embed, view=self)
-        self.stop()
+        return mismatches
     
-    async def cancel(self, interaction: discord.Interaction):
-        """취소"""
-        embed = discord.Embed(
-            title="❌ 밸런스 체크 취소",
-            description="팀 밸런스 체크가 취소되었습니다.",
-            color=0xff4444
-        )
-        
-        self.clear_items()
+    async def back_to_results(self, interaction: discord.Interaction):
+        """분석 결과로 돌아가기"""
+        embed = self.create_balance_check_embed(self.result)
         await interaction.response.edit_message(embed=embed, view=self)
-        self.stop()
 
 class PlayerSelectDropdown(discord.ui.Select):
     """플레이어 선택 드롭다운"""

@@ -243,7 +243,7 @@ class TeamBalancingCommand(commands.Cog):
         await self.manage_session_timeout(guild_id, selection_view)
 
     async def start_balance_check_mode(self, interaction: discord.Interaction):
-        """밸런스 체크 모드 시작 (새로운 기능)"""
+        """밸런스 체크 모드 시작 (포지션 설정 포함)"""
         guild_id = str(interaction.guild_id)
         
         # 모든 등록된 유저 조회 (경기 수 제한 없음)
@@ -260,7 +260,7 @@ class TeamBalancingCommand(commands.Cog):
             embed.add_field(
                 name="📊 현재 상황",
                 value=f"• 등록된 플레이어: **{len(all_users)}명**\n"
-                      f"• 필요한 플레이어: **10명**",
+                    f"• 필요한 플레이어: **10명**",
                 inline=False
             )
             embed.add_field(
@@ -279,14 +279,15 @@ class TeamBalancingCommand(commands.Cog):
             'mode': 'check'
         }
         
-        # 수동 팀 선택 View 시작
-        from utils.balance_ui import ManualTeamSelectionView
-        manual_view = ManualTeamSelectionView(self.bot, guild_id, all_users)
+        # 새로운 ManualTeamBalanceView 사용 (포지션 설정 포함)
+        from utils.balance_ui import ManualTeamBalanceView
+        manual_view = ManualTeamBalanceView(self.bot, guild_id, all_users)
         manual_view.interaction_user = interaction.user
         
         embed = discord.Embed(
-            title="🔍 팀 밸런스 체크",
-            description="이미 구성된 팀이나 원하는 팀 조합의 밸런스를 분석합니다.\nA팀과 B팀을 각각 5명씩 선택해주세요.",
+            title="🔍 팀 밸런스 체크 (개선된 버전)",
+            description="이미 구성된 팀의 밸런스를 정밀 분석합니다.\n"
+                    "**새로운 기능**: 포지션까지 지정하여 더 정확한 분석이 가능합니다!",
             color=0x9966ff
         )
         
@@ -298,27 +299,34 @@ class TeamBalancingCommand(commands.Cog):
         
         embed.add_field(
             name="🎯 분석 기준", 
-            value="• 내전 데이터가 있는 유저: 실제 승률 기반\n• 신규 유저: 오버워치 티어 기반\n• 하이브리드 스코어링으로 정확한 분석",
+            value="• 내전 데이터가 있는 유저: 실제 승률 기반\n• 신규 유저: 오버워치 티어 기반\n• 지정된 포지션 기준 정밀 분석",
             inline=True
         )
         
         embed.add_field(
-            name="💡 사용 방법",
+            name="📋 진행 순서",
             value="1️⃣ A팀 5명 선택\n"
-                  "2️⃣ B팀 5명 선택\n" 
-                  "3️⃣ 실시간 밸런스 분석 확인\n"
-                  "4️⃣ 필요시 팀 구성 수정",
+                "2️⃣ B팀 5명 선택\n" 
+                "3️⃣ A팀 포지션 설정 (탱1딜2힐2)\n"
+                "4️⃣ B팀 포지션 설정 (탱1딜2힐2)\n"
+                "5️⃣ 정밀 밸런스 분석 결과 확인",
             inline=False
         )
         
         embed.add_field(
-            name="✨ 장점",
-            value="• 신규 유저도 포함 가능\n• 이미 짜여진 팀 검증\n• 실시간 밸런스 피드백\n• 최적화 제안 받기",
+            name="✨ 새로운 기능",
+            value="• 포지션별 정확한 실력 측정\n• 포지션 적합도 분석\n• 실제 팀 구성 기준 밸런스 체크\n• 구체적인 개선 제안 제공",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎮 사용 시나리오",
+            value="• 이미 짜여진 팀의 밸런스 확인\n• 포지션 변경 시 밸런스 변화 측정\n• 내전 전 팀 구성 검토",
             inline=False
         )
         
         embed.set_footer(
-            text=f"요청자: {interaction.user.display_name} | 10분 후 자동 만료",
+            text=f"요청자: {interaction.user.display_name} | 15분 후 자동 만료",
             icon_url=interaction.user.display_avatar.url
         )
         
@@ -429,55 +437,97 @@ class TeamBalancingCommand(commands.Cog):
         embed.add_field(
             name="🎮 기본 사용법",
             value="1. `/팀밸런싱` - 밸런싱 시작\n"
-                  "2. 참가자 10명 선택\n"
-                  "3. 밸런싱 모드 선택\n"
-                  "4. 결과 확인 및 확정",
+                "2. 모드 선택 (자동/수동)\n"
+                "3. 참가자 선택 및 설정\n"
+                "4. 결과 확인 및 활용",
             inline=False
         )
         
         embed.add_field(
-            name="⚙️ 밸런싱 모드",
-            value="⚡ **빠른**: 기본 승률 기반 (~1초)\n"
-                  "🎯 **정밀**: 모든 요소 고려 (~5초)\n"
-                  "🔬 **실험적**: 새로운 조합 시도 (~2초)",
+            name="🤖 자동 밸런싱 모드",
+            value="• **목적**: AI가 최적의 5vs5 팀 자동 구성\n"
+                "• **과정**: 10명 선택 → 밸런싱 모드 선택 → AI 분석\n"
+                "• **장점**: 빠르고 객관적인 최적 팀 구성\n"
+                "• **조건**: 최소 3경기 이상 참여한 유저만",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔍 밸런스 체크 모드 (NEW!)",
+            value="• **목적**: 이미 구성된 팀의 밸런스 정밀 분석\n"
+                "• **과정**: A팀 5명 → B팀 5명 → A팀 포지션 → B팀 포지션 → 분석\n"
+                "• **장점**: 실제 포지션 기준 정확한 밸런스 측정\n"
+                "• **특징**: 신규 유저도 포함 가능, 포지션 적합도 분석",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚔️ 포지션 설정 (밸런스 체크 모드)",
+            value="1️⃣ 각 팀 5명씩 선택 완료 후\n"
+                "2️⃣ A팀부터 순차적으로 포지션 지정\n"
+                "3️⃣ 탱커 1명, 딜러 2명, 힐러 2명 필수\n"
+                "4️⃣ 잘못 설정 시 재설정 옵션 제공\n"
+                "5️⃣ 포지션 적합도도 함께 분석",
             inline=False
         )
         
         embed.add_field(
             name="📊 밸런싱 기준",
             value="• **포지션별 숙련도**: 탱/딜/힐 각각의 승률\n"
-                  "• **경험치 보정**: 게임 수에 따른 신뢰도\n"
-                  "• **팀 밸런스**: 양팀 스킬 차이 최소화\n"
-                  "• **포지션 적합도**: 주포지션 일치도",
+                "• **경험치 보정**: 게임 수에 따른 신뢰도\n"
+                "• **팀 밸런스**: 양팀 스킬 차이 최소화\n"
+                "• **포지션 적합도**: 주포지션 일치도\n"
+                "• **하이브리드 스코어링**: 내전 데이터 + 티어 정보",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎯 사용 시나리오",
+            value="**자동 밸런싱**: 내전 시작 전 공정한 팀 구성\n"
+                "**밸런스 체크**: 이미 짜인 팀의 밸런스 검증\n"
+                "**포지션 최적화**: 포지션 변경 시 효과 측정\n"
+                "**스크림 준비**: 연습 경기용 균형잡힌 팀 구성",
             inline=False
         )
         
         embed.add_field(
             name="✅ 참가 조건",
-            value="• 서버에 등록된 유저 (`/유저신청`)\n"
-                  "• 최소 3경기 이상 참여\n"
-                  "• 승인 상태",
+            value="• **자동 모드**: 최소 3경기 이상 + 승인 유저\n"
+                "• **체크 모드**: 모든 등록된 유저 (신규 포함)\n"
+                "• **공통**: `/유저신청`으로 서버 등록 완료",
             inline=True
         )
         
         embed.add_field(
             name="🔧 관리 명령어",
             value="• `/밸런싱상태` - 세션 상태 확인\n"
-                  "• `/밸런싱취소` - 세션 강제 취소\n"
-                  "• `/밸런싱도움말` - 이 도움말",
+                "• `/밸런싱취소` - 세션 강제 취소\n"
+                "• `/밸런싱도움말` - 이 도움말",
             inline=True
         )
         
         embed.add_field(
-            name="💡 팁",
-            value="• 다양한 포지션의 플레이어를 포함시키면 더 좋은 결과\n"
-                  "• 정밀 모드 추천 (가장 균형잡힌 결과)\n"
-                  "• 여러 조합을 비교해보고 최적의 팀 선택",
+            name="💡 팁 & 활용법",
+            value="• **다양한 포지션** 플레이어 포함 시 더 좋은 결과\n"
+                "• **정밀 모드** 추천 (가장 균형잡힌 결과)\n"
+                "• **여러 조합** 비교 후 최적의 팀 선택\n"
+                "• **포지션 체크 모드**로 기존 팀 검증\n"
+                "• **개선 제안** 활용하여 밸런스 최적화",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🆕 최신 업데이트",
+            value="• 포지션 설정 기능 추가\n"
+                "• 포지션 적합도 분석\n"
+                "• 신규 유저 포함 가능\n"
+                "• 구체적인 개선 제안\n"
+                "• 더 정확한 밸런스 측정",
             inline=False
         )
         
         embed.set_footer(
-            text="🤖 RallyUp Bot AI Team Balancing System",
+            text="🤖 RallyUp Bot AI Team Balancing System v2.0",
             icon_url=self.bot.user.display_avatar.url if self.bot.user else None
         )
         

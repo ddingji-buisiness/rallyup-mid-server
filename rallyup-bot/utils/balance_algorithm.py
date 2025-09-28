@@ -535,3 +535,231 @@ class TeamBalancer:
             reasoning['support'] = f"B팀 힐링 우세 (+{sup_diff:.1%})"
         
         return reasoning
+
+    def analyze_fixed_team_composition(self, team_a_players: List[Dict], team_a_positions: Dict[str, str],
+                                    team_b_players: List[Dict], team_b_positions: Dict[str, str]) -> BalanceResult:
+        """
+        포지션이 고정된 팀 구성의 밸런스를 분석합니다.
+        
+        Args:
+            team_a_players: A팀 플레이어 5명 (Dict 형태)
+            team_a_positions: A팀 포지션 배치 {user_id: position}
+            team_b_players: B팀 플레이어 5명 (Dict 형태)
+            team_b_positions: B팀 포지션 배치 {user_id: position}
+            
+        Returns:
+            BalanceResult: 분석 결과
+        """
+        if len(team_a_players) != 5 or len(team_b_players) != 5:
+            raise ValueError("각 팀은 정확히 5명이어야 합니다")
+        
+        if len(team_a_positions) != 5 or len(team_b_positions) != 5:
+            raise ValueError("모든 플레이어의 포지션이 지정되어야 합니다")
+        
+        # Dict를 PlayerSkillData로 변환
+        team_a_skill_data = [self.calculate_player_skills(player) for player in team_a_players]
+        team_b_skill_data = [self.calculate_player_skills(player) for player in team_b_players]
+        
+        # 고정된 포지션에 따라 TeamComposition 생성
+        team_a_comp = self.create_fixed_composition(team_a_skill_data, team_a_positions)
+        team_b_comp = self.create_fixed_composition(team_b_skill_data, team_b_positions)
+        
+        if not team_a_comp or not team_b_comp:
+            raise ValueError("올바른 팀 구성을 생성할 수 없습니다")
+        
+        # 팀 점수 계산
+        team_a_score = self.calculate_team_score(team_a_comp)
+        team_b_score = self.calculate_team_score(team_b_comp)
+        
+        # 포지션 밸런스 점수 (고정 포지션이므로 적합도만 계산)
+        team_a_pos_balance = self.evaluate_fixed_position_balance(team_a_comp, team_a_positions)
+        team_b_pos_balance = self.evaluate_fixed_position_balance(team_b_comp, team_b_positions)
+        
+        # 최종 팀 점수 (스킬 + 포지션 적합도)
+        final_team_a_score = team_a_score * 0.8 + team_a_pos_balance * 0.2
+        final_team_b_score = team_b_score * 0.8 + team_b_pos_balance * 0.2
+        
+        # 스킬 차이 계산
+        skill_difference = abs(final_team_a_score - final_team_b_score)
+        
+        # 예상 승률 계산 (50:50에 가까워야 함)
+        score_diff = final_team_a_score - final_team_b_score
+        predicted_winrate_a = 1 / (1 + pow(10, -score_diff * 5))
+        
+        # 균형 점수: 50:50에서 얼마나 벗어났는지 측정
+        winrate_deviation = abs(predicted_winrate_a - 0.5)
+        balance_score = 1.0 - (winrate_deviation * 2)
+        balance_score = max(0.0, min(1.0, balance_score))
+        
+        # 밸런싱 근거 생성 (고정 포지션 고려)
+        reasoning = self.generate_fixed_composition_reasoning(
+            team_a_comp, team_b_comp, team_a_positions, team_b_positions,
+            balance_score, predicted_winrate_a
+        )
+        
+        return BalanceResult(
+            team_a=team_a_comp,
+            team_b=team_b_comp,
+            balance_score=balance_score,
+            skill_difference=skill_difference,
+            predicted_winrate_a=predicted_winrate_a,
+            reasoning=reasoning
+        )
+
+    def create_fixed_composition(self, team_players: List[PlayerSkillData], 
+                            position_assignments: Dict[str, str]) -> TeamComposition:
+        """
+        고정된 포지션 배치에 따라 TeamComposition 생성
+        
+        Args:
+            team_players: 팀 플레이어 5명
+            position_assignments: {user_id: position} 포지션 배치
+            
+        Returns:
+            TeamComposition: 생성된 팀 구성
+        """
+        # 포지션별로 플레이어 분류
+        tank_player = None
+        dps_players = []
+        support_players = []
+        
+        for player in team_players:
+            position = position_assignments.get(player.user_id)
+            if position == "탱커":
+                tank_player = player
+            elif position == "딜러":
+                dps_players.append(player)
+            elif position == "힐러":
+                support_players.append(player)
+        
+        # 구성 검증
+        if not tank_player or len(dps_players) != 2 or len(support_players) != 2:
+            return None
+        
+        return TeamComposition(
+            tank=tank_player,
+            dps1=dps_players[0],
+            dps2=dps_players[1],
+            support1=support_players[0],
+            support2=support_players[1]
+        )
+
+    def evaluate_fixed_position_balance(self, composition: TeamComposition, 
+                                    position_assignments: Dict[str, str]) -> float:
+        """
+        고정 포지션에서의 적합도 평가
+        (플레이어가 자신에게 맞는 포지션에 배치되었는지)
+        """
+        balance_score = 0.0
+        
+        # 각 포지션별 적합도 계산
+        positions_to_check = [
+            (composition.tank, "탱커", composition.tank.tank_skill),
+            (composition.dps1, "딜러", composition.dps1.dps_skill),
+            (composition.dps2, "딜러", composition.dps2.dps_skill),
+            (composition.support1, "힐러", composition.support1.support_skill),
+            (composition.support2, "힐러", composition.support2.support_skill)
+        ]
+        
+        for player, assigned_pos, skill_at_pos in positions_to_check:
+            # 주포지션 일치도 보너스
+            if player.main_position == assigned_pos:
+                balance_score += 0.2  # 주포지션 일치 시 높은 점수
+            else:
+                balance_score += 0.1  # 주포지션이 아니어도 기본 점수
+            
+            # 해당 포지션 숙련도 점수
+            balance_score += skill_at_pos * 0.16  # 5명이므로 1/5 = 0.2, 그 중 80%
+        
+        composition.position_balance = balance_score
+        return balance_score
+
+    def generate_fixed_composition_reasoning(self, team_a: TeamComposition, team_b: TeamComposition,
+                                        team_a_positions: Dict[str, str], team_b_positions: Dict[str, str],
+                                        balance_score: float, predicted_winrate_a: float) -> Dict[str, str]:
+        """고정 포지션 구성에 대한 분석 근거 생성"""
+        
+        reasoning = {}
+        
+        # 탱커 비교
+        tank_a_skill = team_a.tank.tank_skill
+        tank_b_skill = team_b.tank.tank_skill
+        tank_diff = tank_a_skill - tank_b_skill
+        
+        if abs(tank_diff) < 0.1:
+            reasoning['tank'] = f"탱커 실력이 균등합니다 (A팀: {tank_a_skill:.2f}, B팀: {tank_b_skill:.2f})"
+        elif tank_diff > 0:
+            reasoning['tank'] = f"A팀 탱커가 우세합니다 (+{tank_diff:.2f})"
+        else:
+            reasoning['tank'] = f"B팀 탱커가 우세합니다 (+{abs(tank_diff):.2f})"
+        
+        # 딜러 비교
+        dps_a_avg = (team_a.dps1.dps_skill + team_a.dps2.dps_skill) / 2
+        dps_b_avg = (team_b.dps1.dps_skill + team_b.dps2.dps_skill) / 2
+        dps_diff = dps_a_avg - dps_b_avg
+        
+        if abs(dps_diff) < 0.1:
+            reasoning['dps'] = f"딜러 실력이 균등합니다 (A팀: {dps_a_avg:.2f}, B팀: {dps_b_avg:.2f})"
+        elif dps_diff > 0:
+            reasoning['dps'] = f"A팀 딜러진이 우세합니다 (+{dps_diff:.2f})"
+        else:
+            reasoning['dps'] = f"B팀 딜러진이 우세합니다 (+{abs(dps_diff):.2f})"
+        
+        # 힐러 비교
+        support_a_avg = (team_a.support1.support_skill + team_a.support2.support_skill) / 2
+        support_b_avg = (team_b.support1.support_skill + team_b.support2.support_skill) / 2
+        support_diff = support_a_avg - support_b_avg
+        
+        if abs(support_diff) < 0.1:
+            reasoning['support'] = f"힐러 실력이 균등합니다 (A팀: {support_a_avg:.2f}, B팀: {support_b_avg:.2f})"
+        elif support_diff > 0:
+            reasoning['support'] = f"A팀 힐러진이 우세합니다 (+{support_diff:.2f})"
+        else:
+            reasoning['support'] = f"B팀 힐러진이 우세합니다 (+{abs(support_diff):.2f})"
+        
+        # 포지션 적합도 분석
+        a_position_fitness = self.calculate_position_fitness(team_a, team_a_positions)
+        b_position_fitness = self.calculate_position_fitness(team_b, team_b_positions)
+        
+        reasoning['position_fit'] = f"포지션 적합도 - A팀: {a_position_fitness:.1%}, B팀: {b_position_fitness:.1%}"
+        
+        # 전체 밸런스 평가
+        if balance_score >= 0.9:
+            reasoning['overall'] = "매우 균형잡힌 팀 구성입니다. 치열한 경기가 예상됩니다."
+        elif balance_score >= 0.7:
+            reasoning['overall'] = "균형잡힌 팀 구성입니다. 흥미진진한 경기가 될 것 같습니다."
+        elif balance_score >= 0.5:
+            reasoning['overall'] = "약간 기울어진 팀 구성이지만 역전 가능성이 있습니다."
+        else:
+            reasoning['overall'] = "불균형한 팀 구성입니다. 포지션 조정을 고려해보세요."
+        
+        return reasoning
+
+    def calculate_position_fitness(self, composition: TeamComposition, 
+                                position_assignments: Dict[str, str]) -> float:
+        """팀의 포지션 적합도 계산 (0.0 ~ 1.0)"""
+        fitness_score = 0.0
+        total_players = 5
+        
+        players_and_positions = [
+            (composition.tank, "탱커"),
+            (composition.dps1, "딜러"),
+            (composition.dps2, "딜러"),
+            (composition.support1, "힐러"),
+            (composition.support2, "힐러")
+        ]
+        
+        for player, assigned_position in players_and_positions:
+            # 주포지션 일치 여부
+            if player.main_position == assigned_position:
+                fitness_score += 0.8  # 주포지션 일치 시 높은 점수
+            else:
+                # 해당 포지션 숙련도에 따른 점수
+                if assigned_position == "탱커":
+                    fitness_score += player.tank_skill * 0.6
+                elif assigned_position == "딜러":
+                    fitness_score += player.dps_skill * 0.6
+                elif assigned_position == "힐러":
+                    fitness_score += player.support_skill * 0.6
+        
+        return fitness_score / total_players
