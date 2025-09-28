@@ -392,7 +392,7 @@ class StatsView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="🔄 새로고침", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.secondary)
     async def refresh_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild_id)
 

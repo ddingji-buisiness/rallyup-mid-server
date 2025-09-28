@@ -13,6 +13,10 @@ class DatabaseManager:
     def __init__(self, db_path: str = "database/rallyup.db"):
         self.db_path = db_path
 
+    def get_connection(self):
+        """데이터베이스 연결 반환 (연속형 챌린지용)"""
+        return aiosqlite.connect(self.db_path)
+
     def generate_uuid(self) -> str:
         """UUID 생성"""
         return str(uuid.uuid4())
@@ -31,7 +35,6 @@ class DatabaseManager:
             await self.create_bamboo_tables()
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
-            # await self.migrate_add_late_join_status()
 
             # users 테이블
             await db.execute('''
@@ -112,12 +115,6 @@ class DatabaseManager:
                     UNIQUE(guild_id, user_id)
                 )
             ''')
-            
-            # 인덱스 생성
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_guild ON server_admins(guild_id)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
-            
-            await db.commit()
             
             # matches 테이블
             await db.execute('''
@@ -421,6 +418,8 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_matches_scrim ON clan_matches(scrim_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_participants_match ON clan_participants(match_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_clan_participants_user ON clan_participants(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_guild ON server_admins(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
             
             await db.commit()
 
@@ -5538,7 +5537,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # 길드 간 스크림 경기 결과 테이블 (향후 확장용)
+            # 길드 간 스크림 경기 결과 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS inter_guild_matches (
                     id TEXT PRIMARY KEY,
@@ -5555,7 +5554,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # 길드 간 스크림 경기 참가자 테이블 (향후 확장용)
+            # 길드 간 스크림 경기 참가자 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS inter_guild_match_participants (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6409,69 +6408,303 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 모집 메시지 정보 업데이트 실패: {e}")
             return False
+        
+    async def get_eligible_users_for_balancing(self, guild_id: str, min_games: int = 3) -> List[dict]:
+        """
+        팀 밸런싱이 가능한 유저 목록 조회
+        최소 게임 수를 충족하고 등록된 유저만 반환
+        """
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT 
+                    ru.user_id,
+                    ru.username,
+                    ru.main_position,
+                    COALESCE(us.total_games, 0) as total_games,
+                    COALESCE(us.total_wins, 0) as total_wins,
+                    COALESCE(us.tank_games, 0) as tank_games,
+                    COALESCE(us.tank_wins, 0) as tank_wins,
+                    COALESCE(us.dps_games, 0) as dps_games,
+                    COALESCE(us.dps_wins, 0) as dps_wins,
+                    COALESCE(us.support_games, 0) as support_games,
+                    COALESCE(us.support_wins, 0) as support_wins,
+                    ru.current_season_tier
+                FROM registered_users ru
+                LEFT JOIN user_statistics us ON ru.user_id = us.user_id AND ru.guild_id = us.guild_id
+                WHERE ru.guild_id = ? 
+                AND ru.is_active = 1
+                AND COALESCE(us.total_games, 0) >= ?
+                ORDER BY us.total_games DESC, ru.username ASC
+            ''', (guild_id, min_games)) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
 
-    # async def migrate_add_late_join_status(self):
-    #     """늦참 상태를 허용하도록 테이블 재생성"""
-    #     try:
-    #         async with aiosqlite.connect(self.db_path) as db:
-    #             # 1. 기존 테이블 구조 확인
-    #             cursor = await db.execute("PRAGMA table_info(scrim_participants)")
-    #             columns = await cursor.fetchall()
+    async def get_user_position_detailed_stats(self, user_id: str, guild_id: str) -> dict:
+        """
+        특정 유저의 포지션별 상세 통계 조회
+        """
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            # 기본 통계
+            async with db.execute('''
+                SELECT 
+                    total_games, total_wins,
+                    tank_games, tank_wins,
+                    dps_games, dps_wins,
+                    support_games, support_wins,
+                    last_updated
+                FROM user_statistics 
+                WHERE user_id = ? AND guild_id = ?
+            ''', (user_id, guild_id)) as cursor:
+                stats_row = await cursor.fetchone()
                 
-    #             if not columns:
-    #                 # 테이블이 없으면 새로 생성
-    #                 await db.execute('''
-    #                     CREATE TABLE scrim_participants (
-    #                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-    #                         recruitment_id TEXT NOT NULL,
-    #                         user_id TEXT NOT NULL,
-    #                         username TEXT NOT NULL,
-    #                         status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
-    #                         joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    #                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    #                         FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
-    #                         UNIQUE(recruitment_id, user_id)
-    #                     )
-    #                 ''')
-    #                 print("✅ 새 scrim_participants 테이블 생성 완료")
-    #             else:
-    #                 # 2. 기존 데이터 백업
-    #                 await db.execute('''
-    #                     CREATE TABLE scrim_participants_backup AS 
-    #                     SELECT * FROM scrim_participants
-    #                 ''')
-                    
-    #                 # 3. 기존 테이블 삭제
-    #                 await db.execute("DROP TABLE scrim_participants")
-                    
-    #                 # 4. 새로운 제약조건으로 테이블 재생성
-    #                 await db.execute('''
-    #                     CREATE TABLE scrim_participants (
-    #                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-    #                         recruitment_id TEXT NOT NULL,
-    #                         user_id TEXT NOT NULL,
-    #                         username TEXT NOT NULL,
-    #                         status TEXT NOT NULL CHECK (status IN ('joined', 'declined', 'late_join')),
-    #                         joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    #                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    #                         FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
-    #                         UNIQUE(recruitment_id, user_id)
-    #                     )
-    #                 ''')
-                    
-    #                 # 5. 백업 데이터 복원
-    #                 await db.execute('''
-    #                     INSERT INTO scrim_participants 
-    #                     SELECT * FROM scrim_participants_backup
-    #                 ''')
-                    
-    #                 # 6. 백업 테이블 삭제
-    #                 await db.execute("DROP TABLE scrim_participants_backup")
-                    
-    #                 print("✅ scrim_participants 테이블 마이그레이션 완료")
+                if not stats_row:
+                    return {
+                        'total_games': 0, 'total_wins': 0,
+                        'tank_games': 0, 'tank_wins': 0,
+                        'dps_games': 0, 'dps_wins': 0, 
+                        'support_games': 0, 'support_wins': 0,
+                        'last_updated': None,
+                        'recent_games': 0, 'recent_wins': 0, 'recent_winrate': 0.0
+                    }
                 
-    #             await db.commit()
+                columns = [description[0] for description in cursor.description]
+                stats = dict(zip(columns, stats_row))
                 
-    #     except Exception as e:
-    #         print(f"❌ 데이터베이스 마이그레이션 실패: {e}")
-    #         raise
+                # 최근 10경기 성과 (추가 정보)
+                async with db.execute('''
+                    SELECT won, position, match_date
+                    FROM match_participants mp
+                    JOIN match_results mr ON mp.match_id = mr.id
+                    WHERE mp.user_id = ? AND mr.guild_id = ?
+                    ORDER BY mr.match_date DESC
+                    LIMIT 10
+                ''', (user_id, guild_id)) as recent_cursor:
+                    recent_matches = await recent_cursor.fetchall()
+                    
+                    recent_wins = sum(1 for match in recent_matches if match[0])
+                    recent_games = len(recent_matches)
+                    
+                    stats['recent_games'] = recent_games
+                    stats['recent_wins'] = recent_wins
+                    stats['recent_winrate'] = recent_wins / max(recent_games, 1)
+                    
+                return stats
+
+    async def get_users_head_to_head_records(self, user_ids: List[str], guild_id: str) -> List[dict]:
+        """
+        선택된 유저들 간의 모든 상대전적 조회
+        """
+        if len(user_ids) < 2:
+            return []
+        
+        # user_ids를 문자열로 변환하여 SQL IN 절에 사용
+        user_ids_placeholder = ','.join('?' * len(user_ids))
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute(f'''
+                SELECT 
+                    um.user1_id,
+                    um.user2_id,
+                    um.user1_wins,
+                    um.user2_wins,
+                    um.total_matches,
+                    um.last_match_date,
+                    ru1.username as user1_name,
+                    ru2.username as user2_name
+                FROM user_matchups um
+                JOIN registered_users ru1 ON um.user1_id = ru1.user_id AND ru1.guild_id = ?
+                JOIN registered_users ru2 ON um.user2_id = ru2.user_id AND ru2.guild_id = ?
+                WHERE um.user1_id IN ({user_ids_placeholder})
+                AND um.user2_id IN ({user_ids_placeholder})
+                AND um.total_matches >= 3
+                ORDER BY um.total_matches DESC
+            ''', [guild_id, guild_id] + user_ids + user_ids) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+
+    async def get_users_teammate_records(self, user_ids: List[str], guild_id: str) -> List[dict]:
+        """
+        선택된 유저들 간의 팀메이트 조합 기록 조회
+        """
+        if len(user_ids) < 2:
+            return []
+        
+        user_ids_placeholder = ','.join('?' * len(user_ids))
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute(f'''
+                SELECT 
+                    tc.user1_id,
+                    tc.user2_id,
+                    COUNT(*) as total_matches,
+                    SUM(CASE WHEN tc.won = 1 THEN 1 ELSE 0 END) as wins,
+                    ru1.username as user1_name,
+                    ru2.username as user2_name,
+                    MAX(m.created_at) as last_match_date
+                FROM teammate_combinations tc
+                JOIN matches m ON tc.match_id = m.id
+                JOIN registered_users ru1 ON tc.user1_id = ru1.user_id AND ru1.guild_id = ?
+                JOIN registered_users ru2 ON tc.user2_id = ru2.user_id AND ru2.guild_id = ?
+                WHERE tc.user1_id IN ({user_ids_placeholder})
+                AND tc.user2_id IN ({user_ids_placeholder})
+                AND m.guild_id = ?
+                GROUP BY tc.user1_id, tc.user2_id
+                HAVING total_matches >= 2
+                ORDER BY total_matches DESC, wins DESC
+            ''', [guild_id, guild_id] + user_ids + user_ids + [guild_id]) as cursor:
+                rows = await cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                
+                # 승률 계산 추가
+                results = []
+                for row in rows:
+                    record = dict(zip(columns, row))
+                    record['winrate'] = record['wins'] / max(record['total_matches'], 1)
+                    results.append(record)
+                    
+                return results
+
+    async def get_user_recent_performance_trend(self, user_id: str, guild_id: str, days: int = 30) -> dict:
+        """
+        유저의 최근 성과 트렌드 분석
+        """
+        from datetime import datetime, timedelta
+        
+        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date_str = cutoff_date.isoformat()
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            # 최근 경기들 조회
+            async with db.execute('''
+                SELECT 
+                    mp.won,
+                    mp.position,
+                    mr.match_date,
+                    mr.winning_team,
+                    mp.team
+                FROM match_participants mp
+                JOIN match_results mr ON mp.match_id = mr.id
+                WHERE mp.user_id = ? 
+                AND mr.guild_id = ?
+                AND mr.match_date >= ?
+                ORDER BY mr.match_date ASC
+            ''', (user_id, guild_id, cutoff_date_str)) as cursor:
+                recent_matches = await cursor.fetchall()
+                
+                if not recent_matches:
+                    return {
+                        'total_games': 0,
+                        'total_wins': 0,
+                        'winrate': 0.0,
+                        'trend': 'stable',
+                        'position_performance': {},
+                        'streak': {'type': 'none', 'count': 0}
+                    }
+                
+                # 기본 통계
+                total_games = len(recent_matches)
+                total_wins = sum(1 for match in recent_matches if match[0])
+                winrate = total_wins / total_games
+                
+                # 포지션별 성과
+                position_stats = {}
+                for match in recent_matches:
+                    position = match[1] if match[1] else '미설정'
+                    if position not in position_stats:
+                        position_stats[position] = {'games': 0, 'wins': 0}
+                    position_stats[position]['games'] += 1
+                    position_stats[position]['wins'] += match[0]
+                
+                # 각 포지션별 승률 계산
+                for pos in position_stats:
+                    position_stats[pos]['winrate'] = position_stats[pos]['wins'] / position_stats[pos]['games']
+                
+                # 연승/연패 계산
+                streak = {'type': 'none', 'count': 0}
+                if recent_matches:
+                    current_streak = 0
+                    last_result = recent_matches[-1][0]  # 가장 최근 경기 결과
+                    
+                    # 뒤에서부터 연속된 결과 카운트
+                    for match in reversed(recent_matches):
+                        if match[0] == last_result:
+                            current_streak += 1
+                        else:
+                            break
+                    
+                    if current_streak >= 2:
+                        streak = {
+                            'type': 'win' if last_result else 'lose',
+                            'count': current_streak
+                        }
+                
+                # 트렌드 분석 (최근 5경기 vs 이전 5경기)
+                trend = 'stable'
+                if total_games >= 6:
+                    recent_5 = recent_matches[-5:]
+                    previous_5 = recent_matches[-10:-5] if len(recent_matches) >= 10 else recent_matches[:-5]
+                    
+                    recent_5_winrate = sum(1 for m in recent_5 if m[0]) / len(recent_5)
+                    previous_winrate = sum(1 for m in previous_5 if m[0]) / len(previous_5) if previous_5 else 0.5
+                    
+                    if recent_5_winrate - previous_winrate > 0.2:
+                        trend = 'improving'
+                    elif previous_winrate - recent_5_winrate > 0.2:
+                        trend = 'declining'
+                
+                return {
+                    'total_games': total_games,
+                    'total_wins': total_wins,
+                    'winrate': winrate,
+                    'trend': trend,
+                    'position_performance': position_stats,
+                    'streak': streak
+                }
+
+    async def get_server_position_distribution(self, guild_id: str) -> dict:
+        """
+        서버 내 포지션 분포 현황 조회 (밸런싱 참고용)
+        """
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT 
+                    main_position,
+                    COUNT(*) as count,
+                    AVG(CASE 
+                        WHEN us.total_games > 0 THEN CAST(us.total_wins AS FLOAT) / us.total_games 
+                        ELSE 0 
+                    END) as avg_winrate
+                FROM registered_users ru
+                LEFT JOIN user_statistics us ON ru.user_id = us.user_id AND ru.guild_id = us.guild_id
+                WHERE ru.guild_id = ? 
+                AND ru.is_active = 1
+                AND COALESCE(us.total_games, 0) >= 3
+                GROUP BY main_position
+            ''', (guild_id,)) as cursor:
+                rows = await cursor.fetchall()
+                
+                distribution = {}
+                total_players = 0
+                
+                for row in rows:
+                    position = row[0] if row[0] else '미설정'
+                    count = row[1]
+                    avg_winrate = row[2] if row[2] else 0.0
+                    
+                    distribution[position] = {
+                        'count': count,
+                        'percentage': 0.0,  # 나중에 계산
+                        'avg_winrate': avg_winrate
+                    }
+                    total_players += count
+                
+                # 퍼센트 계산
+                for position in distribution:
+                    distribution[position]['percentage'] = (distribution[position]['count'] / total_players) * 100
+                
+                return {
+                    'total_eligible_players': total_players,
+                    'distribution': distribution
+                }

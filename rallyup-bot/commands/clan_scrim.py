@@ -968,7 +968,7 @@ class ClanScrimCommands(commands.Cog):
                 duration_str = "알 수 없음"
 
             embed.add_field(
-                name="📊 현재 상황",
+                name="현재 상황",
                 value=f"**진행 시간**: {duration_str}\n"
                     f"**총 경기**: {active_scrim.total_matches}판\n"
                     f"**현재 스코어**: {active_scrim.clan_a_wins} - {active_scrim.clan_b_wins}",

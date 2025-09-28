@@ -11,6 +11,8 @@ from scheduler.wordle_scheduler import WordleScheduler
 from scheduler.scrim_scheduler import ScrimScheduler
 from commands.scrim_recruitment import RecruitmentView
 
+from config.settings import Settings
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +36,16 @@ class RallyUpBot(commands.Bot):
         self.recruitment_scheduler = None
         self.scrim_scheduler = None
         self.wordle_scheduler = None
+
+        self.korean_api = None
+        self.similarity_calc = None
+        self.challenge_scheduler = None
+        self.challenge_notifier = None
+        self._daily_challenge_enabled = False
+
+        self.challenge_engine = None
+        self.challenge_event_manager = None
+        self._continuous_challenge_enabled = False
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
@@ -71,14 +83,12 @@ class RallyUpBot(commands.Bot):
         except Exception as e:
             logger.error(f"Setup hook failed: {e}")
             raise
-    
+
     async def load_commands(self):
         """커맨드 로드"""
         commands_to_load = [
             'commands.help',
             'commands.match_result',
-            'commands.position',
-            'commands.dev_commands',
             'commands.scrim_session',
             'commands.clan_scrim',
             'commands.user_application',
@@ -88,17 +98,39 @@ class RallyUpBot(commands.Bot):
             'commands.scrim_result_recording',
             'commands.simple_user_management',
             'commands.wordle_game',
-            'commands.inter_guild_scrim'
+            'commands.inter_guild_scrim',
+            'commands.team_balancing'
         ]
-        
+
         for command_module in commands_to_load:
             try:
                 await self.load_extension(command_module)
                 logger.info(f"✅ Loaded: {command_module}")
             except Exception as e:
                 logger.error(f"❌ Failed to load {command_module}: {e}")
+    
         
         logger.info("Command loading completed")
+
+    async def _load_continuous_challenge_commands(self, command_modules: list):
+        """연속형 챌린지 명령어들 로드 (파라미터 포함)"""
+        
+        for command_module in command_modules:
+            try:
+                # 모듈 임포트
+                module = __import__(command_module, fromlist=['setup'])
+                
+                await module.setup(
+                    self,
+                    self.challenge_engine,
+                    self.challenge_event_manager
+                )
+                
+                logger.info(f"✅ Loaded continuous challenge command: {command_module}")
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to load continuous challenge command {command_module}: {e}")
+                logger.error(f"   Error details: {type(e).__name__}: {str(e)}")
     
     async def on_ready(self):
         logger.info(f'{self.user} has connected to Discord!')
@@ -108,22 +140,22 @@ class RallyUpBot(commands.Bot):
         await self.change_presence(
             activity=discord.Game(name="RallyUp 클랜 관리 | /help")
         )
-        
+
         # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:
-            logger.info("🎋 대나무숲 스케줄러가 실행중입니다.")
+            logger.info("대나무숲 스케줄러가 실행중입니다.")
         else:
-            logger.warning("🎋 대나무숲 스케줄러가 실행되지 않았습니다.")
+            logger.warning("대나무숲 스케줄러가 실행되지 않았습니다.")
 
         if self.recruitment_scheduler and self.recruitment_scheduler.is_running:
-            logger.info("🕐 내전 모집 스케줄러가 실행 중입니다")
+            logger.info("내전 모집 스케줄러가 실행 중입니다")
         else:
-            logger.warning("🕐 내전 모집 스케줄러가 실행되지 않았습니다!")
+            logger.warning("내전 모집 스케줄러가 실행되지 않았습니다!")
 
         if self.scrim_scheduler and self.scrim_scheduler.running:
-            logger.info("🎯 스크림 스케줄러가 실행 중입니다")
+            logger.info("스크림 스케줄러가 실행 중입니다")
         else:
-            logger.warning("🎯 스크림 스케줄러가 실행되지 않았습니다!")
+            logger.warning("스크림 스케줄러가 실행되지 않았습니다!")
 
         await self.restore_recruitment_views()
 
@@ -272,6 +304,10 @@ class RallyUpBot(commands.Bot):
             return
         
         logger.info(f"👋 멤버 떠남: {member.display_name} (ID: {member.id}) from {member.guild.name}")
+
+    async def on_guild_join(self, guild):
+        """새 길드 참여 시"""
+        logger.info(f"🆕 새 서버 참여: {guild.name}")
 
     async def close(self):
         """봇 종료 시 실행"""
