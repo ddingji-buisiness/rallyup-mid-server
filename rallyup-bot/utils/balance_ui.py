@@ -258,20 +258,19 @@ class BalancingOptionsView(discord.ui.View):
             placeholder="밸런싱 모드를 선택하세요",
             options=[
                 discord.SelectOption(
-                    label="⚡ 빠른 밸런싱",
+                    label="빠른 밸런싱",
                     value="quick",
                     description="기본 승률 기반 빠른 계산 (~1초)",
                     emoji="⚡"
                 ),
                 discord.SelectOption(
-                    label="🎯 정밀 밸런싱",
+                    label="정밀 밸런싱",
                     value="precise",
                     description="모든 요소를 고려한 정밀 계산 (~5초)",
-                    emoji="🎯",
-                    default=True
+                    emoji="🎯"
                 ),
                 discord.SelectOption(
-                    label="🔬 실험적 밸런싱",
+                    label="실험적 밸런싱",
                     value="experimental",
                     description="새로운 조합을 시도하는 실험적 계산 (~2초)",
                     emoji="🔬"
