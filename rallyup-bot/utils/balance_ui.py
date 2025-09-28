@@ -27,6 +27,12 @@ class PlayerSelectionView(discord.ui.View):
         if len(self.eligible_players) == 0:
             return
         
+        # 10명이 이미 선택되었으면 드롭다운을 추가하지 않음
+        if len(self.selected_players) >= 10:
+            self.clear_items()
+            self.add_buttons()
+            return
+        
         # 드롭다운 옵션 생성 (최대 25개까지)
         options = []
         for player in self.eligible_players[:25]:
@@ -43,18 +49,32 @@ class PlayerSelectionView(discord.ui.View):
                     description=description[:100]  # 설명 길이 제한
                 ))
         
-        if options:
-            player_select = PlayerSelectDropdown(
-                options=options,
-                placeholder=f"참가자 선택 ({len(self.selected_players)}/10)",
-                min_values=1,
-                max_values=min(10 - len(self.selected_players), len(options))
-            )
-            player_select.parent_view = self
+        # 옵션이 있고 아직 선택할 수 있는 경우에만 드롭다운 추가
+        if options and len(self.selected_players) < 10:
+            remaining_slots = 10 - len(self.selected_players)
+            max_values = min(remaining_slots, len(options))
             
-            # 기존 드롭다운 제거 후 새로 추가
+            # max_values가 최소 1 이상이 되도록 보장
+            if max_values > 0:
+                player_select = PlayerSelectDropdown(
+                    options=options,
+                    placeholder=f"참가자 선택 ({len(self.selected_players)}/10)",
+                    min_values=1,
+                    max_values=max_values
+                )
+                player_select.parent_view = self
+                
+                # 기존 드롭다운 제거 후 새로 추가
+                self.clear_items()
+                self.add_item(player_select)
+                self.add_buttons()
+            else:
+                # 선택할 수 있는 옵션이 없으면 드롭다운 없이 버튼만
+                self.clear_items()
+                self.add_buttons()
+        else:
+            # 옵션이 없거나 이미 10명이 선택되었으면 드롭다운 없이 버튼만
             self.clear_items()
-            self.add_item(player_select)
             self.add_buttons()
     
     def add_buttons(self):
@@ -170,7 +190,7 @@ class PlayerSelectDropdown(discord.ui.Select):
                 if selected_player:
                     self.parent_view.selected_players.append(selected_player)
         
-        # 10명이 선택되면 드롭다운 비활성화
+        # 10명이 선택되면 자동으로 제한
         if len(self.parent_view.selected_players) >= 10:
             self.parent_view.selected_players = self.parent_view.selected_players[:10]
         
@@ -208,7 +228,14 @@ class PlayerSelectDropdown(discord.ui.Select):
                 inline=False
             )
         
-        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+        # 10명이 선택되었을 때는 View에 드롭다운이 없을 수 있으므로 안전하게 처리
+        try:
+            await interaction.response.edit_message(embed=embed, view=self.parent_view)
+        except discord.errors.HTTPException as e:
+            # View 구성에 문제가 있는 경우 간단한 embed만 업데이트
+            await interaction.response.edit_message(embed=embed, view=None)
+            # 새로운 View를 다시 설정
+            await interaction.edit_original_response(view=self.parent_view)
 
 class BalancingOptionsView(discord.ui.View):
     """밸런싱 옵션 선택 View"""
