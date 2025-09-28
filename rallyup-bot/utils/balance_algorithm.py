@@ -287,18 +287,21 @@ class TeamBalancer:
     
     def calculate_balance_score(self, team_a: TeamComposition, team_b: TeamComposition) -> float:
         """두 팀 간의 밸런스 점수 계산 (1.0에 가까울수록 균형)"""
-        team_a_total = self.calculate_team_score(team_a) + self.evaluate_position_balance(team_a)
-        team_b_total = self.calculate_team_score(team_b) + self.evaluate_position_balance(team_b)
+        team_a_total = self.calculate_team_score(team_a)
+        team_b_total = self.calculate_team_score(team_b)
         
-        # 점수 차이가 적을수록 높은 밸런스 점수
+        # 핵심: 두 팀의 스킬 점수 차이를 최소화하는 것이 목표
         score_difference = abs(team_a_total - team_b_total)
-        max_possible_difference = 2.0  # 이론적 최대 차이
         
+        # 이론적 최대 차이 (0.0 ~ 1.0 범위에서)
+        max_possible_difference = 1.0
+        
+        # 차이가 적을수록 높은 점수 (1.0 = 완벽 균형, 0.0 = 최대 불균형)
         balance_score = 1.0 - (score_difference / max_possible_difference)
         return max(0.0, min(1.0, balance_score))
     
     def find_optimal_balance(self, players: List[Dict]) -> List[BalanceResult]:
-        """최적의 팀 밸런스 찾기"""
+        """최적의 팀 밸런스 찾기 - 50:50 승률 목표"""
         # 플레이어 스킬 데이터 계산
         player_skills = [self.calculate_player_skills(player) for player in players]
         
@@ -315,15 +318,33 @@ class TeamBalancer:
         # 각 조합 평가
         results = []
         for team_a, team_b in combinations:
-            balance_score = self.calculate_balance_score(team_a, team_b)
-            skill_difference = abs(team_a.total_skill - team_b.total_skill)
+            # 팀 점수 계산
+            team_a_score = self.calculate_team_score(team_a)
+            team_b_score = self.calculate_team_score(team_b)
             
-            # 예상 승률 계산 (로지스틱 함수 사용)
-            score_diff = team_a.total_skill - team_b.total_skill
-            predicted_winrate_a = 1 / (1 + pow(10, -score_diff * 10))
+            # 포지션 밸런스 점수 추가
+            team_a_pos_balance = self.evaluate_position_balance(team_a)
+            team_b_pos_balance = self.evaluate_position_balance(team_b)
+            
+            # 최종 팀 점수 (스킬 + 포지션 밸런스)
+            final_team_a_score = team_a_score * 0.8 + team_a_pos_balance * 0.2
+            final_team_b_score = team_b_score * 0.8 + team_b_pos_balance * 0.2
+            
+            # 스킬 차이 계산
+            skill_difference = abs(final_team_a_score - final_team_b_score)
+            
+            # 예상 승률 계산 (50:50에 가까워야 함)
+            score_diff = final_team_a_score - final_team_b_score
+            # 더 완만한 로지스틱 함수 사용 (계수를 10에서 5로 줄임)
+            predicted_winrate_a = 1 / (1 + pow(10, -score_diff * 5))
+            
+            # 균형 점수: 50:50에서 얼마나 벗어났는지 측정
+            winrate_deviation = abs(predicted_winrate_a - 0.5)  # 0.5(50%)에서 얼마나 벗어났는지
+            balance_score = 1.0 - (winrate_deviation * 2)  # 편차가 클수록 점수 낮음
+            balance_score = max(0.0, min(1.0, balance_score))
             
             # 밸런싱 근거 생성
-            reasoning = self.generate_reasoning(team_a, team_b, balance_score)
+            reasoning = self.generate_reasoning(team_a, team_b, balance_score, predicted_winrate_a)
             
             result = BalanceResult(
                 team_a=team_a,
@@ -336,56 +357,26 @@ class TeamBalancer:
             
             results.append(result)
         
-        # 밸런스 점수 순으로 정렬
-        results.sort(key=lambda x: x.balance_score, reverse=True)
+        # 황금 밸런스 기준으로 정렬: 50:50에 가장 가까운 것부터
+        results.sort(key=lambda x: (
+            -x.balance_score,  # 밸런스 점수 높은 순
+            x.skill_difference,  # 스킬 차이 적은 순
+            abs(x.predicted_winrate_a - 0.5)  # 50:50에서 편차 적은 순
+        ))
         
         # 상위 5개 결과만 반환
         return results[:5]
     
     def generate_quick_combinations(self, players: List[PlayerSkillData]) -> List[Tuple[TeamComposition, TeamComposition]]:
-        """빠른 모드: 주포지션 기반 제한적 조합"""
-        # 포지션별로 플레이어 분류
-        by_position = {'탱커': [], '딜러': [], '힐러': []}
-        
-        for player in players:
-            best_pos = self.get_player_best_position(player)
-            by_position[best_pos].append(player)
-        
-        # 기본적인 조합 몇 개만 시도
+        """빠른 모드: 스킬 기반 균형잡힌 조합"""
         combinations = []
         
-        # 가능한 경우만 시도 (각 포지션 최소 인원 확인)
-        if len(by_position['탱커']) >= 1 and len(by_position['딜러']) >= 2 and len(by_position['힐러']) >= 2:
-            # 메인 포지션 기반 분배
-            remaining_players = players.copy()
-            random.shuffle(remaining_players)  # 랜덤 요소 추가
-            
-            # 첫 5명을 A팀, 나머지를 B팀으로 시도
-            for _ in range(5):  # 5번의 랜덤 시도
-                random.shuffle(remaining_players)
-                team_a_players = remaining_players[:5]
-                team_b_players = remaining_players[5:]
-                
-                team_a_comps = self.generate_position_assignments(team_a_players)
-                team_b_comps = self.generate_position_assignments(team_b_players)
-                
-                if team_a_comps and team_b_comps:
-                    best_a = max(team_a_comps, key=lambda comp: self.calculate_team_score(comp))
-                    best_b = max(team_b_comps, key=lambda comp: self.calculate_team_score(comp))
-                    combinations.append((best_a, best_b))
-        
-        return combinations[:10]  # 최대 10개 조합만
-    
-    def generate_experimental_combinations(self, players: List[PlayerSkillData]) -> List[Tuple[TeamComposition, TeamComposition]]:
-        """실험적 모드: 다양한 조합 시도"""
-        combinations = []
-        
-        # 스킬 기반 정렬
+        # 전체 스킬 기반으로 정렬
         sorted_by_skill = sorted(players, key=lambda p: p.overall_skill, reverse=True)
         
-        # 1. 스킬 기반 교대 배치
-        team_a_alt = [sorted_by_skill[i] for i in range(0, 10, 2)]  # 0, 2, 4, 6, 8
-        team_b_alt = [sorted_by_skill[i] for i in range(1, 10, 2)]  # 1, 3, 5, 7, 9
+        # 방법 1: 스킬 기반 교대 배치 (가장 균형잡힌 방법)
+        team_a_alt = [sorted_by_skill[i] for i in range(0, 10, 2)]  # 1, 3, 5, 7, 9등
+        team_b_alt = [sorted_by_skill[i] for i in range(1, 10, 2)]  # 2, 4, 6, 8, 10등
         
         team_a_comps = self.generate_position_assignments(team_a_alt)
         team_b_comps = self.generate_position_assignments(team_b_alt)
@@ -395,8 +386,85 @@ class TeamBalancer:
             best_b = max(team_b_comps, key=lambda comp: self.calculate_team_score(comp))
             combinations.append((best_a, best_b))
         
-        # 2. 완전 랜덤 조합들
-        for _ in range(20):
+        # 방법 2: 상위 선수들을 양팀에 분산
+        # 상위 2명을 각 팀에 1명씩, 3-4등을 각 팀에 1명씩, 나머지 분산
+        top_players = sorted_by_skill[:4]
+        remaining_players = sorted_by_skill[4:]
+        
+        for i in range(3):  # 3가지 다른 분배 방식 시도
+            team_a_balanced = [top_players[0], top_players[3]]  # 1등, 4등
+            team_b_balanced = [top_players[1], top_players[2]]  # 2등, 3등
+            
+            # 나머지 선수들 분배 (순환 방식)
+            for j, player in enumerate(remaining_players):
+                if (j + i) % 2 == 0:
+                    team_a_balanced.append(player)
+                else:
+                    team_b_balanced.append(player)
+            
+            # 각 팀이 정확히 5명인지 확인
+            if len(team_a_balanced) == 5 and len(team_b_balanced) == 5:
+                team_a_comps = self.generate_position_assignments(team_a_balanced)
+                team_b_comps = self.generate_position_assignments(team_b_balanced)
+                
+                if team_a_comps and team_b_comps:
+                    best_a = max(team_a_comps, key=lambda comp: self.calculate_team_score(comp))
+                    best_b = max(team_b_comps, key=lambda comp: self.calculate_team_score(comp))
+                    combinations.append((best_a, best_b))
+        
+        return combinations[:5]  # 최대 5개 조합만
+    
+    def generate_experimental_combinations(self, players: List[PlayerSkillData]) -> List[Tuple[TeamComposition, TeamComposition]]:
+        """실험적 모드: 다양한 균형 조합 시도"""
+        combinations = []
+        
+        # 먼저 빠른 모드의 균형잡힌 조합들 포함
+        combinations.extend(self.generate_quick_combinations(players))
+        
+        # 포지션별 실력 기반 분배
+        tanks = sorted([p for p in players], key=lambda p: p.tank_skill, reverse=True)
+        dps_players = sorted([p for p in players], key=lambda p: p.dps_skill, reverse=True)
+        supports = sorted([p for p in players], key=lambda p: p.support_skill, reverse=True)
+        
+        # 각 포지션 최고 선수들을 양팀에 분산하는 조합 시도
+        for attempt in range(5):
+            team_a_experimental = []
+            team_b_experimental = []
+            used_players = set()
+            
+            # 탱커 최고 선수들을 각 팀에 1명씩
+            tank_candidates = [p for p in tanks if p.user_id not in used_players][:2]
+            if len(tank_candidates) >= 2:
+                team_a_experimental.append(tank_candidates[0])
+                team_b_experimental.append(tank_candidates[1])
+                used_players.update([p.user_id for p in tank_candidates])
+            
+            # 딜러 상위 선수들을 분산
+            dps_candidates = [p for p in dps_players if p.user_id not in used_players][:4]
+            if len(dps_candidates) >= 4:
+                team_a_experimental.extend(dps_candidates[:2])
+                team_b_experimental.extend(dps_candidates[2:])
+                used_players.update([p.user_id for p in dps_candidates])
+            
+            # 힐러 상위 선수들을 분산
+            support_candidates = [p for p in supports if p.user_id not in used_players][:4]
+            if len(support_candidates) >= 4:
+                team_a_experimental.extend(support_candidates[:2])
+                team_b_experimental.extend(support_candidates[2:])
+                used_players.update([p.user_id for p in support_candidates])
+            
+            # 팀이 정확히 5명인지 확인
+            if len(team_a_experimental) == 5 and len(team_b_experimental) == 5:
+                team_a_comps = self.generate_position_assignments(team_a_experimental)
+                team_b_comps = self.generate_position_assignments(team_b_experimental)
+                
+                if team_a_comps and team_b_comps:
+                    best_a = max(team_a_comps, key=lambda comp: self.calculate_team_score(comp))
+                    best_b = max(team_b_comps, key=lambda comp: self.calculate_team_score(comp))
+                    combinations.append((best_a, best_b))
+        
+        # 완전 랜덤 조합들 추가 (기존 코드 유지하되 수 줄임)
+        for _ in range(10):  # 20에서 10으로 줄임
             shuffled = players.copy()
             random.shuffle(shuffled)
             team_a_random = shuffled[:5]
@@ -412,26 +480,30 @@ class TeamBalancer:
         
         return combinations
     
-    def generate_reasoning(self, team_a: TeamComposition, team_b: TeamComposition, balance_score: float) -> Dict[str, str]:
+    def generate_reasoning(self, team_a: TeamComposition, team_b: TeamComposition, balance_score: float, predicted_winrate_a: float) -> Dict[str, str]:
         """밸런싱 근거 설명 생성"""
         reasoning = {}
         
-        # 전체 밸런스 평가
-        if balance_score >= 0.9:
-            reasoning['balance'] = "매우 균형잡힌 팀 구성"
-        elif balance_score >= 0.7:
+        # 전체 밸런스 평가 - 50:50 기준으로 평가
+        winrate_diff = abs(predicted_winrate_a - 0.5)
+        
+        if winrate_diff <= 0.05:  # 45-55% 범위
+            reasoning['balance'] = "황금 밸런스! 매우 균등한 팀 구성"
+        elif winrate_diff <= 0.1:  # 40-60% 범위
             reasoning['balance'] = "양호한 밸런스"
-        elif balance_score >= 0.5:
+        elif winrate_diff <= 0.15:  # 35-65% 범위
             reasoning['balance'] = "보통 수준의 밸런스"
-        else:
+        elif winrate_diff <= 0.2:  # 30-70% 범위
             reasoning['balance'] = "다소 불균형한 구성"
+        else:  # 30% 미만 또는 70% 초과
+            reasoning['balance'] = "심각한 불균형 - 재조정 권장"
         
         # 포지션 분석
         a_tank_skill = team_a.tank.tank_skill
         b_tank_skill = team_b.tank.tank_skill
         tank_diff = abs(a_tank_skill - b_tank_skill)
         
-        if tank_diff < 0.1:
+        if tank_diff < 0.05:
             reasoning['tank'] = "탱커 실력 균등"
         elif a_tank_skill > b_tank_skill:
             reasoning['tank'] = f"A팀 탱커 우세 (+{tank_diff:.1%})"
@@ -443,7 +515,7 @@ class TeamBalancer:
         b_dps_avg = (team_b.dps1.dps_skill + team_b.dps2.dps_skill) / 2
         dps_diff = abs(a_dps_avg - b_dps_avg)
         
-        if dps_diff < 0.1:
+        if dps_diff < 0.05:
             reasoning['dps'] = "딜러 화력 균등"
         elif a_dps_avg > b_dps_avg:
             reasoning['dps'] = f"A팀 화력 우세 (+{dps_diff:.1%})"
@@ -455,7 +527,7 @@ class TeamBalancer:
         b_sup_avg = (team_b.support1.support_skill + team_b.support2.support_skill) / 2
         sup_diff = abs(a_sup_avg - b_sup_avg)
         
-        if sup_diff < 0.1:
+        if sup_diff < 0.05:
             reasoning['support'] = "힐러 실력 균등"
         elif a_sup_avg > b_sup_avg:
             reasoning['support'] = f"A팀 힐링 우세 (+{sup_diff:.1%})"

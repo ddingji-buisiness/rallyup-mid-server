@@ -470,9 +470,20 @@ class BalanceResultView(discord.ui.View):
     
     def create_result_embed(self, result: BalanceResult) -> discord.Embed:
         """결과 임베드 생성"""
+        # 승률 편차에 따른 색상 결정
+        winrate_deviation = abs(result.predicted_winrate_a - 0.5)
+        if winrate_deviation <= 0.05:  # 45-55%
+            color = 0x00ff00  # 초록색 (황금 밸런스)
+        elif winrate_deviation <= 0.1:  # 40-60%
+            color = 0x99ff99  # 연한 초록색
+        elif winrate_deviation <= 0.15:  # 35-65%
+            color = 0xffaa00  # 주황색
+        else:  # 35% 미만 또는 65% 초과
+            color = 0xff4444  # 빨간색
+        
         embed = discord.Embed(
             title="🎯 팀 밸런싱 결과",
-            color=0x00ff00 if result.balance_score >= 0.8 else 0xffaa00 if result.balance_score >= 0.6 else 0xff4444
+            color=color
         )
         
         # A팀 구성
@@ -505,16 +516,30 @@ class BalanceResultView(discord.ui.View):
             inline=True
         )
         
-        # 밸런싱 분석
-        balance_emoji = "🟢" if result.balance_score >= 0.8 else "🟡" if result.balance_score >= 0.6 else "🔴"
+        # 밸런싱 분석 - 50:50 기준으로 평가
+        winrate_diff = abs(result.predicted_winrate_a - 0.5)
+        
+        if winrate_diff <= 0.05:
+            balance_emoji = "👑"
+            balance_text = "황금 밸런스!"
+        elif winrate_diff <= 0.1:
+            balance_emoji = "🟢"
+            balance_text = "매우 좋음"
+        elif winrate_diff <= 0.15:
+            balance_emoji = "🟡"
+            balance_text = "양호함"
+        else:
+            balance_emoji = "🔴"
+            balance_text = "재조정 권장"
+        
         analysis_text = (
-            f"{balance_emoji} **밸런스 점수**: {result.balance_score:.2f}/1.00\n"
+            f"{balance_emoji} **밸런스 평가**: {balance_text}\n"
             f"📊 **스킬 차이**: {result.skill_difference:.3f}\n"
-            f"💡 **평가**: {result.reasoning.get('balance', '분석 중')}"
+            f"💡 **종합 평가**: {result.reasoning.get('balance', '분석 중')}"
         )
         
         embed.add_field(
-            name="📈 밸런싱 분석",
+            name="📈 황금 밸런스 분석",
             value=analysis_text,
             inline=False
         )
@@ -529,6 +554,16 @@ class BalanceResultView(discord.ui.View):
         embed.add_field(
             name="🔍 포지션별 분석",
             value=reasoning_text,
+            inline=False
+        )
+        
+        # 50:50 목표 표시
+        ideal_range = "45-55%"
+        current_range = f"{result.predicted_winrate_a:.1%} vs {1-result.predicted_winrate_a:.1%}"
+        
+        embed.add_field(
+            name="🎯 밸런스 목표",
+            value=f"**이상적 범위**: {ideal_range} vs {ideal_range}\n**현재 예상**: {current_range}",
             inline=False
         )
         

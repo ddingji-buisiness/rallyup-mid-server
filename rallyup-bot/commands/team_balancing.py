@@ -1,8 +1,3 @@
-"""
-팀 밸런싱 명령어 구현
-자동으로 균형잡힌 5vs5 팀을 생성하는 기능
-"""
-
 import discord
 from discord.ext import commands
 from discord import app_commands
