@@ -279,9 +279,8 @@ class TeamBalancingCommand(commands.Cog):
             'mode': 'check'
         }
         
-        # 새로운 ManualTeamBalanceView 사용 (포지션 설정 포함)
-        from utils.balance_ui import ManualTeamBalanceView
-        manual_view = ManualTeamBalanceView(self.bot, guild_id, all_users)
+        from utils.balance_ui import ManualTeamSelectionView
+        manual_view = ManualTeamSelectionView(self.bot, guild_id, all_users)
         manual_view.interaction_user = interaction.user
         
         embed = discord.Embed(

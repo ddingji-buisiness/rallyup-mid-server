@@ -937,8 +937,7 @@ class BalanceCheckResultView(discord.ui.View):
     
     async def edit_teams(self, interaction: discord.Interaction):
         """팀 구성 수정"""
-        # 새로운 ManualTeamBalanceView로 돌아가기 (기존 구성 유지)
-        manual_view = ManualTeamBalanceView(self.bot, interaction.guild_id, self.all_users)
+        manual_view = ManualTeamSelectionView(self.bot, interaction.guild_id, self.all_users)
         manual_view.team_a_players = self.original_team_a.copy()
         manual_view.team_b_players = self.original_team_b.copy()
         manual_view.team_a_positions = self.team_a_positions.copy()
@@ -958,7 +957,7 @@ class BalanceCheckResultView(discord.ui.View):
     
     async def new_analysis(self, interaction: discord.Interaction):
         """새로운 분석 시작"""
-        manual_view = ManualTeamBalanceView(self.bot, interaction.guild_id, self.all_users)
+        manual_view = ManualTeamSelectionView(self.bot, interaction.guild_id, self.all_users)
         manual_view.interaction_user = interaction.user
         
         embed = manual_view.create_team_status_embed()
