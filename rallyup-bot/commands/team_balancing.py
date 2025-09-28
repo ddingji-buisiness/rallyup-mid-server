@@ -52,9 +52,16 @@ class TeamBalancingCommand(commands.Cog):
         
         return False
     
-    @app_commands.command(name="팀밸런싱", description="자동으로 균형잡힌 5vs5 팀을 생성합니다")
+    @app_commands.command(name="팀밸런싱", description="자동 밸런싱 또는 수동 팀의 밸런스를 체크합니다")
+    @app_commands.describe(
+        모드="밸런싱 모드를 선택하세요"
+    )
+    @app_commands.choices(모드=[
+        app_commands.Choice(name="🤖 자동 밸런싱 (AI가 최적 팀 구성)", value="auto"),
+        app_commands.Choice(name="🔍 밸런스 체크 (수동 팀 입력)", value="check")
+    ])
     @app_commands.default_permissions(manage_guild=True)
-    async def team_balancing(self, interaction: discord.Interaction):
+    async def team_balancing(self, interaction: discord.Interaction, 모드: str = "auto"):
         """
         메인 팀 밸런싱 명령어
         관리자만 사용 가능
@@ -73,7 +80,7 @@ class TeamBalancingCommand(commands.Cog):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        
+
         guild_id = str(interaction.guild_id)
         
         # 이미 진행 중인 세션이 있는지 확인
@@ -90,107 +97,17 @@ class TeamBalancingCommand(commands.Cog):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        
+
         await interaction.response.defer()
         
         try:
-            # 밸런싱 가능한 유저 목록 조회
-            eligible_players = await self.bot.db_manager.get_eligible_users_for_balancing(
-                guild_id, min_games=3
-            )
-            
-            if len(eligible_players) < 10:
-                embed = discord.Embed(
-                    title="❌ 참가 가능한 플레이어 부족",
-                    description=f"팀 밸런싱을 위해서는 최소 10명의 플레이어가 필요합니다.",
-                    color=0xff4444
-                )
-                embed.add_field(
-                    name="📊 현재 상황",
-                    value=f"• 조건을 만족하는 플레이어: **{len(eligible_players)}명**\n"
-                          f"• 필요한 플레이어: **10명**\n"
-                          f"• 부족한 플레이어: **{10 - len(eligible_players)}명**",
-                    inline=False
-                )
-                embed.add_field(
-                    name="✅ 참가 조건",
-                    value="• 서버에 등록된 유저\n• 최소 3경기 이상 참여\n• 승인된 상태",
-                    inline=False
-                )
-                embed.add_field(
-                    name="💡 해결 방법",
-                    value="• 더 많은 플레이어가 내전에 참여하도록 유도\n• 신규 플레이어 등록 촉진\n• 최소 게임 수 조건 충족까지 대기",
-                    inline=False
-                )
+            if 모드 == "check":
+                # 밸런스 체크 모드
+                await self.start_balance_check_mode(interaction)
+            else:
+                # 자동 밸런싱 모드 (기존)
+                await self.start_auto_balancing_mode(interaction)
                 
-                await interaction.followup.send(embed=embed)
-                return
-            
-            # 세션 등록
-            self.active_sessions[guild_id] = {
-                'user_id': str(interaction.user.id),
-                'started_at': discord.utils.utcnow()
-            }
-            
-            # 서버 포지션 분포 정보 조회 (참고용)
-            position_distribution = await self.bot.db_manager.get_server_position_distribution(guild_id)
-            
-            # 플레이어 선택 View 시작
-            selection_view = PlayerSelectionView(self.bot, guild_id, eligible_players)
-            selection_view.interaction_user = interaction.user
-            
-            embed = discord.Embed(
-                title="🎯 팀 밸런싱",
-                description="균형잡힌 5vs5 팀을 자동으로 생성합니다.\n먼저 참가할 10명의 플레이어를 선택해주세요.",
-                color=0x0099ff
-            )
-            
-            embed.add_field(
-                name="📊 선택 가능한 플레이어",
-                value=f"총 **{len(eligible_players)}명** (최소 3경기 이상)",
-                inline=True
-            )
-            
-            # 포지션 분포 정보 추가
-            if position_distribution and position_distribution['distribution']:
-                dist_text = ""
-                for position, data in position_distribution['distribution'].items():
-                    if position != '미설정':
-                        emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚"
-                        dist_text += f"{emoji} {position}: {data['count']}명 ({data['percentage']:.1f}%)\n"
-                
-                if dist_text:
-                    embed.add_field(
-                        name="🎮 서버 포지션 분포",
-                        value=dist_text.strip(),
-                        inline=True
-                    )
-            
-            embed.add_field(
-                name="💡 사용 방법",
-                value="1️⃣ 드롭다운에서 참가자 10명 선택\n"
-                      "2️⃣ 밸런싱 모드 선택\n"
-                      "3️⃣ 자동 계산된 최적 팀 구성 확인\n"
-                      "4️⃣ 팀 구성 확정",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="⚙️ 밸런싱 기준",
-                value="• 포지션별 승률 및 숙련도\n• 팀 간 스킬 균형\n• 포지션 적합도\n• 과거 팀워크 데이터",
-                inline=False
-            )
-            
-            embed.set_footer(
-                text=f"요청자: {interaction.user.display_name} | 5분 후 자동 만료",
-                icon_url=interaction.user.display_avatar.url
-            )
-            
-            await interaction.followup.send(embed=embed, view=selection_view)
-            
-            # 세션 타임아웃 관리
-            await self.manage_session_timeout(guild_id, selection_view)
-            
         except Exception as e:
             logger.error(f"팀 밸런싱 명령어 실행 중 오류: {e}", exc_info=True)
             
@@ -217,11 +134,198 @@ class TeamBalancingCommand(commands.Cog):
             try:
                 await interaction.followup.send(embed=embed, ephemeral=True)
             except:
-                # followup이 실패한 경우 edit으로 시도
                 try:
                     await interaction.edit_original_response(embed=embed, view=None)
                 except:
-                    pass  # 모든 응답 방법이 실패한 경우 무시
+                    pass
+
+    async def start_auto_balancing_mode(self, interaction: discord.Interaction):
+        """자동 밸런싱 모드 시작 (기존 로직)"""
+        guild_id = str(interaction.guild_id)
+        
+        # 밸런싱 가능한 유저 목록 조회
+        eligible_players = await self.bot.db_manager.get_eligible_users_for_balancing(
+            guild_id, min_games=3
+        )
+        
+        if len(eligible_players) < 10:
+            embed = discord.Embed(
+                title="❌ 참가 가능한 플레이어 부족",
+                description=f"자동 밸런싱을 위해서는 최소 10명의 플레이어가 필요합니다.",
+                color=0xff4444
+            )
+            embed.add_field(
+                name="📊 현재 상황",
+                value=f"• 조건을 만족하는 플레이어: **{len(eligible_players)}명**\n"
+                      f"• 필요한 플레이어: **10명**\n"
+                      f"• 부족한 플레이어: **{10 - len(eligible_players)}명**",
+                inline=False
+            )
+            embed.add_field(
+                name="✅ 참가 조건",
+                value="• 서버에 등록된 유저\n• 최소 3경기 이상 참여\n• 승인된 상태",
+                inline=False
+            )
+            embed.add_field(
+                name="💡 대안",
+                value="• 🔍 **밸런스 체크 모드**를 사용하면 모든 등록된 유저 포함 가능\n• 신규 유저도 티어 기반으로 밸런스 분석 가능",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed)
+            return
+        
+        # 세션 등록
+        self.active_sessions[guild_id] = {
+            'user_id': str(interaction.user.id),
+            'started_at': discord.utils.utcnow(),
+            'mode': 'auto'
+        }
+        
+        # 서버 포지션 분포 정보 조회 (참고용)
+        position_distribution = await self.bot.db_manager.get_server_position_distribution(guild_id)
+        
+        # 플레이어 선택 View 시작
+        from utils.balance_ui import PlayerSelectionView
+        selection_view = PlayerSelectionView(self.bot, guild_id, eligible_players)
+        selection_view.interaction_user = interaction.user
+        
+        embed = discord.Embed(
+            title="🤖 자동 팀 밸런싱",
+            description="균형잡힌 5vs5 팀을 AI가 자동으로 생성합니다.\n먼저 참가할 10명의 플레이어를 선택해주세요.",
+            color=0x0099ff
+        )
+        
+        embed.add_field(
+            name="📊 선택 가능한 플레이어",
+            value=f"총 **{len(eligible_players)}명** (최소 3경기 이상)",
+            inline=True
+        )
+        
+        # 포지션 분포 정보 추가
+        if position_distribution and position_distribution['distribution']:
+            dist_text = ""
+            for position, data in position_distribution['distribution'].items():
+                if position != '미설정':
+                    emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚"
+                    dist_text += f"{emoji} {position}: {data['count']}명 ({data['percentage']:.1f}%)\n"
+            
+            if dist_text:
+                embed.add_field(
+                    name="🎮 서버 포지션 분포",
+                    value=dist_text.strip(),
+                    inline=True
+                )
+        
+        embed.add_field(
+            name="💡 사용 방법",
+            value="1️⃣ 드롭다운에서 참가자 10명 선택\n"
+                  "2️⃣ 밸런싱 모드 선택\n"
+                  "3️⃣ AI가 계산한 최적 팀 구성 확인\n"
+                  "4️⃣ 팀 구성 확정",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚙️ 밸런싱 기준",
+            value="• 포지션별 승률 및 숙련도\n• 팀 간 스킬 균형\n• 포지션 적합도\n• 과거 팀워크 데이터",
+            inline=False
+        )
+        
+        embed.set_footer(
+            text=f"요청자: {interaction.user.display_name} | 5분 후 자동 만료",
+            icon_url=interaction.user.display_avatar.url
+        )
+        
+        await interaction.followup.send(embed=embed, view=selection_view)
+        
+        # 세션 타임아웃 관리
+        await self.manage_session_timeout(guild_id, selection_view)
+
+    async def start_balance_check_mode(self, interaction: discord.Interaction):
+        """밸런스 체크 모드 시작 (새로운 기능)"""
+        guild_id = str(interaction.guild_id)
+        
+        # 모든 등록된 유저 조회 (경기 수 제한 없음)
+        all_users = await self.bot.db_manager.get_eligible_users_for_balancing(
+            guild_id, min_games=0
+        )
+        
+        if len(all_users) < 10:
+            embed = discord.Embed(
+                title="❌ 등록된 플레이어 부족", 
+                description=f"밸런스 체크를 위해서는 최소 10명의 등록된 플레이어가 필요합니다.",
+                color=0xff4444
+            )
+            embed.add_field(
+                name="📊 현재 상황",
+                value=f"• 등록된 플레이어: **{len(all_users)}명**\n"
+                      f"• 필요한 플레이어: **10명**",
+                inline=False
+            )
+            embed.add_field(
+                name="💡 해결 방법",
+                value="• 더 많은 유저가 `/유저신청`으로 등록하도록 안내\n• 현재 등록된 유저로 가능한 조합 시도",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed)
+            return
+        
+        # 세션 등록
+        self.active_sessions[guild_id] = {
+            'user_id': str(interaction.user.id),
+            'started_at': discord.utils.utcnow(),
+            'mode': 'check'
+        }
+        
+        # 수동 팀 선택 View 시작
+        from utils.balance_ui import ManualTeamSelectionView
+        manual_view = ManualTeamSelectionView(self.bot, guild_id, all_users)
+        manual_view.interaction_user = interaction.user
+        
+        embed = discord.Embed(
+            title="🔍 팀 밸런스 체크",
+            description="이미 구성된 팀이나 원하는 팀 조합의 밸런스를 분석합니다.\nA팀과 B팀을 각각 5명씩 선택해주세요.",
+            color=0x9966ff
+        )
+        
+        embed.add_field(
+            name="📊 선택 가능한 플레이어",
+            value=f"총 **{len(all_users)}명** (모든 등록된 유저)",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎯 분석 기준", 
+            value="• 내전 데이터가 있는 유저: 실제 승률 기반\n• 신규 유저: 오버워치 티어 기반\n• 하이브리드 스코어링으로 정확한 분석",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💡 사용 방법",
+            value="1️⃣ A팀 5명 선택\n"
+                  "2️⃣ B팀 5명 선택\n" 
+                  "3️⃣ 실시간 밸런스 분석 확인\n"
+                  "4️⃣ 필요시 팀 구성 수정",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="✨ 장점",
+            value="• 신규 유저도 포함 가능\n• 이미 짜여진 팀 검증\n• 실시간 밸런스 피드백\n• 최적화 제안 받기",
+            inline=False
+        )
+        
+        embed.set_footer(
+            text=f"요청자: {interaction.user.display_name} | 10분 후 자동 만료",
+            icon_url=interaction.user.display_avatar.url
+        )
+        
+        await interaction.followup.send(embed=embed, view=manual_view)
+        
+        # 세션 타임아웃 관리
+        await self.manage_session_timeout(guild_id, manual_view)
     
     async def manage_session_timeout(self, guild_id: str, view: discord.ui.View):
         """세션 타임아웃 관리"""
