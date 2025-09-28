@@ -444,14 +444,17 @@ class TeamPlayerSelectDropdown(discord.ui.Select):
                     self.parent_view.team_a_players.append(selected_player)
                 elif self.team == "B" and len(self.parent_view.team_b_players) < 5:
                     self.parent_view.team_b_players.append(selected_player)
-        
-        # A팀이 5명 완성되면 자동으로 B팀 선택으로 전환
+                
         if self.team == "A" and len(self.parent_view.team_a_players) == 5:
             self.parent_view.current_team = "B"
+        elif self.team == "B" and len(self.parent_view.team_b_players) == 5:
+            pass  # B팀도 완료됨
         
-        # UI 업데이트
         self.parent_view.update_ui()
+        
         embed = self.parent_view.create_team_status_embed()
+        
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
         
 class BalanceCheckResultView(discord.ui.View):
     """밸런스 체크 결과 표시 View"""
