@@ -964,81 +964,259 @@ class BalanceCheckResultView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=manual_view)
     
     async def show_suggestions(self, interaction: discord.Interaction):
-        """개선 제안 표시"""
+        """개선된 팀 구성 제안 (실제 대안 구성 제시)"""
+        await interaction.response.defer()
+        
+        try:
+            # AI가 더 나은 팀 구성을 찾기
+            improved_compositions = await self.find_improved_compositions()
+            
+            if not improved_compositions:
+                # 개선안을 찾지 못한 경우
+                embed = discord.Embed(
+                    title="✅ 이미 최적화된 구성",
+                    description="현재 팀 구성이 이미 상당히 균형잡혀 있습니다!",
+                    color=0x00aa44
+                )
+                embed.add_field(
+                    name="🎯 현재 밸런스 점수",
+                    value=f"**{self.result.balance_score:.1%}** - 양호한 수준",
+                    inline=False
+                )
+                embed.add_field(
+                    name="💡 추가 제안",
+                    value="• 다른 플레이어 조합을 시도해보세요\n• 포지션 변경으로 미세 조정 가능\n• 현재 구성으로도 재미있는 경기 예상",
+                    inline=False
+                )
+            else:
+                # 개선안을 찾은 경우
+                best_improvement = improved_compositions[0]
+                embed = self.create_improvement_comparison_embed(best_improvement)
+            
+            # 뒤로가기 버튼 (수정된 버전)
+            back_button = discord.ui.Button(
+                label="분석 결과로 돌아가기",
+                style=discord.ButtonStyle.secondary,
+                emoji="⬅️"
+            )
+            back_button.callback = self.back_to_results_fixed
+            
+            view = discord.ui.View(timeout=600)
+            view.add_item(back_button)
+            
+            # 개선안이 있으면 적용 버튼도 추가
+            if improved_compositions:
+                apply_button = discord.ui.Button(
+                    label="이 구성 적용하기",
+                    style=discord.ButtonStyle.success,
+                    emoji="✅"
+                )
+                apply_button.callback = lambda i: self.apply_improved_composition(i, best_improvement)
+                view.add_item(apply_button)
+            
+            await interaction.edit_original_response(embed=embed, view=view)
+            
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ 개선안 생성 실패",
+                description=f"개선된 팀 구성을 생성하는 중 오류가 발생했습니다:\n```{str(e)}```",
+                color=0xff4444
+            )
+            await interaction.edit_original_response(embed=embed, view=None)
+
+    async def find_improved_compositions(self) -> List[Dict]:
+        """더 나은 팀 구성 찾기"""
+        import itertools
+        from utils.balance_algorithm import TeamBalancer, BalancingMode
+        
+        current_score = self.result.balance_score
+        improvements = []
+        
+        # 현재 구성에서 가능한 개선안들 시도
+        all_players = self.original_team_a + self.original_team_b
+        balancer = TeamBalancer(mode=BalancingMode.PRECISE)
+        
+        # 1. 플레이어 교체 시나리오 (각 팀에서 1-2명씩 교체)
+        improvement_attempts = 0
+        max_attempts = 20  # 성능을 위해 시도 횟수 제한
+        
+        for swap_count in [1, 2]:  # 1명 또는 2명씩 교체
+            if improvement_attempts >= max_attempts:
+                break
+                
+            # A팀에서 swap_count명 선택
+            for a_players_to_swap in itertools.combinations(range(5), swap_count):
+                if improvement_attempts >= max_attempts:
+                    break
+                    
+                # B팀에서 swap_count명 선택  
+                for b_players_to_swap in itertools.combinations(range(5), swap_count):
+                    improvement_attempts += 1
+                    if improvement_attempts >= max_attempts:
+                        break
+                    
+                    # 새로운 팀 구성 생성
+                    new_team_a = self.original_team_a.copy()
+                    new_team_b = self.original_team_b.copy()
+                    new_a_positions = self.team_a_positions.copy()
+                    new_b_positions = self.team_b_positions.copy()
+                    
+                    # 플레이어 교체
+                    for i, j in zip(a_players_to_swap, b_players_to_swap):
+                        # 플레이어 교체
+                        a_player = new_team_a[i]
+                        b_player = new_team_b[j]
+                        
+                        new_team_a[i] = b_player
+                        new_team_b[j] = a_player
+                        
+                        # 포지션도 함께 교체
+                        a_pos = new_a_positions.get(a_player['user_id'])
+                        b_pos = new_b_positions.get(b_player['user_id'])
+                        
+                        if a_pos and b_pos:
+                            new_a_positions[b_player['user_id']] = a_pos
+                            new_b_positions[a_player['user_id']] = b_pos
+                            del new_a_positions[a_player['user_id']]
+                            del new_b_positions[b_player['user_id']]
+                    
+                    try:
+                        # 새 구성 분석
+                        new_result = await asyncio.get_event_loop().run_in_executor(
+                            None, balancer.analyze_fixed_team_composition,
+                            new_team_a, new_a_positions, new_team_b, new_b_positions
+                        )
+                        
+                        # 개선되었는지 확인
+                        if new_result.balance_score > current_score + 0.05:  # 최소 5% 개선
+                            improvements.append({
+                                'team_a': new_team_a,
+                                'team_b': new_team_b,
+                                'team_a_positions': new_a_positions,
+                                'team_b_positions': new_b_positions,
+                                'result': new_result,
+                                'improvement': new_result.balance_score - current_score,
+                                'swapped_players': [(self.original_team_a[i]['username'], self.original_team_b[j]['username']) 
+                                                for i, j in zip(a_players_to_swap, b_players_to_swap)]
+                            })
+                    except:
+                        continue  # 유효하지 않은 구성이면 스킵
+        
+        # 개선도가 높은 순으로 정렬
+        improvements.sort(key=lambda x: x['improvement'], reverse=True)
+        return improvements[:3]  # 상위 3개만 반환
+
+    def create_improvement_comparison_embed(self, improvement: Dict) -> discord.Embed:
+        """개선 구성 비교 임베드 생성"""
         embed = discord.Embed(
-            title="💡 팀 밸런스 개선 제안",
-            description="현재 팀 구성을 더욱 균형잡히게 만들 수 있는 방법들입니다.",
+            title="🚀 개선된 팀 구성 제안",
+            description="AI가 분석한 더 균형잡힌 팀 구성입니다.",
             color=0x00aa44
         )
         
-        # 현재 밸런스 문제점 분석
-        issues = []
-        suggestions = []
+        # 개선 요약
+        improvement_score = improvement['improvement']
+        new_score = improvement['result'].balance_score
         
-        if self.result.balance_score < 0.6:
-            issues.append("⚠️ 심각한 팀 밸런스 불균형")
-            suggestions.append("일부 핵심 플레이어의 포지션을 교체해보세요")
-        elif self.result.balance_score < 0.8:
-            issues.append("📊 약간의 팀 밸런스 차이")
-            suggestions.append("1-2명의 포지션 조정으로 개선 가능합니다")
-        
-        # 포지션별 제안
-        if 'tank' in self.result.reasoning and ("우세" in self.result.reasoning['tank']):
-            suggestions.append("🛡️ 탱커 실력 차이가 큽니다. 다른 포지션과 교체를 고려해보세요")
-        
-        if 'dps' in self.result.reasoning and ("우세" in self.result.reasoning['dps']):
-            suggestions.append("⚔️ 딜러진 실력 차이를 줄이기 위해 딜러 배치를 조정해보세요")
-        
-        if 'support' in self.result.reasoning and ("우세" in self.result.reasoning['support']):
-            suggestions.append("💚 힐러진 밸런스를 위해 힐러 배치를 재검토해보세요")
-        
-        # 포지션 적합도 개선 제안
-        if self.team_a_positions and self.team_b_positions:
-            mismatches = self.find_position_mismatches()
-            if mismatches:
-                suggestions.extend(mismatches)
-        
-        if issues:
-            embed.add_field(
-                name="🔍 현재 문제점",
-                value="\n".join(issues),
-                inline=False
-            )
-        
-        if suggestions:
-            embed.add_field(
-                name="💡 개선 방법",
-                value="\n".join(f"• {suggestion}" for suggestion in suggestions),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="✅ 개선 제안",
-                value="현재 구성이 이미 상당히 균형잡혀 있습니다!\n다른 플레이어 조합을 시도해볼 수도 있습니다.",
-                inline=False
-            )
-        
-        # 일반적인 팁
         embed.add_field(
-            name="🎯 일반적인 팁",
-            value="• 각 플레이어의 주포지션을 최대한 활용하세요\n"
-                  "• 실력이 비슷한 플레이어들을 양팀에 분산 배치하세요\n"
-                  "• 포지션별 숙련도를 고려한 배치가 중요합니다",
+            name="📊 개선 효과",
+            value=f"**현재**: {self.result.balance_score:.1%} → **개선**: {new_score:.1%}\n"
+                f"**향상도**: +{improvement_score:.1%} ⬆️",
             inline=False
         )
         
-        # 뒤로가기 버튼
-        back_button = discord.ui.Button(
-            label="분석 결과로 돌아가기",
-            style=discord.ButtonStyle.secondary,
-            emoji="⬅️"
+        # 변경 사항
+        swapped_players = improvement['swapped_players']
+        change_text = "\n".join([f"🔄 {a_player} ↔ {b_player}" for a_player, b_player in swapped_players])
+        
+        embed.add_field(
+            name="🔄 주요 변경사항",
+            value=change_text,
+            inline=False
         )
-        back_button.callback = self.back_to_results
         
-        view = discord.ui.View()
-        view.add_item(back_button)
+        # 현재 구성
+        embed.add_field(
+            name="📋 현재 구성",
+            value=self.format_team_comparison(
+                self.original_team_a, self.team_a_positions, "A팀",
+                self.original_team_b, self.team_b_positions, "B팀"
+            ),
+            inline=False
+        )
         
-        await interaction.response.edit_message(embed=embed, view=view)
+        # 제안 구성
+        embed.add_field(
+            name="✨ 제안 구성",
+            value=self.format_team_comparison(
+                improvement['team_a'], improvement['team_a_positions'], "A팀",
+                improvement['team_b'], improvement['team_b_positions'], "B팀"
+            ),
+            inline=False
+        )
+        
+        # 새로운 밸런스 분석
+        new_result = improvement['result']
+        winrate_text = f"A팀 {new_result.predicted_winrate_a:.1%} vs B팀 {1-new_result.predicted_winrate_a:.1%}"
+        
+        embed.add_field(
+            name="⚖️ 새로운 밸런스",
+            value=f"🎯 밸런스 점수: **{new_result.balance_score:.1%}**\n"
+                f"📈 예상 승률: {winrate_text}",
+            inline=False
+        )
+        
+        embed.set_footer(text="'이 구성 적용하기' 버튼으로 바로 적용할 수 있습니다.")
+        
+        return embed
+
+    def format_team_comparison(self, team_a, a_positions, a_name, team_b, b_positions, b_name) -> str:
+        """팀 구성 비교용 포맷팅"""
+        def format_single_team(team_players, positions, team_name):
+            lines = [f"**{team_name}**:"]
+            for player in team_players:
+                position = positions.get(player['user_id'], '미설정')
+                emoji = "🛡️" if position == "탱커" else "⚔️" if position == "딜러" else "💚" if position == "힐러" else "❓"
+                lines.append(f"{emoji} {player['username']}")
+            return "\n".join(lines)
+        
+        team_a_text = format_single_team(team_a, a_positions, a_name)
+        team_b_text = format_single_team(team_b, b_positions, b_name)
+        
+        return f"{team_a_text}\n\n{team_b_text}"
+
+    async def apply_improved_composition(self, interaction: discord.Interaction, improvement: Dict):
+        """개선된 구성 적용"""
+        # 새로운 구성으로 업데이트
+        self.original_team_a = improvement['team_a']
+        self.original_team_b = improvement['team_b'] 
+        self.team_a_positions = improvement['team_a_positions']
+        self.team_b_positions = improvement['team_b_positions']
+        self.result = improvement['result']
+        
+        # 결과 화면으로 돌아가기
+        embed = self.create_balance_check_embed(self.result)
+        embed.add_field(
+            name="✅ 구성 적용 완료",
+            value="개선된 팀 구성이 적용되었습니다!",
+            inline=False
+        )
+        
+        # 원래 결과 버튼들로 되돌리기
+        self.clear_items()
+        self.add_result_buttons()
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def back_to_results_fixed(self, interaction: discord.Interaction):
+        """분석 결과로 돌아가기 (수정된 버전)"""
+        embed = self.create_balance_check_embed(self.result)
+        
+        # 원래 버튼들 복원
+        self.clear_items()
+        self.add_result_buttons()
+        
+        await interaction.response.edit_message(embed=embed, view=self)
     
     def find_position_mismatches(self) -> List[str]:
         """포지션 미스매치 찾기"""
