@@ -1431,7 +1431,7 @@ class BalancingOptionsView(discord.ui.View):
             # 밸런싱 실행 (하이브리드 스코어링 사용)
             balancer = TeamBalancer(mode=self.selected_mode)
             results = await asyncio.get_event_loop().run_in_executor(
-                None, balancer.find_optimal_balance, self.selected_players, True  # use_hybrid=True
+                None, balancer.find_optimal_balance, self.selected_players
             )
             
             if not results:
