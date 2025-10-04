@@ -1535,32 +1535,47 @@ class DatabaseManager:
                 return None
             
     async def update_registered_user_info(self, guild_id: str, user_id: str, updates: dict) -> bool:
-        """등록된 유저 정보 업데이트"""
+        """등록된 유저 정보 업데이트 (제공된 필드만)"""
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute('PRAGMA journal_mode=WAL')
             
             try:
-                await db.execute('''
-                    UPDATE registered_users
-                    SET current_season_tier = ?,
-                        main_position = ?,
-                        battle_tag = ?,
-                        birth_year = ?
-                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
-                ''', (
-                    updates['current_season_tier'],
-                    updates['main_position'],
-                    updates['battle_tag'],
-                    updates['birth_year'],
-                    guild_id,
-                    user_id
-                ))
+                # 업데이트할 필드가 없으면 실패
+                if not updates:
+                    return False
                 
+                # 동적으로 SET 절 생성
+                set_clauses = []
+                values = []
+                
+                allowed_fields = ['current_season_tier', 'main_position', 'battle_tag', 'birth_year']
+                
+                for field in allowed_fields:
+                    if field in updates:
+                        set_clauses.append(f"{field} = ?")
+                        values.append(updates[field])
+                
+                if not set_clauses:
+                    return False
+                
+                # WHERE 조건용 값 추가
+                values.extend([guild_id, user_id])
+                
+                query = f'''
+                    UPDATE registered_users
+                    SET {', '.join(set_clauses)}
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                '''
+                
+                await db.execute(query, values)
                 await db.commit()
+                
                 return True
                 
             except Exception as e:
                 print(f"❌ 유저 정보 업데이트 실패: {e}")
+                import traceback
+                print(traceback.format_exc())
                 return False
 
     async def get_pending_applications(self, guild_id: str) -> List[dict]:

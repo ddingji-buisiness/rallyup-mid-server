@@ -32,6 +32,270 @@ class SimpleUserManagementCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @app_commands.command(name="유저정보수정", description="[관리자] 등록된 유저의 정보를 수정합니다")
+    @app_commands.describe(
+        유저명="수정할 유저명 (자동완성)",
+        tier="현재 시즌 티어 (선택사항)",
+        position="메인 포지션 (선택사항)",
+        battle_tag="배틀태그 (선택사항)",
+        birth_year="출생년도 뒤 2자리 (선택사항)"
+    )
+    @app_commands.choices(tier=[
+        app_commands.Choice(name="언랭", value="언랭"),
+        app_commands.Choice(name="브론즈", value="브론즈"),
+        app_commands.Choice(name="실버", value="실버"),
+        app_commands.Choice(name="골드", value="골드"),
+        app_commands.Choice(name="플래티넘", value="플래티넘"),
+        app_commands.Choice(name="다이아", value="다이아"),
+        app_commands.Choice(name="마스터", value="마스터"),
+        app_commands.Choice(name="그마", value="그마"),
+        app_commands.Choice(name="챔피언", value="챔피언")
+    ])
+    @app_commands.choices(position=[
+        app_commands.Choice(name="탱커", value="탱커"),
+        app_commands.Choice(name="딜러", value="딜러"),
+        app_commands.Choice(name="힐러", value="힐러"),
+        app_commands.Choice(name="탱커 & 딜러", value="탱커 & 딜러"),
+        app_commands.Choice(name="탱커 & 힐러", value="탱커 & 힐러"),
+        app_commands.Choice(name="딜러 & 힐러", value="딜러 & 힐러"),
+        app_commands.Choice(name="탱커 & 딜러 & 힐러", value="탱커 & 딜러 & 힐러")
+    ])
+    @app_commands.default_permissions(manage_guild=True)
+    async def admin_update_user_info(
+        self,
+        interaction: discord.Interaction,
+        유저명: str,
+        tier: Optional[str] = None,
+        position: Optional[str] = None,
+        battle_tag: Optional[str] = None,
+        birth_year: Optional[str] = None
+    ):
+        # 관리자 권한 체크
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # 유저명으로 실제 유저 찾기
+            registered_users = await self.bot.db_manager.get_registered_users_list(guild_id, 1000)
+            target_user_data = None
+            
+            for user_data in registered_users:
+                if user_data['username'].lower() == 유저명.lower():
+                    target_user_data = user_data
+                    break
+            
+            if not target_user_data:
+                await interaction.followup.send(
+                    f"❌ '{유저명}' 등록된 유저를 찾을 수 없습니다.", ephemeral=True
+                )
+                return
+            
+            user_id = target_user_data['user_id']
+            
+            # 생년 유효성 검증
+            if birth_year:
+                if len(birth_year) != 2 or not birth_year.isdigit():
+                    await interaction.followup.send(
+                        "❌ 생년은 숫자 2자리만 입력해주세요 (예: 00, 95)",
+                        ephemeral=True
+                    )
+                    return
+            
+            # 현재 정보 조회
+            current_info = await self.bot.db_manager.get_registered_user_info(guild_id, user_id)
+            
+            if not current_info:
+                await interaction.followup.send(
+                    "❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True
+                )
+                return
+            
+            # 변경할 정보만 업데이트 (제공된 것만)
+            updates = {}
+            if tier:
+                updates['current_season_tier'] = tier
+            if position:
+                updates['main_position'] = position
+            if battle_tag:
+                updates['battle_tag'] = battle_tag
+            if birth_year:
+                updates['birth_year'] = birth_year
+            
+            # 아무것도 변경하지 않은 경우
+            if not updates:
+                await interaction.followup.send(
+                    "❌ 수정할 정보를 하나 이상 입력해주세요.", ephemeral=True
+                )
+                return
+            
+            # DB 업데이트
+            success = await self.bot.db_manager.update_registered_user_info(
+                guild_id, user_id, updates
+            )
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 정보 수정에 실패했습니다.", ephemeral=True
+                )
+                return
+            
+            # 최종 정보 (변경된 것 + 기존 것)
+            final_info = {
+                'main_position': updates.get('main_position', current_info['main_position']),
+                'current_season_tier': updates.get('current_season_tier', current_info['current_season_tier']),
+                'battle_tag': updates.get('battle_tag', current_info['battle_tag']),
+                'birth_year': updates.get('birth_year', current_info.get('birth_year'))
+            }
+            
+            # Discord 멤버 객체 찾기
+            target_member = interaction.guild.get_member(int(user_id))
+            
+            # 닉네임 자동 변경 (멤버가 서버에 있는 경우만)
+            nickname_result = "⚠️ 유저가 서버에 없어 닉네임을 변경할 수 없음"
+            if target_member:
+                nickname_result = await self.bot.db_manager._update_user_nickname(
+                    target_member,
+                    final_info['main_position'],
+                    final_info['current_season_tier'],
+                    final_info['battle_tag'],
+                    final_info['birth_year']
+                )
+            
+            # 성공 메시지
+            embed = discord.Embed(
+                title="✅ 유저 정보 수정 완료",
+                description=f"**{유저명}**님의 정보가 수정되었습니다",
+                color=0x00ff88,
+                timestamp=datetime.now()
+            )
+            
+            # 변경 내역 표시
+            changes = []
+            if tier and tier != current_info['current_season_tier']:
+                changes.append(f"**티어**: {current_info['current_season_tier']} → {tier}")
+            
+            if position and position != current_info['main_position']:
+                changes.append(f"**포지션**: {current_info['main_position']} → {position}")
+            
+            if battle_tag and battle_tag != current_info['battle_tag']:
+                changes.append(f"**배틀태그**: {current_info['battle_tag']} → {battle_tag}")
+            
+            if birth_year and birth_year != current_info.get('birth_year'):
+                old_birth = current_info.get('birth_year', '미설정')
+                changes.append(f"**생년**: {old_birth} → {birth_year}")
+            
+            if changes:
+                embed.add_field(
+                    name="📝 변경 내역",
+                    value="\n".join(changes),
+                    inline=False
+                )
+            
+            # 닉네임 변경 결과
+            embed.add_field(
+                name="🔄 닉네임 자동 변경",
+                value=nickname_result,
+                inline=False
+            )
+            
+            embed.add_field(
+                name="📋 최종 정보",
+                value=f"**배틀태그**: {final_info['battle_tag']}\n"
+                    f"**포지션**: {final_info['main_position']}\n"
+                    f"**현시즌 티어**: {final_info['current_season_tier']}\n"
+                    f"**생년**: {final_info['birth_year'] or '미설정'}",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"수정한 관리자: {interaction.user.display_name}")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # 대상 유저에게 DM 알림 (선택사항)
+            if target_member:
+                try:
+                    dm_embed = discord.Embed(
+                        title="📢 정보 수정 알림",
+                        description=f"**{interaction.guild.name}** 서버에서 관리자가 회원님의 정보를 수정했습니다.",
+                        color=0x0099ff
+                    )
+                    if changes:
+                        dm_embed.add_field(
+                            name="📝 변경 내역",
+                            value="\n".join(changes),
+                            inline=False
+                        )
+                    dm_embed.add_field(
+                        name="ℹ️ 안내",
+                        value="변경 내용에 문제가 있다면 관리자에게 문의해주세요.",
+                        inline=False
+                    )
+                    await target_member.send(embed=dm_embed)
+                except:
+                    pass  # DM 실패해도 무시
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 정보 수정 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    @admin_update_user_info.autocomplete('유저명')
+    async def admin_update_user_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> List[app_commands.Choice[str]]:
+        """등록된 유저들만 자동완성으로 표시"""
+        try:
+            guild_id = str(interaction.guild_id)
+            registered_users = await self.bot.db_manager.get_registered_users_list(guild_id, 100)
+            
+            matching_users = []
+            
+            for user_data in registered_users:
+                username = user_data['username']
+                battle_tag = user_data.get('battle_tag', '')
+                position = user_data.get('main_position', '')
+                tier = user_data.get('current_season_tier', '')
+                
+                # 검색어 매칭
+                if (current.lower() in username.lower() or 
+                    current.lower() in battle_tag.lower() or
+                    current == ""):
+                    
+                    display_name = f"{username} ({battle_tag}/{position}/{tier})"
+                    
+                    matching_users.append(
+                        app_commands.Choice(
+                            name=display_name[:100],
+                            value=username
+                        )
+                    )
+            
+            return matching_users[:25]
+            
+        except Exception as e:
+            print(f"[DEBUG] 자동완성 오류: {e}")
+            return []
+
+    async def is_admin(self, interaction: discord.Interaction) -> bool:
+        """관리자 권한 확인"""
+        guild_id = str(interaction.guild_id)
+        user_id = str(interaction.user.id)
+        
+        if interaction.user.id == interaction.guild.owner_id:
+            return True
+        
+        return await self.bot.db_manager.is_server_admin(guild_id, user_id)
+
     @app_commands.command(name="정보수정", description="내 정보를 수정합니다 (수정 시 닉네임 자동 변경)")
     @app_commands.describe(
         tier="현재 시즌 티어를 선택하세요",
