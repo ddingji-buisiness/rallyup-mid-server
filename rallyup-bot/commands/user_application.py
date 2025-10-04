@@ -4,6 +4,360 @@ from discord import app_commands
 from typing import List, Literal
 from datetime import datetime
 
+class OnePageApplicationView(discord.ui.View):
+    """모든 입력을 한 페이지에서 처리"""
+    
+    def __init__(self, bot):
+        super().__init__(timeout=600)
+        self.bot = bot
+        
+        # 입력 데이터
+        self.entry_method = None
+        self.battle_tag = None
+        self.main_position = None
+        self.previous_tier = None
+        self.current_tier = None
+        self.highest_tier = None
+        
+        self.add_ui_components()
+    
+    def add_ui_components(self):
+        """모든 UI 컴포넌트 추가"""
+        
+        # 텍스트 입력 버튼 (유입경로, 배틀태그)
+        text_input_btn = discord.ui.Button(
+            label="📝 유입경로 & 배틀태그 입력",
+            style=discord.ButtonStyle.primary,
+            row=0
+        )
+        text_input_btn.callback = self.open_text_modal
+        self.add_item(text_input_btn)
+        
+        # 메인 포지션 선택
+        position_select = discord.ui.Select(
+            placeholder="🎯 메인 포지션 선택",
+            options=[
+                discord.SelectOption(label="탱커", value="탱커", emoji="🛡️"),
+                discord.SelectOption(label="딜러", value="딜러", emoji="⚔️"),
+                discord.SelectOption(label="힐러", value="힐러", emoji="💚"),
+                discord.SelectOption(label="탱커 & 딜러", value="탱커 & 딜러"),
+                discord.SelectOption(label="탱커 & 힐러", value="탱커 & 힐러"),
+                discord.SelectOption(label="딜러 & 힐러", value="딜러 & 힐러"),
+                discord.SelectOption(label="탱커 & 딜러 & 힐러", value="탱커 & 딜러 & 힐러"),
+            ],
+            row=1
+        )
+        position_select.callback = self.position_selected
+        self.add_item(position_select)
+        
+        # 전시즌 티어
+        prev_tier = discord.ui.Select(
+            placeholder="📊 전시즌 티어",
+            options=self._tier_options(),
+            row=2
+        )
+        prev_tier.callback = self.prev_tier_selected
+        self.add_item(prev_tier)
+        
+        # 현시즌 티어
+        curr_tier = discord.ui.Select(
+            placeholder="📈 현시즌 티어",
+            options=self._tier_options(),
+            row=3
+        )
+        curr_tier.callback = self.curr_tier_selected
+        self.add_item(curr_tier)
+        
+        # 최고 티어
+        high_tier = discord.ui.Select(
+            placeholder="🏆 최고 티어",
+            options=self._tier_options(),
+            row=4
+        )
+        high_tier.callback = self.high_tier_selected
+        self.add_item(high_tier)
+    
+    def _tier_options(self):
+        return [
+            discord.SelectOption(label="언랭", value="언랭", emoji="⬛"),
+            discord.SelectOption(label="브론즈", value="브론즈", emoji="🟫"),
+            discord.SelectOption(label="실버", value="실버", emoji="⬜"),
+            discord.SelectOption(label="골드", value="골드", emoji="🟨"),
+            discord.SelectOption(label="플래티넘", value="플래티넘", emoji="🟦"),
+            discord.SelectOption(label="다이아", value="다이아", emoji="💎"),
+            discord.SelectOption(label="마스터", value="마스터", emoji="🟪"),
+            discord.SelectOption(label="그마", value="그마", emoji="🔴"),
+            discord.SelectOption(label="챔피언", value="챔피언", emoji="👑"),
+        ]
+    
+    async def open_text_modal(self, interaction: discord.Interaction):
+        """텍스트 입력 Modal 열기"""
+        modal = QuickTextModal(self)
+        await interaction.response.send_modal(modal)
+    
+    async def position_selected(self, interaction: discord.Interaction):
+        self.main_position = interaction.data['values'][0]
+        await self.update_view(interaction)
+    
+    async def prev_tier_selected(self, interaction: discord.Interaction):
+        self.previous_tier = interaction.data['values'][0]
+        await self.update_view(interaction)
+    
+    async def curr_tier_selected(self, interaction: discord.Interaction):
+        self.current_tier = interaction.data['values'][0]
+        await self.update_view(interaction)
+    
+    async def high_tier_selected(self, interaction: discord.Interaction):
+        self.highest_tier = interaction.data['values'][0]
+        await self.update_view(interaction)
+    
+    async def update_view(self, interaction: discord.Interaction):
+        """View 업데이트 및 제출 버튼 관리"""
+        
+        # 모든 항목 완료 체크
+        all_complete = all([
+            self.entry_method, self.battle_tag, self.main_position,
+            self.previous_tier, self.current_tier, self.highest_tier
+        ])
+        
+        # 제출 버튼 추가/업데이트
+        if all_complete and not any(isinstance(item, discord.ui.Button) and item.label == "✅ 신청 제출" for item in self.children):
+            submit_btn = discord.ui.Button(
+                label="✅ 신청 제출",
+                style=discord.ButtonStyle.success,
+                row=0
+            )
+            submit_btn.callback = self.submit_application
+            self.add_item(submit_btn)
+        
+        await interaction.response.edit_message(
+            embed=self._create_status_embed(),
+            view=self
+        )
+    
+    def _create_status_embed(self):
+        """현재 상태 표시 임베드"""
+        embed = discord.Embed(
+            title="📝 서버 가입 신청",
+            description="아래 항목들을 모두 입력/선택해주세요",
+            color=0x0099ff
+        )
+        
+        status = [
+            f"{'✅' if self.entry_method else '⬜'} 유입경로: {self.entry_method or '미입력'}",
+            f"{'✅' if self.battle_tag else '⬜'} 배틀태그: {self.battle_tag or '미입력'}",
+            f"{'✅' if self.main_position else '⬜'} 메인 포지션: {self.main_position or '미선택'}",
+            f"{'✅' if self.previous_tier else '⬜'} 전시즌 티어: {self.previous_tier or '미선택'}",
+            f"{'✅' if self.current_tier else '⬜'} 현시즌 티어: {self.current_tier or '미선택'}",
+            f"{'✅' if self.highest_tier else '⬜'} 최고 티어: {self.highest_tier or '미선택'}",
+        ]
+        
+        embed.add_field(
+            name="📋 입력 현황",
+            value="\n".join(status),
+            inline=False
+        )
+        
+        if all([self.entry_method, self.battle_tag, self.main_position, 
+                self.previous_tier, self.current_tier, self.highest_tier]):
+            embed.add_field(
+                name="🎉 준비 완료!",
+                value="**'신청 제출'** 버튼을 눌러주세요",
+                inline=False
+            )
+        
+        return embed
+    
+    async def submit_application(self, interaction: discord.Interaction):
+        """최종 제출"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            user_id = str(interaction.user.id)
+            username = interaction.user.display_name
+            
+            # 이미 등록된 유저 체크
+            if await self.bot.db_manager.is_user_registered(guild_id, user_id):
+                await interaction.followup.send(
+                    "✅ 이미 이 서버에 등록된 유저입니다!",
+                    ephemeral=True
+                )
+                return
+            
+            success = await self.bot.db_manager.create_user_application(
+                guild_id, user_id, username,
+                self.entry_method, self.battle_tag, self.main_position,
+                self.previous_tier, self.current_tier, self.highest_tier
+            )
+            
+            if success:
+                # 성공 임베드
+                embed = discord.Embed(
+                    title="✅ 신청 완료!",
+                    description="관리자 검토 후 연락드리겠습니다",
+                    color=0x00ff88,
+                    timestamp=datetime.now()
+                )
+                embed.add_field(
+                    name="📋 신청 내용",
+                    value=f"**유입경로**: {self.entry_method}\n"
+                          f"**배틀태그**: {self.battle_tag}\n"
+                          f"**포지션**: {self.main_position}\n"
+                          f"**전시즌**: {self.previous_tier}\n"
+                          f"**현시즌**: {self.current_tier}\n"
+                          f"**최고**: {self.highest_tier}",
+                    inline=False
+                )
+                embed.add_field(
+                    name="⏳ 다음 단계",
+                    value="• 관리자가 신청을 검토합니다\n"
+                          "• 승인/거절 시 DM으로 알려드립니다\n"
+                          "• 승인 시 서버 닉네임이 자동으로 설정됩니다",
+                    inline=False
+                )
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+                # 관리자 DM 알림 발송
+                try:
+                    application_data = {
+                        'entry_method': self.entry_method,
+                        'battle_tag': self.battle_tag,
+                        'main_position': self.main_position,
+                        'previous_season_tier': self.previous_tier,
+                        'current_season_tier': self.current_tier,
+                        'highest_tier': self.highest_tier
+                    }
+                    
+                    success_count, fail_count = await self._send_admin_notification(
+                        interaction.guild,
+                        interaction.user,
+                        application_data
+                    )
+                    
+                    if success_count > 0:
+                        print(f"✅ {success_count}명의 관리자에게 신청 알림 전송")
+                    if fail_count > 0:
+                        print(f"⚠️ {fail_count}명의 관리자에게 DM 전송 실패")
+                        
+                except Exception as dm_error:
+                    print(f"❌ 관리자 DM 알림 실패: {dm_error}")
+                    
+            else:
+                await interaction.followup.send("❌ 신청 처리 실패", ephemeral=True)
+                
+        except Exception as e:
+            await interaction.followup.send(f"❌ 오류: {str(e)}", ephemeral=True)
+    
+    async def _send_admin_notification(self, guild: discord.Guild, 
+                                       applicant: discord.Member, 
+                                       application_data: dict):
+        """모든 관리자에게 신규 신청 알림 DM 발송"""
+        try:
+            guild_id = str(guild.id)
+            guild_owner_id = str(guild.owner_id)
+            
+            # 모든 관리자 ID 조회
+            admin_ids = await self.bot.db_manager.get_all_server_admins_for_notification(
+                guild_id, guild_owner_id
+            )
+            
+            # DM 임베드 생성
+            embed = discord.Embed(
+                title="🔔 새로운 유저 신청 알림",
+                description=f"**{guild.name}** 서버에 새로운 가입 신청이 접수되었습니다!",
+                color=0x00ff88,
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="👤 신청자 정보",
+                value=f"**이름**: {applicant.display_name} ({applicant.name})\n"
+                      f"**ID**: <@{applicant.id}>\n"
+                      f"**가입일**: <t:{int(applicant.joined_at.timestamp())}:R>",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="📋 신청 내용",
+                value=f"**유입경로**: {application_data['entry_method']}\n"
+                      f"**배틀태그**: {application_data['battle_tag']}\n"
+                      f"**메인 포지션**: {application_data['main_position']}\n"
+                      f"**전시즌 티어**: {application_data['previous_season_tier']}\n"
+                      f"**현시즌 티어**: {application_data['current_season_tier']}\n"
+                      f"**최고 티어**: {application_data['highest_tier']}",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="⚡ 빠른 액션",
+                value=f"**승인**: `/신청승인 {applicant.display_name}`\n"
+                      f"**거절**: `/신청거절 {applicant.display_name} [사유]`\n"
+                      f"**목록 확인**: `/신청현황`",
+                inline=False
+            )
+            
+            embed.set_thumbnail(url=applicant.display_avatar.url)
+            embed.set_footer(
+                text=f"서버: {guild.name} | RallyUp 관리자 알림",
+                icon_url=guild.icon.url if guild.icon else None
+            )
+            
+            # 각 관리자에게 DM 발송
+            success_count = 0
+            fail_count = 0
+            
+            for admin_id in admin_ids:
+                try:
+                    admin_user = self.bot.get_user(int(admin_id))
+                    if not admin_user:
+                        admin_user = await self.bot.fetch_user(int(admin_id))
+                    
+                    if admin_user:
+                        await admin_user.send(embed=embed)
+                        success_count += 1
+                    
+                except discord.Forbidden:
+                    fail_count += 1
+                except discord.NotFound:
+                    fail_count += 1
+                except Exception:
+                    fail_count += 1
+            
+            return success_count, fail_count
+            
+        except Exception as e:
+            print(f"❌ 관리자 DM 알림 전체 실패: {e}")
+            return 0, len(admin_ids) if 'admin_ids' in locals() else 1
+
+class QuickTextModal(discord.ui.Modal, title="텍스트 정보 입력"):
+    """간단한 텍스트 입력 Modal"""
+    
+    entry_method = discord.ui.TextInput(
+        label="유입경로",
+        placeholder="예: 친구 추천, 유튜브 등",
+        style=discord.TextStyle.short,
+        max_length=200
+    )
+    
+    battle_tag = discord.ui.TextInput(
+        label="배틀태그",
+        placeholder="닉네임#1234",
+        style=discord.TextStyle.short,
+        max_length=50
+    )
+    
+    def __init__(self, parent_view: OnePageApplicationView):
+        super().__init__()
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        self.parent_view.entry_method = self.entry_method.value
+        self.parent_view.battle_tag = self.battle_tag.value
+        
+        await self.parent_view.update_view(interaction)
+
 class UserApplicationCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -32,162 +386,74 @@ class UserApplicationCommands(commands.Cog):
         
         # 데이터베이스에서 관리자 확인
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
-
-    @app_commands.command(name="유저신청", description="서버 가입을 신청합니다")
-    @app_commands.describe(
-        유입경로="어떻게 이 서버를 알게 되셨나요?",
-        배틀태그="오버워치 배틀태그를 입력해주세요 (예: 닉네임#1234)",
-        메인포지션="주로 플레이하는 포지션을 선택해주세요",
-        전시즌티어="전시즌 최종 티어를 선택해주세요",
-        현시즌티어="현시즌 현재 티어를 선택해주세요",
-        최고티어="역대 최고 달성 티어를 선택해주세요"
-    )
-    async def apply_user(
-        self,
-        interaction: discord.Interaction,
-        유입경로: str,
-        배틀태그: str,
-        메인포지션: Literal["탱커", "딜러", "힐러", "탱커 & 딜러", "탱커 & 힐러", "딜러 & 힐러", "탱커 & 딜러 & 힐러"],
-        전시즌티어: Literal["언랭", "브론즈", "실버", "골드", "플래티넘", "다이아", "마스터", "그마", "챔피언"],
-        현시즌티어: Literal["언랭", "브론즈", "실버", "골드", "플래티넘", "다이아", "마스터", "그마", "챔피언"],
-        최고티어: Literal["언랭", "브론즈", "실버", "골드", "플래티넘", "다이아", "마스터", "그마", "챔피언"]
-    ):
-        await interaction.response.defer(ephemeral=True)
+    
+    @app_commands.command(name="유저신청", description="서버 가입 신청 (한 페이지 완성)")
+    async def apply_user(self, interaction: discord.Interaction):
+        # 1단계: 즉시 등록 여부 체크
+        guild_id = str(interaction.guild_id)
+        user_id = str(interaction.user.id)
         
-        try:
-            guild_id = str(interaction.guild_id)
-            user_id = str(interaction.user.id)
-            username = interaction.user.display_name
-            
-            # 이미 등록된 유저인지 확인
-            if await self.bot.db_manager.is_user_registered(guild_id, user_id):
-                await interaction.followup.send(
-                    "✅ 이미 이 서버에 등록된 유저입니다!\n"
-                    "추가적인 도움이 필요하시면 관리자에게 문의해주세요.",
-                    ephemeral=True
-                )
-                return
-            
-            # 기존 신청 상태 확인
-            existing_app = await self.bot.db_manager.get_user_application(guild_id, user_id)
-            
-            reapplication_message = ""
-            if existing_app:
-                if existing_app['status'] == 'pending':
-                    await interaction.followup.send(
-                        "⏳ **이미 신청 대기 중입니다**\n\n"
-                        f"**신청일**: <t:{int(datetime.fromisoformat(existing_app['applied_at']).timestamp())}:F>\n"
-                        "관리자 검토를 기다려주세요.",
-                        ephemeral=True
-                    )
-                    return
-                elif existing_app['status'] == 'rejected':
-                    reviewed_at_timestamp = int(datetime.fromisoformat(existing_app['reviewed_at']).timestamp()) if existing_app.get('reviewed_at') else 0
-                    reapplication_message = (
-                        "🔄 **재신청 감지**\n"
-                        f"**이전 거절일**: <t:{reviewed_at_timestamp}:F>\n"
-                        f"**거절 사유**: {existing_app.get('admin_note', '사유 없음')}\n\n"
-                        "개선 사항을 반영하여 신중하게 작성해주세요.\n\n"
-                    )
-            
-            # 입력값 검증
-            if len(유입경로) > 200:
-                await interaction.followup.send(
-                    "❌ 유입경로는 200자 이하로 입력해주세요.", ephemeral=True
-                )
-                return
-            
-            # 신청 생성 (재신청의 경우 기존 레코드 업데이트)
-            success = await self.bot.db_manager.create_user_application(
-                guild_id, user_id, username, 유입경로, 배틀태그, 메인포지션, 
-                전시즌티어, 현시즌티어, 최고티어
+        # 이미 등록된 유저 체크
+        if await self.bot.db_manager.is_user_registered(guild_id, user_id):
+            embed = discord.Embed(
+                title="✅ 이미 등록된 유저입니다",
+                description=f"**{interaction.user.display_name}**님은 이미 이 서버에 등록되어 있습니다!",
+                color=0x00ff88
             )
-            
-            if success:
-                embed = discord.Embed(
-                    title="📝 서버 가입 신청 완료!",
-                    description=reapplication_message + "신청이 정상적으로 접수되었습니다. 관리자 검토 후 연락드리겠습니다.",
-                    color=0x00ff88,
-                    timestamp=datetime.now()
-                )
-                
-                embed.add_field(
-                    name="📋 신청 내용",
-                    value=f"**유입경로**: {유입경로}\n"
-                        f"**배틀태그**: {배틀태그}\n"
-                        f"**메인 포지션**: {메인포지션}\n"
-                        f"**전시즌 티어**: {전시즌티어}\n"
-                        f"**현시즌 티어**: {현시즌티어}\n"
-                        f"**최고 티어**: {최고티어}",
-                    inline=False
-                )
-                
-                # 재신청의 경우 추가 안내
-                if reapplication_message:
-                    embed.add_field(
-                        name="💡 재신청 팁",
-                        value="• 이전 거절 사유를 충분히 검토해주세요\n"
-                            "• 정확하고 상세한 정보를 입력해주세요\n"
-                            "• 궁금한 점이 있다면 관리자에게 문의해주세요",
-                        inline=False
-                    )
-                else:
-                    embed.add_field(
-                        name="⏳ 다음 단계",
-                        value="• 관리자가 신청을 검토합니다\n"
-                            "• 승인/거절 시 DM으로 알려드립니다\n"
-                            "• 승인 시 서버 닉네임이 자동으로 설정됩니다\n"
-                            "• 문의사항은 관리자에게 연락해주세요",
-                        inline=False
-                    )
-                
-                embed.add_field(
-                    name="🏷️ 닉네임 설정 안내",
-                    value=f"승인 시 닉네임이 다음과 같이 설정됩니다:\n"
-                        f"`{배틀태그} / {self._get_position_short(메인포지션)} / {현시즌티어}`",
-                    inline=False
-                )
-                
-                embed.set_footer(text="RallyUp Bot | 유저 신청 시스템")
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
+            embed.add_field(
+                name="💡 안내",
+                value="• 추가 정보 수정이 필요하시면 `/정보수정` 명령어를 사용하세요\n"
+                      "• 내 정보 확인은 `/내정보` 명령어를 사용하세요\n"
+                      "• 기타 문의사항은 관리자에게 연락해주세요",
+                inline=False
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # 기존 신청 상태 확인 (pending/rejected)
+        existing_app = await self.bot.db_manager.get_user_application(guild_id, user_id)
+        
+        if existing_app and existing_app['status'] == 'pending':
+            applied_at = datetime.fromisoformat(existing_app['applied_at'])
+            embed = discord.Embed(
+                title="⏳ 이미 신청 대기 중입니다",
+                description="신청이 이미 접수되어 관리자 검토를 기다리고 있습니다.",
+                color=0xffaa00
+            )
+            embed.add_field(
+                name="📋 신청 정보",
+                value=f"**신청일**: <t:{int(applied_at.timestamp())}:F>\n"
+                      f"**상태**: 대기 중\n"
+                      f"**배틀태그**: {existing_app.get('battle_tag', 'N/A')}\n"
+                      f"**포지션**: {existing_app.get('main_position', 'N/A')}",
+                inline=False
+            )
+            embed.add_field(
+                name="💡 안내",
+                value="관리자가 검토 후 승인/거절 시 DM으로 연락드립니다.\n"
+                      "급한 문의사항은 관리자에게 직접 연락해주세요.",
+                inline=False
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # 재신청 안내 (거절된 경우)
+        reapplication_note = ""
+        if existing_app and existing_app['status'] == 'rejected':
+            reviewed_at = datetime.fromisoformat(existing_app['reviewed_at']) if existing_app.get('reviewed_at') else None
+            reapplication_note = (
+                f"**🔄 재신청 감지**\n"
+                f"• 이전 거절일: <t:{int(reviewed_at.timestamp())}:R>\n"
+                f"• 거절 사유: {existing_app.get('admin_note', '사유 없음')}\n"
+                f"• 개선 사항을 반영하여 신중하게 작성해주세요\n\n"
+            )
 
-                try:
-                    application_data = {
-                        'entry_method': 유입경로,
-                        'battle_tag': 배틀태그,
-                        'main_position': 메인포지션,
-                        'previous_season_tier': 전시즌티어,
-                        'current_season_tier': 현시즌티어,
-                        'highest_tier': 최고티어
-                    }
-                    
-                    success_count, fail_count = await self.send_admin_notification_dm(
-                        interaction.guild, 
-                        interaction.user, 
-                        application_data
-                    )
-                    
-                    # 관리자 알림 결과를 로그로만 기록 (사용자에게는 표시하지 않음)
-                    if success_count > 0:
-                        print(f"✅ {success_count}명의 관리자에게 신청 알림이 전송되었습니다.")
-                    if fail_count > 0:
-                        print(f"⚠️ {fail_count}명의 관리자에게 DM 전송에 실패했습니다.")
-                        
-                except Exception as dm_error:
-                    # DM 전송 실패해도 신청 자체는 성공으로 처리
-                    print(f"❌ 관리자 DM 알림 시스템 오류: {dm_error}")
-            else:
-                await interaction.followup.send(
-                    "❌ 신청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
-                    ephemeral=True
-                )
-                
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ 신청 처리 중 오류가 발생했습니다: {str(e)}",
-                ephemeral=True
-            )
+        view = OnePageApplicationView(self.bot)
+        embed = view._create_status_embed()
+        if reapplication_note:
+            embed.description = reapplication_note + (embed.description or "")
+
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="신청현황", description="[관리자] 대기 중인 유저 신청을 확인합니다")
     @app_commands.default_permissions(manage_guild=True)
