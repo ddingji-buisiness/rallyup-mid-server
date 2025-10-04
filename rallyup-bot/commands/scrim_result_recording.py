@@ -35,13 +35,14 @@ OVERWATCH_MAPS = {
 
 class MapSelectionView(discord.ui.View):
     """맵 선택 View"""
-    
-    def __init__(self, bot, session: 'ScrimResultSession', match_number: int):
+
+    def __init__(self, bot, session: 'ScrimResultSession', match_number: int, dashboard: 'ScrimDashboardView'):
         super().__init__(timeout=300)
         self.bot = bot
         self.session = session
         self.match_number = match_number
         self.match_data = session.matches[match_number]
+        self.dashboard = dashboard
         
         # 맵 타입 선택 드롭다운
         self.add_item(MapTypeSelect(self))
@@ -70,6 +71,8 @@ class MapSelectionView(discord.ui.View):
             # 데이터베이스에 저장
             await self.save_match_to_database(str(interaction.guild_id))
             
+            await self.dashboard.update_dashboard()
+
             # 완료 메시지
             embed = discord.Embed(
                 title=f"✅ {self.match_number}경기 기록 완료!",
@@ -87,30 +90,19 @@ class MapSelectionView(discord.ui.View):
                 if 'map_type' in self.match_data and self.match_data['map_type']:
                     map_info += f" ({self.match_data['map_type']})"
                 embed.add_field(name="🗺️ 맵", value=map_info, inline=True)
-            
-            # 팀 구성 요약
-            # for team_key, team_name in [("team_a", "🔵 A팀"), ("team_b", "🔴 B팀")]:
-            #     team_summary = []
-            #     position_key = f"{team_key}_positions"
-                
-            #     for player in self.match_data[team_key]:
-            #         pos = self.match_data[position_key].get(player['user_id'], '미설정')
-            #         emoji = "🛡️" if pos == "탱커" else "⚔️" if pos == "딜러" else "💚" if pos == "힐러" else "❓"
-            #         team_summary.append(f"{emoji} {player['username']}")
-                
-            #     embed.add_field(
-            #         name=team_name,
-            #         value="\n".join(team_summary),
-            #         inline=True
-            #     )
+
+            embed.add_field(
+                name="📊 현재 진행",
+                value=f"**완료된 경기**: {self.session.get_completed_count()}경기\n"
+                      f"**다음 경기**: {self.session.get_next_match_number()}경기",
+                inline=False
+            )
             
             # 다음 단계 안내
-            next_match = self.match_number + 1
             embed.add_field(
-                name="🔄 다음 단계",
-                value=f"`/팀세팅 {next_match}` 명령어로 다음 경기를 진행하거나\n"
-                      f"`/내전현황` 명령어로 현재 진행 상황을 확인하세요.\n"
-                      f"`/내전결과완료` 명령어로 모든 경기 기록을 마무리할 수 있습니다.",
+                name="🎯 다음 단계",
+                value="대시보드의 **[➕ 경기 추가]** 버튼으로 다음 경기를 추가하거나\n"
+                      "**[✅ 기록 완료]** 버튼으로 모든 기록을 저장할 수 있습니다.",
                 inline=False
             )
             
@@ -177,7 +169,8 @@ class MapTypeSelect(discord.ui.Select):
         view = MapSelectionView(
             self.parent_view.bot, 
             self.parent_view.session, 
-            self.parent_view.match_number
+            self.parent_view.match_number,
+            self.parent_view.dashboard
         )
         view.clear_items()
         
@@ -216,7 +209,8 @@ class MapTypeSelect(discord.ui.Select):
         view = MapSelectionView(
             self.parent_view.bot,
             self.parent_view.session,
-            self.parent_view.match_number
+            self.parent_view.match_number,
+            self.parent_view.dashboard
         )
         
         embed = discord.Embed(
@@ -261,22 +255,384 @@ class MapSelect(discord.ui.Select):
         await self.parent_view.complete_match_recording(interaction)
 
 class ScrimResultSession:
-    """내전 결과 기록 세션 관리"""
-    def __init__(self, recruitment_id: str, participants: List[Dict], created_by: str):
+    """내전 결과 기록 세션 관리 - 개선 버전"""
+    def __init__(self, recruitment_id: str, participants: List[Dict], created_by: str, initial_match_number: int = 1):
         self.recruitment_id = recruitment_id
-        self.participants = participants  # [{'user_id': str, 'username': str}, ...]
+        self.participants = participants
         self.created_by = created_by
-        self.matches = {}  # {match_number: match_data}
-        self.current_match = 1
+        self.matches = {}
+        self.current_match = initial_match_number  # 🆕 자동으로 시작 번호 설정
         self.session_id = str(uuid.uuid4())
         self.created_at = datetime.now()
+        self.dashboard_message = None  # 🆕 대시보드 메시지 추적
     
-    def get_available_participants(self) -> List[Dict]:
-        """사용 가능한 참가자 목록 반환"""
-        return self.participants.copy()
+    def get_next_match_number(self) -> int:
+        """🆕 다음 경기 번호 자동 반환"""
+        completed_matches = [num for num, data in self.matches.items() if data.get('completed')]
+        if completed_matches:
+            return max(completed_matches) + 1
+        return self.current_match
+    
+    def get_completed_count(self) -> int:
+        """🆕 완료된 경기 수 반환"""
+        return len([data for data in self.matches.values() if data.get('completed')])
 
-# 전역 세션 저장소 (실제로는 DB에 저장해야 함)
 active_sessions: Dict[str, ScrimResultSession] = {}
+
+class ScrimDashboardView(discord.ui.View):
+    """🆕 내전 결과 기록 메인 대시보드"""
+    
+    def __init__(self, bot, session: ScrimResultSession, guild_id: str, recruitment_info: Dict):
+        super().__init__(timeout=None)  # 타임아웃 없음 (세션 종료 시까지 유지)
+        self.bot = bot
+        self.session = session
+        self.guild_id = guild_id
+        self.recruitment_info = recruitment_info
+        
+        self.setup_buttons()
+    
+    def setup_buttons(self):
+        """대시보드 버튼 구성"""
+        self.clear_items()
+        
+        # 경기 추가 버튼
+        add_match_button = discord.ui.Button(
+            label=f"경기 추가 (다음: {self.session.get_next_match_number()}경기)",
+            style=discord.ButtonStyle.primary,
+            emoji="➕",
+            custom_id="add_match"
+        )
+        add_match_button.callback = self.add_match_callback
+        self.add_item(add_match_button)
+        
+        # 진행 현황 버튼
+        status_button = discord.ui.Button(
+            label="진행 현황",
+            style=discord.ButtonStyle.secondary,
+            emoji="📊",
+            custom_id="view_status"
+        )
+        status_button.callback = self.view_status_callback
+        self.add_item(status_button)
+        
+        # 기록 완료 버튼 (경기가 1개 이상 있을 때만 활성화)
+        complete_button = discord.ui.Button(
+            label=f"기록 완료 ({self.session.get_completed_count()}경기)",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id="complete_recording",
+            disabled=self.session.get_completed_count() == 0
+        )
+        complete_button.callback = self.complete_recording_callback
+        self.add_item(complete_button)
+        
+        # 세션 취소 버튼
+        cancel_button = discord.ui.Button(
+            label="세션 취소",
+            style=discord.ButtonStyle.danger,
+            emoji="❌",
+            custom_id="cancel_session"
+        )
+        cancel_button.callback = self.cancel_session_callback
+        self.add_item(cancel_button)
+    
+    async def add_match_callback(self, interaction: discord.Interaction):
+        """경기 추가 - 자동으로 다음 경기 번호 할당"""
+        next_match = self.session.get_next_match_number()
+        
+        # 팀 구성 단계로 이동
+        await self.start_team_setup(interaction, next_match)
+    
+    async def start_team_setup(self, interaction: discord.Interaction, match_number: int):
+        """팀 구성 시작"""
+        view = TeamSetupView(self.bot, self.session, match_number, self)
+        
+        embed = discord.Embed(
+            title=f"🔵🔴 {match_number}경기 팀 구성",
+            description="A팀에 포함될 5명을 선택해주세요. (나머지 5명은 자동으로 B팀이 됩니다)",
+            color=0x0099ff
+        )
+        
+        embed.add_field(
+            name="📊 세션 정보",
+            value=f"**내전**: {self.recruitment_info['title']}\n"
+                  f"**경기 번호**: {match_number}경기\n"
+                  f"**완료된 경기**: {self.session.get_completed_count()}경기",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    async def view_status_callback(self, interaction: discord.Interaction):
+        """진행 현황 보기"""
+        embed = discord.Embed(
+            title="📊 내전 결과 기록 진행 현황",
+            color=0x0099ff
+        )
+        
+        embed.add_field(
+            name="🎮 내전 정보",
+            value=f"**제목**: {self.recruitment_info['title']}\n"
+                  f"**참가자**: {len(self.session.participants)}명\n"
+                  f"**세션 시작**: <t:{int(self.session.created_at.timestamp())}:R>",
+            inline=False
+        )
+        
+        # 경기 진행 상황
+        if self.session.matches:
+            match_status = []
+            for match_num in sorted(self.session.matches.keys()):
+                match_data = self.session.matches[match_num]
+                if match_data.get('completed'):
+                    winner = "🔵 A팀" if match_data['winner'] == "team_a" else "🔴 B팀"
+                    map_info = f" - {match_data.get('map_name', '')}" if match_data.get('map_name') else ""
+                    match_status.append(f"✅ {match_num}경기: {winner} 승리{map_info}")
+                else:
+                    match_status.append(f"⏳ {match_num}경기: 진행 중")
+            
+            embed.add_field(
+                name="🏆 경기 결과",
+                value="\n".join(match_status),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="🏆 경기 결과",
+                value="아직 기록된 경기가 없습니다.",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="📈 통계",
+            value=f"**완료된 경기**: {self.session.get_completed_count()}경기\n"
+                  f"**다음 경기 번호**: {self.session.get_next_match_number()}경기",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    async def complete_recording_callback(self, interaction: discord.Interaction):
+        """기록 완료"""
+        if self.session.get_completed_count() == 0:
+            await interaction.response.send_message(
+                "❌ 완료된 경기가 없습니다.", ephemeral=True
+            )
+            return
+        
+        # 확인 메시지
+        confirm_view = ConfirmCompleteView(self.bot, self.session, self.guild_id, self)
+        
+        embed = discord.Embed(
+            title="⚠️ 기록 완료 확인",
+            description=f"총 **{self.session.get_completed_count()}경기**의 결과를 저장하고 통계를 업데이트하시겠습니까?",
+            color=0xffaa00
+        )
+        
+        embed.add_field(
+            name="💾 저장될 내용",
+            value="✅ 개인 승률 업데이트\n"
+                  "✅ 포지션별 통계 업데이트\n"
+                  "✅ 매치업 기록 저장\n"
+                  "✅ 서버 랭킹 갱신",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
+    
+    async def cancel_session_callback(self, interaction: discord.Interaction):
+        """세션 취소"""
+        confirm_view = ConfirmCancelView(self.bot, self.session, self.guild_id)
+        
+        embed = discord.Embed(
+            title="⚠️ 세션 취소 확인",
+            description="정말로 이 세션을 취소하시겠습니까?\n**저장되지 않은 모든 데이터가 사라집니다.**",
+            color=0xff4444
+        )
+        
+        if self.session.get_completed_count() > 0:
+            embed.add_field(
+                name="⚠️ 주의",
+                value=f"현재 **{self.session.get_completed_count()}경기**가 완료되었으나 저장되지 않았습니다.",
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
+    
+    async def update_dashboard(self, interaction: discord.Interaction = None):
+        """🆕 대시보드 업데이트"""
+        self.setup_buttons()
+        embed = self.create_dashboard_embed()
+        
+        if self.session.dashboard_message:
+            try:
+                await self.session.dashboard_message.edit(embed=embed, view=self)
+            except:
+                pass
+        
+        if interaction and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    def create_dashboard_embed(self) -> discord.Embed:
+        """🆕 대시보드 임베드 생성"""
+        embed = discord.Embed(
+            title="🎮 내전 결과 기록 대시보드",
+            description=f"**{self.recruitment_info['title']}**",
+            color=0x00ff88
+        )
+        
+        # 현재 상태
+        status_emoji = "🟢" if self.session.get_completed_count() > 0 else "⚪"
+        embed.add_field(
+            name=f"{status_emoji} 현재 상태",
+            value=f"**완료된 경기**: {self.session.get_completed_count()}경기\n"
+                  f"**다음 경기**: {self.session.get_next_match_number()}경기\n"
+                  f"**참가자**: {len(self.session.participants)}명",
+            inline=True
+        )
+        
+        # 최근 경기 결과 (최대 3경기)
+        recent_matches = []
+        completed_nums = sorted([num for num, data in self.session.matches.items() if data.get('completed')], reverse=True)
+        
+        for match_num in completed_nums[:3]:
+            match_data = self.session.matches[match_num]
+            winner = "🔵 A팀" if match_data['winner'] == "team_a" else "🔴 B팀"
+            recent_matches.append(f"{match_num}경기: {winner}")
+        
+        if recent_matches:
+            embed.add_field(
+                name="📋 최근 경기",
+                value="\n".join(recent_matches),
+                inline=True
+            )
+        
+        embed.add_field(
+            name="🎯 사용 방법",
+            value="**➕ 경기 추가**: 새 경기 기록\n"
+                  "**📊 진행 현황**: 상세 정보 확인\n"
+                  "**✅ 기록 완료**: 통계 저장",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"세션 ID: {self.session.session_id[:8]}... | 시작: {self.session.created_at.strftime('%H:%M')}")
+        
+        return embed
+
+class ConfirmCompleteView(discord.ui.View):
+    """🆕 기록 완료 확인 View"""
+    
+    def __init__(self, bot, session: ScrimResultSession, guild_id: str, dashboard: ScrimDashboardView):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.session = session
+        self.guild_id = guild_id
+        self.dashboard = dashboard
+    
+    @discord.ui.button(label="네, 완료합니다", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        try:
+            # 모든 완료된 매치 데이터 저장 및 통계 업데이트
+            completed_matches = [
+                num for num, data in self.session.matches.items() 
+                if data.get('completed')
+            ]
+            
+            completed_match_data = []
+            for match_num in completed_matches:
+                match_data = self.session.matches[match_num].copy()
+                match_data['guild_id'] = self.guild_id
+                match_data['recruitment_id'] = self.session.recruitment_id
+                match_data['match_number'] = match_num
+                match_data['created_by'] = self.session.created_by
+                
+                if not match_data.get('saved_to_db'):
+                    await self.bot.db_manager.save_match_result(match_data)
+                    self.session.matches[match_num]['saved_to_db'] = True
+                
+                completed_match_data.append(match_data)
+            
+            # 통계 업데이트
+            await self.bot.db_manager.update_user_statistics(self.guild_id, completed_match_data)
+            
+            # 세션 종료
+            if self.guild_id in active_sessions:
+                del active_sessions[self.guild_id]
+            
+            # 대시보드 메시지 제거
+            if self.dashboard.session.dashboard_message:
+                try:
+                    await self.dashboard.session.dashboard_message.delete()
+                except:
+                    pass
+            
+            # 완료 메시지
+            embed = discord.Embed(
+                title="🎉 내전 결과 기록 완료!",
+                description=f"총 {len(completed_match_data)}경기의 결과가 성공적으로 저장되었습니다.",
+                color=0x00ff88
+            )
+            
+            embed.add_field(
+                name="📊 업데이트 완료",
+                value="✅ 개인 승률 업데이트\n"
+                      "✅ 포지션별 통계 업데이트\n"
+                      "✅ 매치업 기록 저장\n"
+                      "✅ 서버 랭킹 갱신",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 완료 처리 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+    
+    @discord.ui.button(label="아니오, 취소", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="✅ 취소되었습니다. 계속 경기를 추가할 수 있습니다.",
+            embed=None,
+            view=None
+        )
+
+class ConfirmCancelView(discord.ui.View):
+    """🆕 세션 취소 확인 View"""
+    
+    def __init__(self, bot, session: ScrimResultSession, guild_id: str):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.session = session
+        self.guild_id = guild_id
+    
+    @discord.ui.button(label="네, 취소합니다", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 세션 삭제
+        if self.guild_id in active_sessions:
+            del active_sessions[self.guild_id]
+        
+        # 대시보드 메시지 제거
+        if self.session.dashboard_message:
+            try:
+                await self.session.dashboard_message.delete()
+            except:
+                pass
+        
+        await interaction.response.edit_message(
+            content="❌ 세션이 취소되었습니다. 저장되지 않은 데이터가 모두 삭제되었습니다.",
+            embed=None,
+            view=None
+        )
+    
+    @discord.ui.button(label="아니오, 돌아가기", style=discord.ButtonStyle.secondary, emoji="↩️")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="✅ 취소가 취소되었습니다. 세션이 계속 유지됩니다.",
+            embed=None,
+            view=None
+        )
 
 class RecruitmentSelectView(discord.ui.View):
     """마감된 내전 모집 선택 View"""
@@ -630,6 +986,53 @@ class ParticipantManagementView(discord.ui.View):
                 f"❌ 세션 생성 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
 
+    async def confirm_participants_callback(self, interaction: discord.Interaction):
+        """참가자 최종 확정 - 개선 버전"""
+        if len(self.current_participants) < 10:
+            await interaction.response.send_message(
+                f"❌ 참가자가 {len(self.current_participants)}명으로 부족합니다. (최소 10명 필요)",
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer()
+        
+        try:
+            # 🆕 기존 경기 최대 번호 확인
+            max_match = await self.bot.db_manager.get_max_match_number(self.recruitment_id)
+            next_match = (max_match or 0) + 1
+            
+            # 🆕 세션 생성 시 초기 경기 번호 전달
+            session = ScrimResultSession(
+                recruitment_id=self.recruitment_id,
+                participants=self.current_participants,
+                created_by=str(interaction.user.id),
+                initial_match_number=next_match
+            )
+            
+            # 세션 저장
+            active_sessions[self.guild_id] = session
+            
+            # 🆕 대시보드 생성 및 표시
+            dashboard = ScrimDashboardView(
+                self.bot, session, self.guild_id, self.recruitment_info
+            )
+            
+            dashboard_embed = dashboard.create_dashboard_embed()
+            dashboard_message = await interaction.followup.send(
+                embed=dashboard_embed,
+                view=dashboard
+            )
+            
+            # 대시보드 메시지 추적
+            session.dashboard_message = dashboard_message
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 세션 생성 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+
+
 class UserSelectionView(discord.ui.View):
     """유저 선택 드롭다운 (추가/제거용)"""
     
@@ -716,11 +1119,12 @@ class UserSelectionView(discord.ui.View):
 class TeamSetupView(discord.ui.View):
     """팀 구성 설정 View - A팀과 B팀 각각 선택"""
     
-    def __init__(self, bot, session: ScrimResultSession, match_number: int):
+    def __init__(self, bot, session: ScrimResultSession, match_number: int, dashboard: ScrimDashboardView):
         super().__init__(timeout=300)
         self.bot = bot
         self.session = session
         self.match_number = match_number
+        self.dashboard = dashboard
         self.selected_team_a = []
         self.selected_team_b = []
         self.current_step = "team_a"  # team_a -> team_b -> confirm
@@ -897,7 +1301,7 @@ class TeamSetupView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
     
     async def confirm_teams_callback(self, interaction: discord.Interaction):
-        """팀 구성 확인 및 저장"""
+        """팀 구성 확인 및 저장 - 개선 버전"""
         try:
             # 팀 구성 저장
             team_a_data = []
@@ -913,30 +1317,48 @@ class TeamSetupView(discord.ui.View):
             self.session.matches[self.match_number] = {
                 'team_a': team_a_data,
                 'team_b': team_b_data,
-                'team_a_positions': {},  # {user_id: position}
-                'team_b_positions': {},  # {user_id: position}
+                'team_a_positions': {},
+                'team_b_positions': {},
                 'winner': None,
                 'completed': False
             }
             
-            embed = discord.Embed(
-                title="✅ 팀 구성 완료!",
-                description=f"{self.match_number}경기 팀 구성이 저장되었습니다.",
-                color=0x00ff88
-            )
-            
-            embed.add_field(
-                name="🔄 다음 단계",
-                value=f"`/경기기록 {self.match_number}` 명령어로 경기 결과를 기록해주세요.",
-                inline=False
-            )
-            
-            await interaction.response.edit_message(embed=embed, view=None)
+            # 🆕 경기 기록으로 바로 진행
+            await self.start_match_recording(interaction)
             
         except Exception as e:
             await interaction.response.send_message(
                 f"팀 구성 저장 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
+
+    async def start_match_recording(self, interaction: discord.Interaction):
+        """🆕 팀 구성 완료 후 바로 경기 기록 시작"""
+        view = MatchResultView(self.bot, self.session, self.match_number, self.dashboard)
+        
+        match_data = self.session.matches[self.match_number]
+        embed = discord.Embed(
+            title=f"🎯 {self.match_number}경기 결과 기록",
+            description="승리팀을 선택한 후, 각 팀의 포지션을 설정해주세요.",
+            color=0x0099ff
+        )
+        
+        # 팀 구성 표시
+        team_a_list = [p['username'] for p in match_data['team_a']]
+        team_b_list = [p['username'] for p in match_data['team_b']]
+        
+        embed.add_field(
+            name="🔵 A팀",
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔴 B팀",
+            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
+            inline=True
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=view)
     
     async def retry_selection_callback(self, interaction: discord.Interaction):
         """팀 선택 다시 시작"""
@@ -959,13 +1381,14 @@ class TeamSetupView(discord.ui.View):
 class MatchResultView(discord.ui.View):
     """경기 결과 기록 View"""
     
-    def __init__(self, bot, session: ScrimResultSession, match_number: int):
+    def __init__(self, bot, session: ScrimResultSession, match_number: int, dashboard: ScrimDashboardView):
         super().__init__(timeout=600)  # 10분
         self.bot = bot
         self.session = session
         self.match_number = match_number
         self.match_data = session.matches[match_number]
-        self.current_step = "winner"  # winner -> team_a_positions -> team_b_positions -> complete
+        self.current_step = "winner" 
+        self.dashboard = dashboard
         
         # 승리팀 선택
         self.winner_select = discord.ui.Select(
@@ -1080,7 +1503,7 @@ class MatchResultView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def show_position_selection(self, interaction, team: str):
-        """포지션 선택 화면 표시 (기존 코드 유지하되 개선된 View 사용)"""
+        """포지션 선택 화면 표시"""
         team_data = self.match_data[team]
         team_name = "🔵 A팀" if team == "team_a" else "🔴 B팀"
         
@@ -1095,8 +1518,8 @@ class MatchResultView(discord.ui.View):
             winner_text = "🔵 A팀 승리" if self.match_data['winner'] == "team_a" else "🔴 B팀 승리"
             embed.add_field(name="🏆 승리팀", value=winner_text, inline=False)
         
-        # 개선된 PositionSelectionView 사용
-        view = PositionSelectionView(self.bot, self.session, self.match_number, team)
+        # 🔧 dashboard 전달
+        view = PositionSelectionView(self.bot, self.session, self.match_number, team, self.dashboard)
         
         if interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=view)
@@ -1106,16 +1529,17 @@ class MatchResultView(discord.ui.View):
 class PositionSelectionView(discord.ui.View):
     """포지션 선택 시작 View"""
     
-    def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str):
+    def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str, dashboard: ScrimDashboardView): 
         super().__init__(timeout=600)
         self.bot = bot
         self.session = session
         self.match_number = match_number
         self.team = team
+        self.dashboard = dashboard
         self.current_player_index = 0
         self.team_data = session.matches[match_number][team]
         
-        # 포지션 선택 진행 상황 추적 (개선된 부분)
+        # 포지션 선택 진행 상황 추적
         self.position_selections = {}  # {player_index: selected_position}
         
         # 포지션 선택 시작 버튼
@@ -1141,11 +1565,12 @@ class PositionSelectionView(discord.ui.View):
         
         if self.team == "team_a":
             # A팀 완료 -> B팀으로 이동
-            view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b")
+            self.current_step = "set_positions_b"
+            view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b", self.dashboard)
             await view.show_single_player_position(interaction, 0)
         else:
             # B팀 완료 -> 최종 검토 단계로
-            final_review = FinalReviewView(self.bot, self.session, self.match_number)
+            final_review = FinalReviewView(self.bot, self.session, self.match_number, self.dashboard)
             await final_review.show_final_review(interaction)
 
     async def retry_team_positions(self, interaction: discord.Interaction):
@@ -1304,12 +1729,13 @@ class PositionSelectionView(discord.ui.View):
 class FinalReviewView(discord.ui.View):
     """최종 검토 단계 View"""
     
-    def __init__(self, bot, session: ScrimResultSession, match_number: int):
+    def __init__(self, bot, session: ScrimResultSession, match_number: int, dashboard: ScrimDashboardView):
         super().__init__(timeout=600)
         self.bot = bot
         self.session = session
         self.match_number = match_number
         self.match_data = session.matches[match_number]
+        self.dashboard = dashboard
     
     async def show_final_review(self, interaction: discord.Interaction):
         """경기 최종 검토 단계"""
@@ -1405,7 +1831,7 @@ class FinalReviewView(discord.ui.View):
         self.match_data['team_b_positions'] = {}
         
         # B팀 포지션 선택 시작
-        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b")
+        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_b", self.dashboard)
         await view.show_single_player_position(interaction, 0)
 
     async def retry_a_team_positions(self, interaction: discord.Interaction):
@@ -1414,7 +1840,7 @@ class FinalReviewView(discord.ui.View):
         self.match_data['team_a_positions'] = {}
         
         # A팀 포지션 선택 시작
-        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_a")
+        view = PositionSelectionView(self.bot, self.session, self.match_number, "team_a", self.dashboard)
         await view.show_single_player_position(interaction, 0)
 
     async def retry_winner_selection(self, interaction: discord.Interaction):
@@ -1452,7 +1878,7 @@ class FinalReviewView(discord.ui.View):
     async def final_confirm_match(self, interaction: discord.Interaction):
         """포지션 설정 완료 후 맵 선택 단계로 이동 (기존 최종 확인 대신)"""
         # 🆕 맵 선택 단계로 이동
-        view = MapSelectionView(self.bot, self.session, self.match_number)
+        view = MapSelectionView(self.bot, self.session, self.match_number, self.dashboard)
         
         embed = discord.Embed(
             title="🗺️ 맵 선택 (선택사항)",
@@ -1516,14 +1942,15 @@ class FinalReviewView(discord.ui.View):
             raise
 
 class RetryPositionView(discord.ui.View):
-    """포지션 재선택 View - 간소화된 버전"""
+    """포지션 재선택 View"""
     
-    def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str):
+    def __init__(self, bot, session: ScrimResultSession, match_number: int, team: str, dashboard: ScrimDashboardView):
         super().__init__(timeout=300)
         self.bot = bot
         self.session = session
         self.match_number = match_number
         self.team = team
+        self.dashboard = dashboard
         
         # 다시 선택하기 버튼
         self.retry_button = discord.ui.Button(
@@ -1536,13 +1963,11 @@ class RetryPositionView(discord.ui.View):
     
     async def retry_selection(self, interaction: discord.Interaction):
         """포지션 재선택 시작"""
-        # 기존 선택 초기화
         position_key = f"{self.team}_positions"
         self.session.matches[self.match_number][position_key] = {}
         
-        # 개선된 PositionSelectionView로 처음부터 다시 시작
         view = PositionSelectionView(
-            self.bot, self.session, self.match_number, self.team
+            self.bot, self.session, self.match_number, self.team, self.dashboard
         )
         await view.show_single_player_position(interaction, 0)
 
@@ -1575,23 +2000,24 @@ class ScrimResultCommands(commands.Cog):
         try:
             # 마감된 내전 모집 조회
             guild_id = str(interaction.guild_id)
-            completed_recruitments = await self.bot.db_manager.get_completed_recruitments(guild_id)
-            
-            if not completed_recruitments:
-                await interaction.followup.send(
-                    "❌ 마감된 내전 모집이 없습니다.\n"
-                    "먼저 `/내전공지등록`으로 내전을 모집하고 마감시간이 지난 후 사용해주세요.",
-                    ephemeral=True
-                )
-                return
-            
+
             # 기존 활성 세션 확인
             if guild_id in active_sessions:
                 existing_session = active_sessions[guild_id]
                 await interaction.followup.send(
                     f"❌ 이미 진행 중인 결과 기록 세션이 있습니다.\n"
                     f"세션 ID: {existing_session.session_id[:8]}...\n"
-                    f"`/내전현황` 명령어로 현재 상태를 확인하거나 `/내전결과취소`로 세션을 취소할 수 있습니다.",
+                    f"기존 대시보드를 사용하거나 세션을 취소해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            completed_recruitments = await self.bot.db_manager.get_completed_recruitments(guild_id)
+            
+            if not completed_recruitments:
+                await interaction.followup.send(
+                    "❌ 마감된 내전 모집이 없습니다.\n"
+                    "먼저 `/내전공지등록`으로 내전을 모집하고 마감시간이 지난 후 사용해주세요.",
                     ephemeral=True
                 )
                 return
@@ -1611,183 +2037,183 @@ class ScrimResultCommands(commands.Cog):
                 f"❌ 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
     
-    @app_commands.command(name="팀세팅", description="[관리자] 특정 경기의 팀 구성을 설정합니다")
-    @app_commands.describe(경기번호="경기 번호 (1, 2, 3...)")
-    @app_commands.default_permissions(manage_guild=True)
-    async def setup_teams(self, interaction: discord.Interaction, 경기번호: int):
-        """팀 구성 설정"""
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
+    # @app_commands.command(name="팀세팅", description="[관리자] 특정 경기의 팀 구성을 설정합니다")
+    # @app_commands.describe(경기번호="경기 번호 (1, 2, 3...)")
+    # @app_commands.default_permissions(manage_guild=True)
+    # async def setup_teams(self, interaction: discord.Interaction, 경기번호: int):
+    #     """팀 구성 설정"""
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+    #         )
+    #         return
         
-        guild_id = str(interaction.guild_id)
+    #     guild_id = str(interaction.guild_id)
         
-        # 활성 세션 확인
-        if guild_id not in active_sessions:
-            await interaction.response.send_message(
-                "❌ 진행 중인 결과 기록 세션이 없습니다.\n"
-                "`/내전결과시작` 명령어로 먼저 세션을 시작해주세요.",
-                ephemeral=True
-            )
-            return
+    #     # 활성 세션 확인
+    #     if guild_id not in active_sessions:
+    #         await interaction.response.send_message(
+    #             "❌ 진행 중인 결과 기록 세션이 없습니다.\n"
+    #             "`/내전결과시작` 명령어로 먼저 세션을 시작해주세요.",
+    #             ephemeral=True
+    #         )
+    #         return
         
-        session = active_sessions[guild_id]
+    #     session = active_sessions[guild_id]
         
-        # 경기 번호 검증
-        if 경기번호 < 1:
-            await interaction.response.send_message(
-                "❌ 경기 번호는 1 이상이어야 합니다.", ephemeral=True
-            )
-            return
+    #     # 경기 번호 검증
+    #     if 경기번호 < 1:
+    #         await interaction.response.send_message(
+    #             "❌ 경기 번호는 1 이상이어야 합니다.", ephemeral=True
+    #         )
+    #         return
         
-        # 이미 설정된 경기 확인
-        if 경기번호 in session.matches and session.matches[경기번호].get('completed'):
-            await interaction.response.send_message(
-                f"❌ {경기번호}경기는 이미 완료된 경기입니다.\n"
-                "`/내전현황` 명령어로 현재 상태를 확인해주세요.",
-                ephemeral=True
-            )
-            return
+    #     # 이미 설정된 경기 확인
+    #     if 경기번호 in session.matches and session.matches[경기번호].get('completed'):
+    #         await interaction.response.send_message(
+    #             f"❌ {경기번호}경기는 이미 완료된 경기입니다.\n"
+    #             "`/내전현황` 명령어로 현재 상태를 확인해주세요.",
+    #             ephemeral=True
+    #         )
+    #         return
         
-        # 팀 설정 View 표시
-        view = TeamSetupView(self.bot, session, 경기번호)
-        embed = discord.Embed(
-            title=f"🔵🔴 {경기번호}경기 팀 구성",
-            description="A팀에 포함될 5명을 선택해주세요. (나머지 5명은 자동으로 B팀이 됩니다)",
-            color=0x0099ff
-        )
+    #     # 팀 설정 View 표시
+    #     view = TeamSetupView(self.bot, session, 경기번호)
+    #     embed = discord.Embed(
+    #         title=f"🔵🔴 {경기번호}경기 팀 구성",
+    #         description="A팀에 포함될 5명을 선택해주세요. (나머지 5명은 자동으로 B팀이 됩니다)",
+    #         color=0x0099ff
+    #     )
         
-        await interaction.response.send_message(embed=embed, view=view)
+    #     await interaction.response.send_message(embed=embed, view=view)
     
-    @app_commands.command(name="경기기록", description="[관리자] 경기 결과를 기록합니다")
-    @app_commands.describe(경기번호="기록할 경기 번호")
-    @app_commands.default_permissions(manage_guild=True)
-    async def record_match(self, interaction: discord.Interaction, 경기번호: int):
-        """경기 결과 기록"""
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
+    # @app_commands.command(name="경기기록", description="[관리자] 경기 결과를 기록합니다")
+    # @app_commands.describe(경기번호="기록할 경기 번호")
+    # @app_commands.default_permissions(manage_guild=True)
+    # async def record_match(self, interaction: discord.Interaction, 경기번호: int):
+    #     """경기 결과 기록"""
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+    #         )
+    #         return
         
-        guild_id = str(interaction.guild_id)
+    #     guild_id = str(interaction.guild_id)
         
-        # 활성 세션 확인
-        if guild_id not in active_sessions:
-            await interaction.response.send_message(
-                "❌ 진행 중인 결과 기록 세션이 없습니다.", ephemeral=True
-            )
-            return
+    #     # 활성 세션 확인
+    #     if guild_id not in active_sessions:
+    #         await interaction.response.send_message(
+    #             "❌ 진행 중인 결과 기록 세션이 없습니다.", ephemeral=True
+    #         )
+    #         return
         
-        session = active_sessions[guild_id]
+    #     session = active_sessions[guild_id]
         
-        # 팀 구성 확인
-        if 경기번호 not in session.matches:
-            await interaction.response.send_message(
-                f"❌ {경기번호}경기의 팀 구성이 설정되지 않았습니다.\n"
-                f"`/팀세팅 {경기번호}` 명령어로 먼저 팀을 구성해주세요.",
-                ephemeral=True
-            )
-            return
+    #     # 팀 구성 확인
+    #     if 경기번호 not in session.matches:
+    #         await interaction.response.send_message(
+    #             f"❌ {경기번호}경기의 팀 구성이 설정되지 않았습니다.\n"
+    #             f"`/팀세팅 {경기번호}` 명령어로 먼저 팀을 구성해주세요.",
+    #             ephemeral=True
+    #         )
+    #         return
         
-        # 이미 완료된 경기 확인
-        if session.matches[경기번호].get('completed'):
-            await interaction.response.send_message(
-                f"❌ {경기번호}경기는 이미 기록이 완료되었습니다.", ephemeral=True
-            )
-            return
+    #     # 이미 완료된 경기 확인
+    #     if session.matches[경기번호].get('completed'):
+    #         await interaction.response.send_message(
+    #             f"❌ {경기번호}경기는 이미 기록이 완료되었습니다.", ephemeral=True
+    #         )
+    #         return
         
-        # 경기 결과 기록 View 표시
-        view = MatchResultView(self.bot, session, 경기번호)
+    #     # 경기 결과 기록 View 표시
+    #     view = MatchResultView(self.bot, session, 경기번호)
         
-        match_data = session.matches[경기번호]
-        embed = discord.Embed(
-            title=f"🎯 {경기번호}경기 결과 기록",
-            description="승리팀을 선택한 후, 각 팀의 포지션을 설정해주세요.",
-            color=0x0099ff
-        )
+    #     match_data = session.matches[경기번호]
+    #     embed = discord.Embed(
+    #         title=f"🎯 {경기번호}경기 결과 기록",
+    #         description="승리팀을 선택한 후, 각 팀의 포지션을 설정해주세요.",
+    #         color=0x0099ff
+    #     )
         
-        # 팀 구성 표시
-        team_a_list = [p['username'] for p in match_data['team_a']]
-        team_b_list = [p['username'] for p in match_data['team_b']]
+    #     # 팀 구성 표시
+    #     team_a_list = [p['username'] for p in match_data['team_a']]
+    #     team_b_list = [p['username'] for p in match_data['team_b']]
         
-        embed.add_field(
-            name="🔵 A팀",
-            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
-            inline=True
-        )
+    #     embed.add_field(
+    #         name="🔵 A팀",
+    #         value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_a_list)]),
+    #         inline=True
+    #     )
         
-        embed.add_field(
-            name="🔴 B팀", 
-            value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
-            inline=True
-        )
+    #     embed.add_field(
+    #         name="🔴 B팀", 
+    #         value="\n".join([f"{i+1}. {name}" for i, name in enumerate(team_b_list)]),
+    #         inline=True
+    #     )
         
-        await interaction.response.send_message(embed=embed, view=view)
+    #     await interaction.response.send_message(embed=embed, view=view)
     
-    @app_commands.command(name="내전현황", description="[관리자] 현재 내전 결과 기록 진행 상황을 확인합니다")
-    @app_commands.default_permissions(manage_guild=True)
-    async def check_progress(self, interaction: discord.Interaction):
-        """진행 상황 확인"""
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
+    # @app_commands.command(name="내전현황", description="[관리자] 현재 내전 결과 기록 진행 상황을 확인합니다")
+    # @app_commands.default_permissions(manage_guild=True)
+    # async def check_progress(self, interaction: discord.Interaction):
+    #     """진행 상황 확인"""
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+    #         )
+    #         return
         
-        guild_id = str(interaction.guild_id)
+    #     guild_id = str(interaction.guild_id)
         
-        if guild_id not in active_sessions:
-            await interaction.response.send_message(
-                "❌ 진행 중인 결과 기록 세션이 없습니다.", ephemeral=True
-            )
-            return
+    #     if guild_id not in active_sessions:
+    #         await interaction.response.send_message(
+    #             "❌ 진행 중인 결과 기록 세션이 없습니다.", ephemeral=True
+    #         )
+    #         return
         
-        session = active_sessions[guild_id]
+    #     session = active_sessions[guild_id]
         
-        embed = discord.Embed(
-            title="📊 내전 결과 기록 현황",
-            color=0x0099ff
-        )
+    #     embed = discord.Embed(
+    #         title="📊 내전 결과 기록 현황",
+    #         color=0x0099ff
+    #     )
         
-        # 세션 정보
-        recruitment = await self.bot.db_manager.get_recruitment_by_id(session.recruitment_id)
-        embed.add_field(
-            name="🎮 내전 정보",
-            value=f"**제목**: {recruitment['title']}\n"
-                  f"**참가자**: {len(session.participants)}명\n"
-                  f"**세션 시작**: <t:{int(session.created_at.timestamp())}:R>",
-            inline=False
-        )
+    #     # 세션 정보
+    #     recruitment = await self.bot.db_manager.get_recruitment_by_id(session.recruitment_id)
+    #     embed.add_field(
+    #         name="🎮 내전 정보",
+    #         value=f"**제목**: {recruitment['title']}\n"
+    #               f"**참가자**: {len(session.participants)}명\n"
+    #               f"**세션 시작**: <t:{int(session.created_at.timestamp())}:R>",
+    #         inline=False
+    #     )
         
-        # 경기 진행 상황
-        if session.matches:
-            match_status = []
-            for match_num in sorted(session.matches.keys()):
-                match_data = session.matches[match_num]
-                if match_data.get('completed'):
-                    winner = "🔵 A팀" if match_data['winner'] == "team_a" else "🔴 B팀"
-                    match_status.append(f"✅ {match_num}경기: {winner} 승리")
-                else:
-                    match_status.append(f"⏳ {match_num}경기: 진행 중")
+    #     # 경기 진행 상황
+    #     if session.matches:
+    #         match_status = []
+    #         for match_num in sorted(session.matches.keys()):
+    #             match_data = session.matches[match_num]
+    #             if match_data.get('completed'):
+    #                 winner = "🔵 A팀" if match_data['winner'] == "team_a" else "🔴 B팀"
+    #                 match_status.append(f"✅ {match_num}경기: {winner} 승리")
+    #             else:
+    #                 match_status.append(f"⏳ {match_num}경기: 진행 중")
             
-            embed.add_field(
-                name="🏆 경기 결과",
-                value="\n".join(match_status) if match_status else "아직 기록된 경기가 없습니다.",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="🏆 경기 결과",
-                value="아직 설정된 경기가 없습니다.\n`/팀세팅 1` 명령어로 첫 경기를 시작하세요.",
-                inline=False
-            )
+    #         embed.add_field(
+    #             name="🏆 경기 결과",
+    #             value="\n".join(match_status) if match_status else "아직 기록된 경기가 없습니다.",
+    #             inline=False
+    #         )
+    #     else:
+    #         embed.add_field(
+    #             name="🏆 경기 결과",
+    #             value="아직 설정된 경기가 없습니다.\n`/팀세팅 1` 명령어로 첫 경기를 시작하세요.",
+    #             inline=False
+    #         )
         
-        embed.set_footer(text=f"세션 ID: {session.session_id[:8]}...")
+    #     embed.set_footer(text=f"세션 ID: {session.session_id[:8]}...")
         
-        await interaction.response.send_message(embed=embed)
+    #     await interaction.response.send_message(embed=embed)
     
     @app_commands.command(name="내전결과완료", description="[관리자] 모든 경기 기록을 완료하고 통계에 반영합니다")
     @app_commands.default_permissions(manage_guild=True)
