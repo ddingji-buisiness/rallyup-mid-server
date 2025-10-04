@@ -567,6 +567,9 @@ class ParticipantManagementView(discord.ui.View):
         await interaction.response.defer()
         
         try:
+            max_match = await self.bot.db_manager.get_max_match_number(self.recruitment_id)
+            next_match = (max_match or 0) + 1
+
             # 새 결과 기록 세션 생성
             session = ScrimResultSession(
                 recruitment_id=self.recruitment_id,
@@ -589,10 +592,17 @@ class ParticipantManagementView(discord.ui.View):
                 value=f"총 **{len(self.current_participants)}명**",
                 inline=True
             )
+
+            embed.add_field(
+                name="📊 기록 현황",
+                value=f"기존 기록된 경기: **{max_match}경기**\n"
+                    f"다음 경기 번호: **{next_match}경기**",
+                inline=True
+            )
             
             embed.add_field(
                 name="🎯 다음 단계",
-                value=f"`/팀세팅 1` 명령어로 1경기 팀 구성을 시작하세요.",
+                value=f"`/팀세팅 {next_match}` 명령어로 {next_match}경기 팀 구성을 시작하세요.",
                 inline=True
             )
             
