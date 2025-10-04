@@ -99,7 +99,8 @@ class RallyUpBot(commands.Bot):
             'commands.simple_user_management',
             'commands.wordle_game',
             'commands.inter_guild_scrim',
-            'commands.team_balancing'
+            'commands.team_balancing',
+            'commands.nickname_format_admin'
         ]
 
         for command_module in commands_to_load:
