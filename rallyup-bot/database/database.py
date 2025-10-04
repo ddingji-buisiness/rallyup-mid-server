@@ -1862,7 +1862,7 @@ class DatabaseManager:
                 await db.execute('PRAGMA journal_mode=WAL')
                 
                 async with db.execute('''
-                    SELECT user_id, username, battle_tag, main_position, 
+                    SELECT user_id, username, entry_method, battle_tag, main_position, 
                         current_season_tier, registered_at, approved_by
                     FROM registered_users 
                     WHERE guild_id = ? AND is_active = TRUE
@@ -1874,12 +1874,13 @@ class DatabaseManager:
                     return [
                         {
                             'user_id': row[0],
-                            'username': row[1], 
-                            'battle_tag': row[2],
-                            'main_position': row[3],
-                            'current_season_tier': row[4],
-                            'registered_at': row[5],
-                            'approved_by': row[6]
+                            'username': row[1],
+                            'entry_method': row[2], 
+                            'battle_tag': row[3],      
+                            'main_position': row[4],   
+                            'current_season_tier': row[5],
+                            'registered_at': row[6],   
+                            'approved_by': row[7]      
                         }
                         for row in rows
                     ]
