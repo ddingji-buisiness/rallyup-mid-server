@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import datetime
 import re
 
@@ -32,108 +32,156 @@ class SimpleUserManagementCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="정보수정", description="내 현재 시즌 티어를 업데이트합니다")
+    @app_commands.command(name="정보수정", description="내 정보를 수정합니다 (수정 시 닉네임 자동 변경)")
     @app_commands.describe(
-        현시즌티어="현재 시즌 티어 (예: 플레3, 다이아1, 골드2)",
-        메인포지션="메인 포지션 변경 (선택사항)",
-        배틀태그="배틀태그 변경 (선택사항)"
+        tier="현재 시즌 티어를 선택하세요",
+        position="메인 포지션을 선택하세요 (선택사항)",
+        battle_tag="배틀태그를 변경하려면 입력하세요 (선택사항)",
+        birth_year="출생년도 뒤 2자리 (00, 95 등) (선택사항)"
     )
-    @app_commands.choices(메인포지션=[
+    @app_commands.choices(tier=[
+        app_commands.Choice(name="언랭", value="언랭"),
+        app_commands.Choice(name="브론즈", value="브론즈"),
+        app_commands.Choice(name="실버", value="실버"),
+        app_commands.Choice(name="골드", value="골드"),
+        app_commands.Choice(name="플래티넘", value="플래티넘"),
+        app_commands.Choice(name="다이아", value="다이아"),
+        app_commands.Choice(name="마스터", value="마스터"),
+        app_commands.Choice(name="그마", value="그마"),
+        app_commands.Choice(name="챔피언", value="챔피언")
+    ])
+    @app_commands.choices(position=[
         app_commands.Choice(name="탱커", value="탱커"),
         app_commands.Choice(name="딜러", value="딜러"),
-        app_commands.Choice(name="힐러", value="힐러")
+        app_commands.Choice(name="힐러", value="힐러"),
+        app_commands.Choice(name="탱커 & 딜러", value="탱커 & 딜러"),
+        app_commands.Choice(name="탱커 & 힐러", value="탱커 & 힐러"),
+        app_commands.Choice(name="딜러 & 힐러", value="딜러 & 힐러"),
+        app_commands.Choice(name="탱커 & 딜러 & 힐러", value="탱커 & 딜러 & 힐러")
     ])
     async def update_info(
         self,
         interaction: discord.Interaction,
-        현시즌티어: str,
-        메인포지션: app_commands.Choice[str] = None,
-        배틀태그: str = None
+        tier: str,
+        position: Optional[str] = None,
+        battle_tag: Optional[str] = None,
+        birth_year: Optional[str] = None
     ):
-        user_id = str(interaction.user.id)
+        await interaction.response.defer(ephemeral=True)
         
         try:
-            # 기존 유저 정보 확인
             guild_id = str(interaction.guild_id)
-            user_data = await self.bot.db_manager.get_registered_user_info(guild_id, user_id)
-            if not user_data:
-                await interaction.response.send_message(
-                    "❌ 먼저 `/유저신청` 명령어로 등록해주세요!",
+            user_id = str(interaction.user.id)
+            
+            # 등록된 유저인지 확인
+            if not await self.bot.db_manager.is_user_registered(guild_id, user_id):
+                await interaction.followup.send(
+                    "❌ 등록되지 않은 유저입니다. `/유저신청` 명령어로 먼저 가입 신청을 해주세요.",
                     ephemeral=True
                 )
                 return
             
-            # 업데이트할 데이터 준비
-            update_data = {"current_season_tier": 현시즌티어}
-            
-            if 메인포지션:
-                update_data["main_position"] = 메인포지션.value
-            
-            if 배틀태그:
-                if not self._validate_battle_tag(배틀태그):
-                    await interaction.response.send_message(
-                        "❌ 올바른 배틀태그 형식이 아닙니다. (예: TestUser#1234)",
+            # 생년 유효성 검증
+            if birth_year:
+                if len(birth_year) != 2 or not birth_year.isdigit():
+                    await interaction.followup.send(
+                        "❌ 생년은 숫자 2자리만 입력해주세요 (예: 00, 95)",
                         ephemeral=True
                     )
                     return
-                
-                # 중복 체크
-                existing = await self.bot.db_manager.check_battle_tag_exists(배틀태그, exclude_user_id=user_id)
-                if existing:
-                    await interaction.response.send_message(
-                        f"❌ 배틀태그 `{배틀태그}`는 이미 다른 유저가 사용 중입니다.",
-                        ephemeral=True
-                    )
-                    return
-                update_data["battle_tag"] = 배틀태그
             
-            # 정보 업데이트
-            success = await self.bot.db_manager.update_user_application(user_id, update_data)
+            # 현재 정보 조회
+            current_info = await self.bot.db_manager.get_registered_user_info(guild_id, user_id)
+            
+            if not current_info:
+                await interaction.followup.send(
+                    "❌ 유저 정보를 찾을 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 변경할 정보 준비
+            updates = {
+                'current_season_tier': tier,
+                'main_position': position if position else current_info['main_position'],
+                'battle_tag': battle_tag if battle_tag else current_info['battle_tag'],
+                'birth_year': birth_year if birth_year else current_info.get('birth_year')
+            }
+            
+            # DB 업데이트
+            success = await self.bot.db_manager.update_registered_user_info(
+                guild_id, user_id, updates
+            )
             
             if not success:
-                await interaction.response.send_message(
-                    "❌ 정보 업데이트 중 오류가 발생했습니다.",
+                await interaction.followup.send(
+                    "❌ 정보 수정에 실패했습니다.",
                     ephemeral=True
                 )
                 return
+            
+            # 닉네임 자동 변경
+            nickname_result = await self.bot.db_manager._update_user_nickname(
+                interaction.user,
+                updates['main_position'],
+                updates['current_season_tier'],
+                updates['battle_tag'],
+                updates['birth_year']
+            )
             
             # 성공 메시지
             embed = discord.Embed(
-                title="✅ 정보 업데이트 완료!",
-                color=0x00ff88
+                title="✅ 정보 수정 완료",
+                description="내 정보가 성공적으로 수정되었습니다",
+                color=0x00ff88,
+                timestamp=datetime.now()
             )
             
+            # 변경 내역 표시
             changes = []
-            changes.append(f"🎯 **현재 티어:** {현시즌티어}")
-            if 메인포지션:
-                changes.append(f"🎮 **메인 포지션:** {메인포지션.value}")
-            if 배틀태그:
-                changes.append(f"🏷️ **배틀태그:** {배틀태그}")
+            if tier != current_info['current_season_tier']:
+                changes.append(f"**티어**: {current_info['current_season_tier']} → {tier}")
             
-            embed.add_field(
-                name="📝 변경된 정보",
-                value="\n".join(changes),
-                inline=False
-            )
+            if position and position != current_info['main_position']:
+                changes.append(f"**포지션**: {current_info['main_position']} → {position}")
             
-            # 내전 통계 미리보기
-            stats = await self.bot.db_manager.get_detailed_user_stats(user_id, str(interaction.guild_id))
-            if stats and stats['total_games'] > 0:
+            if battle_tag and battle_tag != current_info['battle_tag']:
+                changes.append(f"**배틀태그**: {current_info['battle_tag']} → {battle_tag}")
+            
+            if birth_year and birth_year != current_info.get('birth_year'):
+                old_birth = current_info.get('birth_year', '미설정')
+                changes.append(f"**생년**: {old_birth} → {birth_year}")
+            
+            if changes:
                 embed.add_field(
-                    name="📊 내전 통계",
-                    value=f"총 **{stats['total_games']}경기** | "
-                          f"승률 **{stats['overall_winrate']:.1f}%** | "
-                          f"({stats['wins']}승 {stats['losses']}패)",
+                    name="📝 변경 내역",
+                    value="\n".join(changes),
                     inline=False
                 )
             
-            embed.set_footer(text="내전 참여 시 자동으로 세부 통계가 업데이트됩니다!")
+            # 닉네임 변경 결과
+            embed.add_field(
+                name="🔄 닉네임 자동 변경",
+                value=nickname_result,
+                inline=False
+            )
             
-            await interaction.response.send_message(embed=embed)
+            embed.add_field(
+                name="📋 최종 정보",
+                value=f"**배틀태그**: {updates['battle_tag']}\n"
+                      f"**포지션**: {updates['main_position']}\n"
+                      f"**현시즌 티어**: {updates['current_season_tier']}\n"
+                      f"**생년**: {updates['birth_year'] or '미설정'}",
+                inline=False
+            )
+            
+            embed.set_footer(text="내 정보 확인: /내정보")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
             
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ 정보 업데이트 중 오류: {str(e)}",
+            await interaction.followup.send(
+                f"❌ 정보 수정 중 오류가 발생했습니다: {str(e)}",
                 ephemeral=True
             )
 
@@ -1737,35 +1785,7 @@ class SimpleUserManagementCog(commands.Cog):
             app_commands.Choice(name=map_name, value=map_name)
             for map_name in matching_maps[:25]
         ]
-
-    # 자동완성 함수들
-    @update_info.autocomplete('현시즌티어')
-    async def tier_autocomplete(
-        self, 
-        interaction: discord.Interaction, 
-        current: str
-    ) -> List[app_commands.Choice[str]]:
-        tiers = [
-            "브론즈5", "브론즈4", "브론즈3", "브론즈2", "브론즈1",
-            "실버5", "실버4", "실버3", "실버2", "실버1", 
-            "골드5", "골드4", "골드3", "골드2", "골드1",
-            "플레5", "플레4", "플레3", "플레2", "플레1",
-            "다이아5", "다이아4", "다이아3", "다이아2", "다이아1", 
-            "마스터5", "마스터4", "마스터3", "마스터2", "마스터1",
-            "그마5", "그마4", "그마3", "그마2", "그마1",
-            "챔피언", "배치안함"
-        ]
-        
-        if current:
-            matching = [tier for tier in tiers if current.lower() in tier.lower()]
-        else:
-            matching = tiers[:25]
-        
-        return [
-            app_commands.Choice(name=tier, value=tier)
-            for tier in matching[:25]
-        ]
-
+    
     # 헬퍼 메서드들
     def _validate_battle_tag(self, battle_tag: str) -> bool:
         """배틀태그 형식 검증"""

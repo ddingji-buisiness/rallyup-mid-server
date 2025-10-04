@@ -15,6 +15,7 @@ class OnePageApplicationView(discord.ui.View):
         self.entry_method = None
         self.battle_tag = None
         self.main_position = None
+        self.birth_year = None
         self.previous_tier = None
         self.current_tier = None
         self.highest_tier = None
@@ -26,7 +27,7 @@ class OnePageApplicationView(discord.ui.View):
         
         # 텍스트 입력 버튼 (유입경로, 배틀태그)
         text_input_btn = discord.ui.Button(
-            label="📝 유입경로 & 배틀태그 입력",
+            label="📝 기본정보 입력 (유입경로/배틀태그/생년)",
             style=discord.ButtonStyle.primary,
             row=0
         )
@@ -146,6 +147,7 @@ class OnePageApplicationView(discord.ui.View):
         status = [
             f"{'✅' if self.entry_method else '⬜'} 유입경로: {self.entry_method or '미입력'}",
             f"{'✅' if self.battle_tag else '⬜'} 배틀태그: {self.battle_tag or '미입력'}",
+            f"{'✅' if self.birth_year else '⬜'} 생년(뒤2자리): {self.birth_year or '미입력'}",
             f"{'✅' if self.main_position else '⬜'} 메인 포지션: {self.main_position or '미선택'}",
             f"{'✅' if self.previous_tier else '⬜'} 전시즌 티어: {self.previous_tier or '미선택'}",
             f"{'✅' if self.current_tier else '⬜'} 현시즌 티어: {self.current_tier or '미선택'}",
@@ -187,7 +189,7 @@ class OnePageApplicationView(discord.ui.View):
             
             success = await self.bot.db_manager.create_user_application(
                 guild_id, user_id, username,
-                self.entry_method, self.battle_tag, self.main_position,
+                self.entry_method, self.battle_tag, self.birth_year, self.main_position,
                 self.previous_tier, self.current_tier, self.highest_tier
             )
             
@@ -203,6 +205,7 @@ class OnePageApplicationView(discord.ui.View):
                     name="📋 신청 내용",
                     value=f"**유입경로**: {self.entry_method}\n"
                           f"**배틀태그**: {self.battle_tag}\n"
+                          f"**생년(뒤2자리)**: {self.birth_year}\n"
                           f"**포지션**: {self.main_position}\n"
                           f"**전시즌**: {self.previous_tier}\n"
                           f"**현시즌**: {self.current_tier}\n"
@@ -224,6 +227,7 @@ class OnePageApplicationView(discord.ui.View):
                     application_data = {
                         'entry_method': self.entry_method,
                         'battle_tag': self.battle_tag,
+                        'birth_year': self.birth_year,
                         'main_position': self.main_position,
                         'previous_season_tier': self.previous_tier,
                         'current_season_tier': self.current_tier,
@@ -347,16 +351,36 @@ class QuickTextModal(discord.ui.Modal, title="텍스트 정보 입력"):
         style=discord.TextStyle.short,
         max_length=50
     )
+
+    birth_year = discord.ui.TextInput(
+        label="출생년도 뒤 2자리",
+        placeholder="예: 00 (2000년생), 95 (1995년생)",
+        style=discord.TextStyle.short,
+        min_length=2,
+        max_length=2,
+        required=True
+    )
     
     def __init__(self, parent_view: OnePageApplicationView):
         super().__init__()
         self.parent_view = parent_view
     
     async def on_submit(self, interaction: discord.Interaction):
+        if not self.birth_year.value.isdigit():
+            await interaction.response.send_message(
+                "❌ 출생년도는 숫자 2자리만 입력해주세요 (예: 00, 95)",
+                ephemeral=True
+            )
+            return
+        
         self.parent_view.entry_method = self.entry_method.value
         self.parent_view.battle_tag = self.battle_tag.value
-        
-        await self.parent_view.update_view(interaction)
+        self.parent_view.birth_year = self.birth_year.value
+
+        await interaction.response.edit_message(
+            embed=self.parent_view._create_status_embed(),
+            view=self.parent_view
+        )
 
 class UserApplicationCommands(commands.Cog):
     def __init__(self, bot):
@@ -450,6 +474,7 @@ class UserApplicationCommands(commands.Cog):
 
         view = OnePageApplicationView(self.bot)
         embed = view._create_status_embed()
+
         if reapplication_note:
             embed.description = reapplication_note + (embed.description or "")
 

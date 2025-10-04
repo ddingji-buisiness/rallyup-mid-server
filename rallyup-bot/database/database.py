@@ -65,6 +65,7 @@ class DatabaseManager:
                     guild_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     username TEXT NOT NULL,
+                    birth_year TEXT NOT NULL,
                     entry_method TEXT NOT NULL,
                     battle_tag TEXT NOT NULL,
                     main_position TEXT NOT NULL,
@@ -87,6 +88,7 @@ class DatabaseManager:
                     guild_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     username TEXT NOT NULL,
+                    birth_year TEXT NOT NULL,
                     entry_method TEXT NOT NULL,
                     battle_tag TEXT NOT NULL,
                     main_position TEXT NOT NULL,
@@ -99,6 +101,14 @@ class DatabaseManager:
                     wordle_points INTEGER DEFAULT 10000,
                     daily_points_claimed TEXT,
                     UNIQUE(guild_id, user_id)
+                )
+            ''')
+
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS nickname_format_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    format_template TEXT,
+                    required_fields TEXT
                 )
             ''')
 
@@ -1462,23 +1472,23 @@ class DatabaseManager:
                 return row[0] if row else None
             
     async def create_user_application(self, guild_id: str, user_id: str, username: str, 
-                                    entry_method: str, battle_tag: str, main_position: str,
+                                    entry_method: str, battle_tag: str, birth_year: str, main_position: str,
                                     previous_season_tier: str, current_season_tier: str, highest_tier: str) -> bool:
         """사용자 신청 생성 - 재신청 허용 (UPSERT 방식)"""
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute('PRAGMA journal_mode=WAL')
             
             try:
-                # 기존 레코드가 있으면 업데이트, 없으면 삽입
                 await db.execute('''
                     INSERT INTO user_applications 
-                    (guild_id, user_id, username, entry_method, battle_tag, main_position, 
+                    (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 
                     previous_season_tier, current_season_tier, highest_tier, status, applied_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
                     ON CONFLICT(guild_id, user_id) DO UPDATE SET
                         username = excluded.username,
                         entry_method = excluded.entry_method,
                         battle_tag = excluded.battle_tag,
+                        birth_year = excluded.birth_year,
                         main_position = excluded.main_position,
                         previous_season_tier = excluded.previous_season_tier,
                         current_season_tier = excluded.current_season_tier,
@@ -1488,7 +1498,7 @@ class DatabaseManager:
                         reviewed_at = NULL,
                         reviewed_by = NULL,
                         admin_note = NULL
-                ''', (guild_id, user_id, username, entry_method, battle_tag, main_position,
+                ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position,
                     previous_season_tier, current_season_tier, highest_tier))
                 
                 await db.commit()
@@ -1523,6 +1533,35 @@ class DatabaseManager:
                     columns = [description[0] for description in cursor.description]
                     return dict(zip(columns, row))
                 return None
+            
+    async def update_registered_user_info(self, guild_id: str, user_id: str, updates: dict) -> bool:
+        """등록된 유저 정보 업데이트"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                await db.execute('''
+                    UPDATE registered_users
+                    SET current_season_tier = ?,
+                        main_position = ?,
+                        battle_tag = ?,
+                        birth_year = ?
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (
+                    updates['current_season_tier'],
+                    updates['main_position'],
+                    updates['battle_tag'],
+                    updates['birth_year'],
+                    guild_id,
+                    user_id
+                ))
+                
+                await db.commit()
+                return True
+                
+            except Exception as e:
+                print(f"❌ 유저 정보 업데이트 실패: {e}")
+                return False
 
     async def get_pending_applications(self, guild_id: str) -> List[dict]:
         """대기 중인 신청 목록 조회"""
@@ -1707,40 +1746,40 @@ class DatabaseManager:
 
             return True, combined_result
 
-    async def _update_user_nickname(self, member: discord.Member, position: str, tier: str, battle_tag: str) -> str:
-        """유저 닉네임 업데이트 (배틀태그 기반)"""
-        try:
-            # 포지션 축약 (복합 포지션 처리)
-            position_short = self._shorten_position(position)
+    # async def _update_user_nickname(self, member: discord.Member, position: str, tier: str, battle_tag: str) -> str:
+    #     """유저 닉네임 업데이트 (배틀태그 기반)"""
+    #     try:
+    #         # 포지션 축약 (복합 포지션 처리)
+    #         position_short = self._shorten_position(position)
             
-            # 새로운 닉네임 생성: 배틀태그 / 포지션 / 티어
-            new_nickname = f"{battle_tag}/{position_short}/{tier}"
+    #         # 새로운 닉네임 생성: 배틀태그 / 포지션 / 티어
+    #         new_nickname = f"{battle_tag}/{position_short}/{tier}"
             
-            # 32자 제한 (Discord 닉네임 길이 제한)
-            if len(new_nickname) > 32:
-                # 배틀태그에서 #태그 부분 제거해서 다시 시도
-                battle_name = battle_tag.split('#')[0] if '#' in battle_tag else battle_tag
-                new_nickname = f"{battle_name}/{position_short}/{tier}"
+    #         # 32자 제한 (Discord 닉네임 길이 제한)
+    #         if len(new_nickname) > 32:
+    #             # 배틀태그에서 #태그 부분 제거해서 다시 시도
+    #             battle_name = battle_tag.split('#')[0] if '#' in battle_tag else battle_tag
+    #             new_nickname = f"{battle_name}/{position_short}/{tier}"
                 
-                if len(new_nickname) > 32:
-                    # 그래도 길면 배틀태그를 더 줄임
-                    max_battle_length = 32 - len(f"/{position_short}/{tier}")
-                    if max_battle_length > 3:  # 최소 3자는 남겨둠
-                        battle_name = battle_name[:max_battle_length]
-                        new_nickname = f"{battle_name}/{position_short}/{tier}"
-                    else:
-                        # 그래도 길면 포지션만 표시
-                        new_nickname = f"{battle_name[:15]}/{position_short}"
+    #             if len(new_nickname) > 32:
+    #                 # 그래도 길면 배틀태그를 더 줄임
+    #                 max_battle_length = 32 - len(f"/{position_short}/{tier}")
+    #                 if max_battle_length > 3:  # 최소 3자는 남겨둠
+    #                     battle_name = battle_name[:max_battle_length]
+    #                     new_nickname = f"{battle_name}/{position_short}/{tier}"
+    #                 else:
+    #                     # 그래도 길면 포지션만 표시
+    #                     new_nickname = f"{battle_name[:15]}/{position_short}"
             
-            await member.edit(nick=new_nickname)
-            return f"닉네임이 '{new_nickname}'으로 변경되었습니다."
+    #         await member.edit(nick=new_nickname)
+    #         return f"닉네임이 '{new_nickname}'으로 변경되었습니다."
             
-        except discord.Forbidden:
-            return "닉네임 변경 권한이 부족합니다. (봇 권한 확인 필요)"
-        except discord.HTTPException as e:
-            return f"닉네임 변경 실패: {str(e)}"
-        except Exception as e:
-            return f"닉네임 변경 중 오류: {str(e)}"
+    #     except discord.Forbidden:
+    #         return "닉네임 변경 권한이 부족합니다. (봇 권한 확인 필요)"
+    #     except discord.HTTPException as e:
+    #         return f"닉네임 변경 실패: {str(e)}"
+    #     except Exception as e:
+    #         return f"닉네임 변경 중 오류: {str(e)}"
 
     async def delete_user_registration(self, guild_id: str, user_id: str) -> tuple[bool, dict]:
         """등록된 유저 삭제 (재신청 가능하도록)"""
@@ -6708,3 +6747,209 @@ class DatabaseManager:
                     'total_eligible_players': total_players,
                     'distribution': distribution
                 }
+
+    async def get_nickname_format(self, guild_id: str) -> dict:
+        """서버의 닉네임 포맷 설정 조회"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            async with db.execute('''
+                SELECT format_template, required_fields 
+                FROM nickname_format_settings 
+                WHERE guild_id = ?
+            ''', (guild_id,)) as cursor:
+                row = await cursor.fetchone()
+                
+                if row:
+                    import json
+                    return {
+                        'format_template': row[0],
+                        'required_fields': json.loads(row[1]) if row[1] else []
+                    }
+                else:
+                    # 기본 포맷 반환 (기존 방식)
+                    return {
+                        'format_template': '{battle_tag}/{position}/{tier}',
+                        'required_fields': ['battle_tag', 'position', 'tier']
+                    }
+
+    async def set_nickname_format(self, guild_id: str, format_template: str, required_fields: list) -> bool:
+        """서버의 닉네임 포맷 설정 저장"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            try:
+                import json
+                await db.execute('''
+                    INSERT INTO nickname_format_settings (guild_id, format_template, required_fields)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        format_template = excluded.format_template,
+                        required_fields = excluded.required_fields
+                ''', (guild_id, format_template, json.dumps(required_fields)))
+                
+                await db.commit()
+                return True
+            except Exception as e:
+                print(f"❌ 닉네임 포맷 설정 실패: {e}")
+                return False
+
+    def _generate_nickname_from_template(self, template: str, data: dict) -> str:
+        """템플릿 기반 닉네임 생성
+        
+        Args:
+            template: 예) "{nickname} {birth_year} {tier}"
+            data: 예) {"nickname": "헤븐", "birth_year": "00", "tier": "그마"}
+        
+        Returns:
+            생성된 닉네임: "헤븐 00 그마"
+        """
+        try:
+            # 사용 가능한 필드 매핑
+            field_map = {
+                'nickname': data.get('nickname', ''),
+                'battle_tag': data.get('battle_tag', ''),
+                'birth_year': data.get('birth_year', ''),
+                'position': self._get_position_short(data.get('position', '')),
+                'tier': data.get('tier', ''),
+                'previous_tier': data.get('previous_tier', ''),
+                'highest_tier': data.get('highest_tier', '')
+            }
+            
+            # 템플릿 치환
+            nickname = template
+            for field_name, field_value in field_map.items():
+                nickname = nickname.replace(f'{{{field_name}}}', str(field_value))
+            
+            # 최대 32자 제한 (Discord 닉네임 제한)
+            if len(nickname) > 32:
+                nickname = nickname[:32]
+            
+            return nickname.strip()
+            
+        except Exception as e:
+            print(f"❌ 닉네임 생성 실패: {e}")
+            # 실패 시 배틀태그 반환
+            return data.get('battle_tag', 'Unknown')[:32]
+
+    def _get_position_short(self, position: str) -> str:
+        """포지션 축약"""
+        position_map = {
+            "탱커": "탱",
+            "딜러": "드",
+            "힐러": "힐",
+            "탱커 & 딜러": "탱드",
+            "탱커 & 힐러": "탱힐",
+            "딜러 & 힐러": "드힐",
+            "탱커 & 딜러 & 힐러": "탱드힐"
+        }
+        return position_map.get(position, position)
+
+    async def _update_user_nickname(self, discord_member: discord.Member, 
+                                main_position: str, current_tier: str, 
+                                battle_tag: str, birth_year: str = None) -> str:
+        """유저 닉네임 자동 변경 (템플릿 기반)"""
+        try:
+            guild_id = str(discord_member.guild.id)
+            
+            # 서버 닉네임 포맷 가져오기
+            format_settings = await self.get_nickname_format(guild_id)
+            template = format_settings['format_template']
+            
+            # 배틀태그에서 닉네임 추출 (# 앞부분)
+            nickname = battle_tag.split('#')[0] if '#' in battle_tag else battle_tag
+            
+            # 데이터 준비
+            nickname_data = {
+                'nickname': nickname,
+                'battle_tag': battle_tag,
+                'birth_year': birth_year or '',
+                'position': main_position,
+                'tier': current_tier,
+                'previous_tier': '',  # 필요시 추가
+                'highest_tier': ''    # 필요시 추가
+            }
+            
+            # 템플릿으로 닉네임 생성
+            new_nickname = self._generate_nickname_from_template(template, nickname_data)
+            
+            # Discord 닉네임 변경 시도
+            old_nickname = discord_member.display_name
+            
+            try:
+                await discord_member.edit(nick=new_nickname)
+                return f"✅ 닉네임 변경: {old_nickname} → {new_nickname}"
+            except discord.Forbidden:
+                return f"❌ 닉네임 변경 실패: 권한 부족 (봇 역할이 대상 유저보다 낮음)"
+            except discord.HTTPException as e:
+                return f"❌ 닉네임 변경 실패: {str(e)}"
+                
+        except Exception as e:
+            return f"❌ 닉네임 변경 중 오류: {str(e)}"
+
+    async def approve_user_application_with_nickname(self, guild_id: str, user_id: str, admin_id: str, 
+                                                    discord_member: discord.Member, admin_note: str = None) -> tuple[bool, str]:
+        """유저 신청 승인 및 닉네임 자동 변경 (생년 포함)"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 신청 정보 가져오기 (birth_year 포함)
+            async with db.execute('''
+                SELECT guild_id, user_id, username, entry_method, battle_tag, 
+                    main_position, previous_season_tier, current_season_tier, 
+                    highest_tier, birth_year
+                FROM user_applications 
+                WHERE guild_id = ? AND user_id = ? AND status = 'pending'
+            ''', (guild_id, user_id)) as cursor:
+                application = await cursor.fetchone()
+                if not application:
+                    return False, "신청을 찾을 수 없습니다."
+            
+            # 신청 상태 업데이트
+            await db.execute('''
+                UPDATE user_applications 
+                SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, 
+                    reviewed_by = ?, admin_note = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (admin_id, admin_note, guild_id, user_id))
+            
+            # registered_users에 추가 (birth_year 포함)
+            await db.execute('''
+                INSERT INTO registered_users 
+                (guild_id, user_id, username, entry_method, battle_tag, main_position, 
+                previous_season_tier, current_season_tier, highest_tier, birth_year,
+                approved_by, is_active, registered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    username = excluded.username,
+                    entry_method = excluded.entry_method,
+                    battle_tag = excluded.battle_tag,
+                    main_position = excluded.main_position,
+                    previous_season_tier = excluded.previous_season_tier,
+                    current_season_tier = excluded.current_season_tier,
+                    highest_tier = excluded.highest_tier,
+                    birth_year = excluded.birth_year,
+                    approved_by = excluded.approved_by,
+                    is_active = TRUE,
+                    registered_at = CURRENT_TIMESTAMP
+            ''', (application[0], application[1], application[2], application[3], 
+                application[4], application[5], application[6], application[7], 
+                application[8], application[9], admin_id))
+            
+            await db.commit()
+            
+            # 닉네임 변경 (birth_year 전달)
+            nickname_result = await self._update_user_nickname(
+                discord_member, 
+                application[5],  # main_position
+                application[7],  # current_season_tier  
+                application[4],  # battle_tag
+                application[9]   # birth_year
+            )
+            
+            # 역할 변경
+            role_result = await self._update_user_roles_conditional(discord_member, guild_id)
+            
+            combined_result = f"{nickname_result}\n{role_result}"
+            
+            return True, combined_result
