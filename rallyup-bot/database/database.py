@@ -35,6 +35,25 @@ class DatabaseManager:
             await self.create_bamboo_tables()
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
+
+            # user_battle_tags 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_battle_tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    battle_tag TEXT NOT NULL,
+                    account_type TEXT DEFAULT 'sub',
+                    is_primary BOOLEAN DEFAULT FALSE,
+                    rank_info TEXT,
+                    platform TEXT DEFAULT 'pc',
+                    region TEXT DEFAULT 'asia',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, user_id, battle_tag)
+                )
+            ''')
+
             await self.migrate_battle_tags_to_new_table()
 
             # users 테이블
@@ -111,24 +130,6 @@ class DatabaseManager:
                     guild_id TEXT PRIMARY KEY,
                     format_template TEXT,
                     required_fields TEXT
-                )
-            ''')
-
-            # user_battle_tags 테이블
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS user_battle_tags (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    battle_tag TEXT NOT NULL,
-                    account_type TEXT DEFAULT 'sub',
-                    is_primary BOOLEAN DEFAULT FALSE,
-                    rank_info TEXT,
-                    platform TEXT DEFAULT 'pc',
-                    region TEXT DEFAULT 'asia',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(guild_id, user_id, battle_tag)
                 )
             ''')
 
