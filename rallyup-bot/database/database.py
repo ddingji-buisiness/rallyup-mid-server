@@ -35,6 +35,7 @@ class DatabaseManager:
             await self.create_bamboo_tables()
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
+            await self.migrate_battle_tags_to_new_table()
 
             # users 테이블
             await db.execute('''

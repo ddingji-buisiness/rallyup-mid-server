@@ -56,8 +56,6 @@ class RallyUpBot(commands.Bot):
             await self.db_manager.initialize()
             logger.info("데이터베이스 초기화 완료")
 
-            await self.db_manager.migrate_battle_tags_to_new_table()
-
             await self.load_commands()
 
             from utils.battle_tag_logger import BattleTagLogger
