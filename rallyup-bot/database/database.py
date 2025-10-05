@@ -7185,33 +7185,90 @@ class DatabaseManager:
             return False
 
     async def migrate_battle_tags_to_new_table(self):
-        """
-        기존 registered_users.battle_tag → user_battle_tags 마이그레이션
-        봇 시작 시 자동 실행
-        """
+        """기존 registered_users.battle_tag → user_battle_tags 마이그레이션"""
         try:
+            print("=" * 60)
+            print("🔍 [마이그레이션] 시작...")
+            
             async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
                 await db.execute('PRAGMA journal_mode=WAL')
                 
-                # 마이그레이션 필요 여부 확인
+                # 1️⃣ 테이블 존재 확인
+                print("📋 [마이그레이션] 1단계: 테이블 존재 확인")
+                async with db.execute('''
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name IN ('user_battle_tags', 'registered_users')
+                    ORDER BY name
+                ''') as cursor:
+                    tables = await cursor.fetchall()
+                    table_names = [row[0] for row in tables]
+                    print(f"   존재하는 테이블: {table_names}")
+                    
+                    if 'user_battle_tags' not in table_names:
+                        print("❌ [마이그레이션] user_battle_tags 테이블이 없습니다!")
+                        return False
+                        
+                    if 'registered_users' not in table_names:
+                        print("❌ [마이그레이션] registered_users 테이블이 없습니다!")
+                        return False
+                
+                # 2️⃣ registered_users 컬럼 확인
+                print("📋 [마이그레이션] 2단계: registered_users 컬럼 확인")
+                async with db.execute('PRAGMA table_info(registered_users)') as cursor:
+                    columns = await cursor.fetchall()
+                    column_names = [col[1] for col in columns]
+                    print(f"   registered_users 컬럼: {column_names}")
+                    
+                    if 'battle_tag' not in column_names:
+                        print("❌ [마이그레이션] battle_tag 컬럼이 없습니다!")
+                        return False
+                
+                # 3️⃣ 마이그레이션 대상 조회
+                print("📋 [마이그레이션] 3단계: 마이그레이션 대상 조회")
+                async with db.execute('''
+                    SELECT guild_id, user_id, battle_tag, username
+                    FROM registered_users 
+                    WHERE battle_tag IS NOT NULL 
+                    AND battle_tag != ''
+                    AND is_active = TRUE
+                ''') as cursor:
+                    all_users = await cursor.fetchall()
+                    print(f"   registered_users에서 배틀태그 있는 유저: {len(all_users)}명")
+                    
+                    if all_users:
+                        for user in all_users[:3]:  # 처음 3명만 출력
+                            print(f"   - {user[3]} ({user[2]})")
+                
+                # 4️⃣ 기존 user_battle_tags 데이터 확인
+                print("📋 [마이그레이션] 4단계: 기존 데이터 확인")
+                async with db.execute('SELECT COUNT(*) FROM user_battle_tags') as cursor:
+                    existing_count = (await cursor.fetchone())[0]
+                    print(f"   user_battle_tags에 이미 있는 데이터: {existing_count}개")
+                
+                # 5️⃣ 마이그레이션 필요 여부 판단
+                print("📋 [마이그레이션] 5단계: 중복 제외 대상 확인")
                 async with db.execute('''
                     SELECT COUNT(*) FROM registered_users 
                     WHERE battle_tag IS NOT NULL AND battle_tag != ''
+                    AND is_active = TRUE
                     AND NOT EXISTS (
                         SELECT 1 FROM user_battle_tags 
                         WHERE user_battle_tags.guild_id = registered_users.guild_id 
                         AND user_battle_tags.user_id = registered_users.user_id
+                        AND user_battle_tags.battle_tag = registered_users.battle_tag
                     )
                 ''') as cursor:
-                    need_migration = (await cursor.fetchone())[0] > 0
+                    need_migration = (await cursor.fetchone())[0]
+                    print(f"   실제 마이그레이션 필요: {need_migration}개")
+                    
+                    if need_migration == 0:
+                        print("✅ [마이그레이션] 불필요 (이미 완료됨)")
+                        return True
                 
-                if not need_migration:
-                    print("✅ 배틀태그 마이그레이션 불필요 (이미 완료됨)")
-                    return True
-                
-                # 마이그레이션 실행
+                # 6️⃣ 마이그레이션 실행
+                print(f"📋 [마이그레이션] 6단계: {need_migration}개 데이터 이동 시작")
                 async with db.execute('''
-                    SELECT guild_id, user_id, battle_tag, birth_year
+                    SELECT guild_id, user_id, battle_tag, username
                     FROM registered_users 
                     WHERE battle_tag IS NOT NULL AND battle_tag != ''
                     AND is_active = TRUE
@@ -7219,8 +7276,8 @@ class DatabaseManager:
                     users = await cursor.fetchall()
                 
                 migrated_count = 0
-                for guild_id, user_id, battle_tag, birth_year in users:
-                    # user_battle_tags에 없는 경우만 추가
+                for guild_id, user_id, battle_tag, username in users:
+                    # 중복 체크
                     async with db.execute('''
                         SELECT COUNT(*) FROM user_battle_tags
                         WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
@@ -7228,21 +7285,28 @@ class DatabaseManager:
                         already_exists = (await check_cursor.fetchone())[0] > 0
                     
                     if not already_exists:
+                        print(f"   ✅ 추가: {username} ({battle_tag})")
                         await db.execute('''
                             INSERT INTO user_battle_tags 
                             (guild_id, user_id, battle_tag, account_type, is_primary)
                             VALUES (?, ?, ?, 'main', TRUE)
                         ''', (guild_id, user_id, battle_tag))
                         migrated_count += 1
+                    else:
+                        print(f"   ⏭️  건너뜀: {username} (이미 존재)")
                 
                 await db.commit()
-                print(f"✅ 배틀태그 마이그레이션 완료: {migrated_count}개 계정 이동")
+                print("=" * 60)
+                print(f"🎉 [마이그레이션] 완료: {migrated_count}개 계정 이동")
+                print("=" * 60)
                 return True
                 
         except Exception as e:
-            print(f"❌ 배틀태그 마이그레이션 실패: {e}")
+            print("=" * 60)
+            print(f"❌ [마이그레이션] 실패: {e}")
             import traceback
-            print(traceback.format_exc())
+            traceback.print_exc()
+            print("=" * 60)
             return False
 
 
