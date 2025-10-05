@@ -104,11 +104,30 @@ class DatabaseManager:
                 )
             ''')
 
+            # nickname_format_settings 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS nickname_format_settings (
                     guild_id TEXT PRIMARY KEY,
                     format_template TEXT,
                     required_fields TEXT
+                )
+            ''')
+
+            # user_battle_tags 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_battle_tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    battle_tag TEXT NOT NULL,
+                    account_type TEXT DEFAULT 'sub',
+                    is_primary BOOLEAN DEFAULT FALSE,
+                    rank_info TEXT,
+                    platform TEXT DEFAULT 'pc',
+                    region TEXT DEFAULT 'asia',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, user_id, battle_tag)
                 )
             ''')
 
@@ -323,7 +342,9 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_registered_users_guild ON registered_users(guild_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_guild ON server_admins(guild_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
-        
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_user ON user_battle_tags(guild_id, user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_tag ON user_battle_tags(battle_tag)')
+
             await db.commit()
 
     async def initialize_clan_tables(self):
@@ -1760,41 +1781,6 @@ class DatabaseManager:
             combined_result = f"{nickname_result}\n{role_result}"
 
             return True, combined_result
-
-    # async def _update_user_nickname(self, member: discord.Member, position: str, tier: str, battle_tag: str) -> str:
-    #     """유저 닉네임 업데이트 (배틀태그 기반)"""
-    #     try:
-    #         # 포지션 축약 (복합 포지션 처리)
-    #         position_short = self._shorten_position(position)
-            
-    #         # 새로운 닉네임 생성: 배틀태그 / 포지션 / 티어
-    #         new_nickname = f"{battle_tag}/{position_short}/{tier}"
-            
-    #         # 32자 제한 (Discord 닉네임 길이 제한)
-    #         if len(new_nickname) > 32:
-    #             # 배틀태그에서 #태그 부분 제거해서 다시 시도
-    #             battle_name = battle_tag.split('#')[0] if '#' in battle_tag else battle_tag
-    #             new_nickname = f"{battle_name}/{position_short}/{tier}"
-                
-    #             if len(new_nickname) > 32:
-    #                 # 그래도 길면 배틀태그를 더 줄임
-    #                 max_battle_length = 32 - len(f"/{position_short}/{tier}")
-    #                 if max_battle_length > 3:  # 최소 3자는 남겨둠
-    #                     battle_name = battle_name[:max_battle_length]
-    #                     new_nickname = f"{battle_name}/{position_short}/{tier}"
-    #                 else:
-    #                     # 그래도 길면 포지션만 표시
-    #                     new_nickname = f"{battle_name[:15]}/{position_short}"
-            
-    #         await member.edit(nick=new_nickname)
-    #         return f"닉네임이 '{new_nickname}'으로 변경되었습니다."
-            
-    #     except discord.Forbidden:
-    #         return "닉네임 변경 권한이 부족합니다. (봇 권한 확인 필요)"
-    #     except discord.HTTPException as e:
-    #         return f"닉네임 변경 실패: {str(e)}"
-    #     except Exception as e:
-    #         return f"닉네임 변경 중 오류: {str(e)}"
 
     async def delete_user_registration(self, guild_id: str, user_id: str) -> tuple[bool, dict]:
         """등록된 유저 삭제 (재신청 가능하도록)"""
@@ -6969,3 +6955,485 @@ class DatabaseManager:
             combined_result = f"{nickname_result}\n{role_result}"
             
             return True, combined_result
+
+    async def add_battle_tag(self, guild_id: str, user_id: str, battle_tag: str, 
+                            account_type: str = 'sub', rank_info: dict = None) -> bool:
+        """배틀태그 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 이미 존재하는지 확인
+                async with db.execute('''
+                    SELECT COUNT(*) FROM user_battle_tags 
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (guild_id, user_id, battle_tag)) as cursor:
+                    exists = (await cursor.fetchone())[0] > 0
+                    
+                if exists:
+                    return False
+                
+                # 첫 번째 배틀태그면 자동으로 primary 설정
+                async with db.execute('''
+                    SELECT COUNT(*) FROM user_battle_tags 
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id)) as cursor:
+                    is_first = (await cursor.fetchone())[0] == 0
+                
+                # JSON 변환
+                rank_json = json.dumps(rank_info) if rank_info else None
+                
+                await db.execute('''
+                    INSERT INTO user_battle_tags 
+                    (guild_id, user_id, battle_tag, account_type, is_primary, rank_info)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (guild_id, user_id, battle_tag, account_type, is_first, rank_json))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 배틀태그 추가 실패: {e}")
+            return False
+
+
+    async def get_user_battle_tags(self, guild_id: str, user_id: str) -> List[Dict]:
+        """유저의 모든 배틀태그 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT battle_tag, account_type, is_primary, rank_info, created_at
+                    FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ?
+                    ORDER BY is_primary DESC, created_at ASC
+                ''', (guild_id, user_id)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    result = []
+                    for row in rows:
+                        rank_info = json.loads(row[3]) if row[3] else None
+                        result.append({
+                            'battle_tag': row[0],
+                            'account_type': row[1],
+                            'is_primary': bool(row[2]),
+                            'rank_info': rank_info,
+                            'created_at': row[4]
+                        })
+                    
+                    return result
+        except Exception as e:
+            print(f"❌ 배틀태그 조회 실패: {e}")
+            return []
+
+
+    async def get_primary_battle_tag(self, guild_id: str, user_id: str) -> Optional[str]:
+        """주계정 배틀태그 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT battle_tag FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ? AND is_primary = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else None
+        except Exception as e:
+            print(f"❌ 주계정 조회 실패: {e}")
+            return None
+
+
+    async def delete_battle_tag(self, guild_id: str, user_id: str, battle_tag: str) -> bool:
+        """배틀태그 삭제"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # primary 계정인지 확인
+                async with db.execute('''
+                    SELECT is_primary FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (guild_id, user_id, battle_tag)) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return False
+                    was_primary = bool(row[0])
+                
+                # 삭제
+                await db.execute('''
+                    DELETE FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (guild_id, user_id, battle_tag))
+                
+                # primary였다면 다른 계정을 primary로 승격
+                if was_primary:
+                    await db.execute('''
+                        UPDATE user_battle_tags
+                        SET is_primary = TRUE
+                        WHERE guild_id = ? AND user_id = ?
+                        AND id = (
+                            SELECT id FROM user_battle_tags
+                            WHERE guild_id = ? AND user_id = ?
+                            ORDER BY account_type = 'main' DESC, created_at ASC
+                            LIMIT 1
+                        )
+                    ''', (guild_id, user_id, guild_id, user_id))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 배틀태그 삭제 실패: {e}")
+            return False
+
+
+    async def set_primary_battle_tag(self, guild_id: str, user_id: str, battle_tag: str) -> bool:
+        """주계정 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 해당 배틀태그 존재 확인
+                async with db.execute('''
+                    SELECT COUNT(*) FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (guild_id, user_id, battle_tag)) as cursor:
+                    exists = (await cursor.fetchone())[0] > 0
+                    
+                if not exists:
+                    return False
+                
+                # 기존 primary 해제
+                await db.execute('''
+                    UPDATE user_battle_tags
+                    SET is_primary = FALSE
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id))
+                
+                # 새 primary 설정
+                await db.execute('''
+                    UPDATE user_battle_tags
+                    SET is_primary = TRUE
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (guild_id, user_id, battle_tag))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 주계정 설정 실패: {e}")
+            return False
+
+
+    async def search_battle_tag_owner(self, guild_id: str, battle_tag: str) -> Optional[Dict]:
+        """배틀태그로 소유자 검색 (역검색)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT u.user_id, u.username, t.account_type, t.is_primary
+                    FROM user_battle_tags t
+                    JOIN registered_users u ON t.user_id = u.user_id AND t.guild_id = u.guild_id
+                    WHERE t.guild_id = ? AND t.battle_tag = ?
+                ''', (guild_id, battle_tag)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'user_id': row[0],
+                            'username': row[1],
+                            'account_type': row[2],
+                            'is_primary': bool(row[3])
+                        }
+                    return None
+        except Exception as e:
+            print(f"❌ 배틀태그 소유자 검색 실패: {e}")
+            return None
+
+
+    async def update_battle_tag_rank_info(self, guild_id: str, user_id: str, 
+                                        battle_tag: str, rank_info: dict) -> bool:
+        """배틀태그 랭크 정보 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                rank_json = json.dumps(rank_info) if rank_info else None
+                
+                await db.execute('''
+                    UPDATE user_battle_tags
+                    SET rank_info = ?, last_updated = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                ''', (rank_json, guild_id, user_id, battle_tag))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 랭크 정보 업데이트 실패: {e}")
+            return False
+
+    async def migrate_battle_tags_to_new_table(self):
+        """
+        기존 registered_users.battle_tag → user_battle_tags 마이그레이션
+        봇 시작 시 자동 실행
+        """
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 마이그레이션 필요 여부 확인
+                async with db.execute('''
+                    SELECT COUNT(*) FROM registered_users 
+                    WHERE battle_tag IS NOT NULL AND battle_tag != ''
+                    AND NOT EXISTS (
+                        SELECT 1 FROM user_battle_tags 
+                        WHERE user_battle_tags.guild_id = registered_users.guild_id 
+                        AND user_battle_tags.user_id = registered_users.user_id
+                    )
+                ''') as cursor:
+                    need_migration = (await cursor.fetchone())[0] > 0
+                
+                if not need_migration:
+                    print("✅ 배틀태그 마이그레이션 불필요 (이미 완료됨)")
+                    return True
+                
+                # 마이그레이션 실행
+                async with db.execute('''
+                    SELECT guild_id, user_id, battle_tag, birth_year
+                    FROM registered_users 
+                    WHERE battle_tag IS NOT NULL AND battle_tag != ''
+                    AND is_active = TRUE
+                ''') as cursor:
+                    users = await cursor.fetchall()
+                
+                migrated_count = 0
+                for guild_id, user_id, battle_tag, birth_year in users:
+                    # user_battle_tags에 없는 경우만 추가
+                    async with db.execute('''
+                        SELECT COUNT(*) FROM user_battle_tags
+                        WHERE guild_id = ? AND user_id = ? AND battle_tag = ?
+                    ''', (guild_id, user_id, battle_tag)) as check_cursor:
+                        already_exists = (await check_cursor.fetchone())[0] > 0
+                    
+                    if not already_exists:
+                        await db.execute('''
+                            INSERT INTO user_battle_tags 
+                            (guild_id, user_id, battle_tag, account_type, is_primary)
+                            VALUES (?, ?, ?, 'main', TRUE)
+                        ''', (guild_id, user_id, battle_tag))
+                        migrated_count += 1
+                
+                await db.commit()
+                print(f"✅ 배틀태그 마이그레이션 완료: {migrated_count}개 계정 이동")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 배틀태그 마이그레이션 실패: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return False
+
+
+    async def _get_primary_battle_tag_for_nickname(self, guild_id: str, user_id: str) -> Optional[str]:
+        """
+        닉네임 생성용 주계정 배틀태그 조회
+        1순위: user_battle_tags에서 is_primary=True
+        2순위: user_battle_tags에서 account_type='main' 
+        3순위: registered_users.battle_tag (폴백)
+        """
+        try:
+            # 1순위: primary 배틀태그
+            primary_tag = await self.get_primary_battle_tag(guild_id, user_id)
+            if primary_tag:
+                return primary_tag
+            
+            # 2순위: main 타입 배틀태그
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT battle_tag FROM user_battle_tags
+                    WHERE guild_id = ? AND user_id = ? AND account_type = 'main'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        return row[0]
+                
+                # 3순위: 폴백 (기존 registered_users.battle_tag)
+                async with db.execute('''
+                    SELECT battle_tag FROM registered_users
+                    WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    if row and row[0]:
+                        return row[0]
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ 닉네임용 배틀태그 조회 실패: {e}")
+            return None
+
+
+    async def _update_user_nickname(self, member: discord.Member, 
+                                    main_position: str, current_tier: str, 
+                                    battle_tag: str = None, birth_year: str = None) -> str:
+        """
+        유저 닉네임 자동 변경 (user_battle_tags 기반)
+        
+        Args:
+            member: Discord 멤버 객체
+            main_position: 메인 포지션
+            current_tier: 현재 시즌 티어
+            battle_tag: (선택) 직접 지정할 배틀태그 (없으면 DB 조회)
+            birth_year: (선택) 생년 뒤 2자리
+        
+        Returns:
+            결과 메시지
+        """
+        try:
+            guild_id = str(member.guild.id)
+            user_id = str(member.id)
+            
+            # 배틀태그 결정
+            if not battle_tag:
+                battle_tag = await self._get_primary_battle_tag_for_nickname(guild_id, user_id)
+            
+            if not battle_tag:
+                return "⚠️ 배틀태그가 없어 닉네임 변경 불가 (배틀태그를 먼저 등록하세요)"
+            
+            # 포지션 축약
+            position_map = {
+                "탱커": "탱",
+                "딜러": "딜",
+                "힐러": "힐",
+                "탱커 & 딜러": "탱딜",
+                "탱커 & 힐러": "탱힐",
+                "딜러 & 힐러": "딜힐",
+                "탱커 & 딜러 & 힐러": "탱딜힐"
+            }
+            position_short = position_map.get(main_position, main_position[:2])
+            
+            # 티어 축약
+            tier_map = {
+                "언랭": "언",
+                "브론즈": "브",
+                "실버": "실",
+                "골드": "골",
+                "플래티넘": "플",
+                "다이아": "다",
+                "마스터": "마",
+                "그마": "그",
+                "챔피언": "챔"
+            }
+            tier_short = tier_map.get(current_tier, current_tier[:2])
+            
+            # 배틀태그에서 이름 부분만 추출 (# 또는 - 앞까지)
+            if '#' in battle_tag:
+                tag_name = battle_tag.split('#')[0]
+            elif '-' in battle_tag:
+                parts = battle_tag.rsplit('-', 1)
+                tag_name = parts[0] if len(parts) == 2 and parts[1].isdigit() else battle_tag
+            else:
+                tag_name = battle_tag
+            
+            # 닉네임 형식 결정
+            if birth_year:
+                # [포지션축약/티어축약/생년]배틀태그
+                new_nickname = f"[{position_short}/{tier_short}/{birth_year}]{tag_name}"
+            else:
+                # [포지션축약/티어축약]배틀태그
+                new_nickname = f"[{position_short}/{tier_short}]{tag_name}"
+            
+            # Discord 닉네임 길이 제한 (32자)
+            if len(new_nickname) > 32:
+                # 배틀태그 이름 잘라내기
+                max_tag_length = 32 - len(f"[{position_short}/{tier_short}]")
+                if birth_year:
+                    max_tag_length -= len(f"/{birth_year}")
+                tag_name = tag_name[:max_tag_length]
+                
+                if birth_year:
+                    new_nickname = f"[{position_short}/{tier_short}/{birth_year}]{tag_name}"
+                else:
+                    new_nickname = f"[{position_short}/{tier_short}]{tag_name}"
+            
+            # 닉네임 변경 시도
+            old_nickname = member.display_name
+            
+            try:
+                await member.edit(nick=new_nickname, reason="RallyUp Bot - 정보 수정에 따른 자동 닉네임 변경")
+                return f"✅ 닉네임 변경: {old_nickname} → {new_nickname}"
+                
+            except discord.Forbidden:
+                return f"⚠️ 권한 부족으로 닉네임 변경 실패 (봇보다 높은 역할 또는 서버 소유자)"
+                
+            except discord.HTTPException as e:
+                return f"⚠️ 닉네임 변경 실패: {str(e)}"
+                
+        except Exception as e:
+            print(f"❌ 닉네임 변경 중 오류: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return f"❌ 닉네임 변경 실패: {str(e)}"
+
+    async def add_battle_tag_with_api(self, guild_id: str, user_id: str, battle_tag: str, 
+                                    account_type: str = 'sub') -> tuple[bool, Optional[Dict]]:
+        from utils.overwatch_api import OverwatchAPI
+        
+        # API 호출 시도
+        rank_info = None
+        profile_data = await OverwatchAPI.fetch_profile(battle_tag)
+
+        print(f"[DEBUG] profile_data 존재 여부: {profile_data is not None}")
+        
+        if profile_data:
+            rank_info = OverwatchAPI.parse_rank_info(profile_data)
+            print(f"[DEBUG] rank_info: {rank_info}")
+        
+        # 배틀태그 추가 (API 실패해도 진행)
+        success = await self.add_battle_tag(guild_id, user_id, battle_tag, account_type, rank_info)
+        
+        return success, rank_info
+
+
+    async def refresh_battle_tag_rank(self, guild_id: str, user_id: str, battle_tag: str) -> Optional[Dict]:
+        """
+        배틀태그 랭크 정보 갱신
+        
+        Returns:
+            갱신된 랭크 정보 dict 또는 None
+        """
+        from utils.overwatch_api import OverwatchAPI
+        
+        # API 호출
+        profile_data = await OverwatchAPI.fetch_profile(battle_tag)
+        
+        if not profile_data:
+            return None
+        
+        rank_info = OverwatchAPI.parse_rank_info(profile_data)
+        
+        if rank_info:
+            # DB 업데이트
+            await self.update_battle_tag_rank_info(guild_id, user_id, battle_tag, rank_info)
+        
+        return rank_info
+
+
+    async def get_user_battle_tags_with_rank(self, guild_id: str, user_id: str) -> List[Dict]:
+        """
+        유저의 모든 배틀태그 조회 (랭크 정보 포함, 포맷팅 추가)
+        
+        Returns:
+            배틀태그 목록 (rank_display 필드 추가)
+        """
+        from utils.overwatch_api import OverwatchAPI
+        
+        tags = await self.get_user_battle_tags(guild_id, user_id)
+        
+        for tag in tags:
+            if tag['rank_info']:
+                tag['rank_display'] = OverwatchAPI.format_rank_display(tag['rank_info'])
+            else:
+                tag['rank_display'] = "랭크 정보 없음"
+        
+        return tags

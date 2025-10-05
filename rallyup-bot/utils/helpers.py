@@ -71,3 +71,36 @@ def format_user_stats(user) -> Dict[str, str]:
         'support': f"{user.support_wins}승 {user.support_games - user.support_wins}패 ({support_wr}%)",
         'score': str(user.score)
     }
+
+def parse_battle_tag_for_api(battle_tag: str) -> str:
+    """
+    배틀태그를 API 호출용으로 변환
+    입력: "이름#1234"
+    출력: "이름-1234"
+    """
+    if '#' in battle_tag:
+        return battle_tag.replace('#', '-')
+    return battle_tag
+
+
+def parse_battle_tag_for_display(battle_tag: str) -> str:
+    """
+    API용 배틀태그를 표시용으로 변환
+    입력: "이름-1234"
+    출력: "이름#1234"
+    """
+    if '-' in battle_tag and '#' not in battle_tag:
+        parts = battle_tag.rsplit('-', 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return f"{parts[0]}#{parts[1]}"
+    return battle_tag
+
+
+def validate_battle_tag_format(battle_tag: str) -> bool:
+    """
+    배틀태그 형식 검증
+    유효: "이름#1234" 또는 "이름-1234"
+    """
+    import re
+    pattern = r'^[a-zA-Z가-힣0-9]+[#-]\d{4,5}$'
+    return bool(re.match(pattern, battle_tag))

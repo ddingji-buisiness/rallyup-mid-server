@@ -123,13 +123,11 @@ class SimpleUserManagementCog(commands.Cog):
                 updates['current_season_tier'] = tier
             if position:
                 updates['main_position'] = position
-            if battle_tag:
-                updates['battle_tag'] = battle_tag
             if birth_year:
                 updates['birth_year'] = birth_year
             
             # 아무것도 변경하지 않은 경우
-            if not updates:
+            if not updates and not battle_tag:
                 await interaction.followup.send(
                     "❌ 수정할 정보를 하나 이상 입력해주세요.", ephemeral=True
                 )
@@ -150,12 +148,22 @@ class SimpleUserManagementCog(commands.Cog):
             final_info = {
                 'main_position': updates.get('main_position', current_info['main_position']),
                 'current_season_tier': updates.get('current_season_tier', current_info['current_season_tier']),
-                'battle_tag': updates.get('battle_tag', current_info['battle_tag']),
                 'birth_year': updates.get('birth_year', current_info.get('birth_year'))
             }
             
             # Discord 멤버 객체 찾기
             target_member = interaction.guild.get_member(int(user_id))
+
+            # 닉네임용 배틀태그 결정
+            nickname_battle_tag = None
+            if battle_tag:
+                # 직접 입력한 배틀태그 사용
+                nickname_battle_tag = battle_tag
+            else:
+                # DB에서 주계정 조회
+                nickname_battle_tag = await self.bot.db_manager._get_primary_battle_tag_for_nickname(
+                    guild_id, user_id
+                )
             
             # 닉네임 자동 변경 (멤버가 서버에 있는 경우만)
             nickname_result = "⚠️ 유저가 서버에 없어 닉네임을 변경할 수 없음"
@@ -164,7 +172,7 @@ class SimpleUserManagementCog(commands.Cog):
                     target_member,
                     final_info['main_position'],
                     final_info['current_season_tier'],
-                    final_info['battle_tag'],
+                    nickname_battle_tag,
                     final_info['birth_year']
                 )
             
@@ -184,12 +192,12 @@ class SimpleUserManagementCog(commands.Cog):
             if position and position != current_info['main_position']:
                 changes.append(f"**포지션**: {current_info['main_position']} → {position}")
             
-            if battle_tag and battle_tag != current_info['battle_tag']:
-                changes.append(f"**배틀태그**: {current_info['battle_tag']} → {battle_tag}")
-            
             if birth_year and birth_year != current_info.get('birth_year'):
                 old_birth = current_info.get('birth_year', '미설정')
                 changes.append(f"**생년**: {old_birth} → {birth_year}")
+
+            if battle_tag:
+                changes.append(f"**배틀태그**: {battle_tag} (지정됨)")
             
             if changes:
                 embed.add_field(
@@ -207,10 +215,10 @@ class SimpleUserManagementCog(commands.Cog):
             
             embed.add_field(
                 name="📋 최종 정보",
-                value=f"**배틀태그**: {final_info['battle_tag']}\n"
-                    f"**포지션**: {final_info['main_position']}\n"
+                value=f"**포지션**: {final_info['main_position']}\n"
                     f"**현시즌 티어**: {final_info['current_season_tier']}\n"
-                    f"**생년**: {final_info['birth_year'] or '미설정'}",
+                    f"**생년**: {final_info['birth_year'] or '미설정'}\n"
+                    f"**닉네임 기준 배틀태그**: {nickname_battle_tag or '없음'}",
                 inline=False
             )
             
@@ -364,14 +372,26 @@ class SimpleUserManagementCog(commands.Cog):
                 )
                 return
             
+            # 닉네임용 배틀태그 결정
+            nickname_battle_tag = None
+            if battle_tag:
+                # 직접 입력한 배틀태그 사용
+                nickname_battle_tag = battle_tag
+            else:
+                # DB에서 주계정 조회
+                nickname_battle_tag = await self.bot.db_manager._get_primary_battle_tag_for_nickname(
+                    guild_id, user_id
+                )
+            
             # 변경할 정보 준비
             updates = {
                 'current_season_tier': tier,
-                'main_position': position if position else current_info['main_position'],
-                'battle_tag': battle_tag if battle_tag else current_info['battle_tag'],
-                'birth_year': birth_year if birth_year else current_info.get('birth_year')
+                'main_position': position if position else current_info['main_position']
             }
             
+            if birth_year:
+                updates['birth_year'] = birth_year
+
             # DB 업데이트
             success = await self.bot.db_manager.update_registered_user_info(
                 guild_id, user_id, updates
@@ -389,8 +409,8 @@ class SimpleUserManagementCog(commands.Cog):
                 interaction.user,
                 updates['main_position'],
                 updates['current_season_tier'],
-                updates['battle_tag'],
-                updates['birth_year']
+                nickname_battle_tag, 
+                birth_year
             )
             
             # 성공 메시지
@@ -408,10 +428,7 @@ class SimpleUserManagementCog(commands.Cog):
             
             if position and position != current_info['main_position']:
                 changes.append(f"**포지션**: {current_info['main_position']} → {position}")
-            
-            if battle_tag and battle_tag != current_info['battle_tag']:
-                changes.append(f"**배틀태그**: {current_info['battle_tag']} → {battle_tag}")
-            
+
             if birth_year and birth_year != current_info.get('birth_year'):
                 old_birth = current_info.get('birth_year', '미설정')
                 changes.append(f"**생년**: {old_birth} → {birth_year}")
@@ -431,15 +448,12 @@ class SimpleUserManagementCog(commands.Cog):
             )
             
             embed.add_field(
-                name="📋 최종 정보",
-                value=f"**배틀태그**: {updates['battle_tag']}\n"
-                      f"**포지션**: {updates['main_position']}\n"
-                      f"**현시즌 티어**: {updates['current_season_tier']}\n"
-                      f"**생년**: {updates['birth_year'] or '미설정'}",
+                name="💡 안내",
+                value="배틀태그 추가/변경은 `/배틀태그추가` 명령어를 사용하세요",
                 inline=False
             )
             
-            embed.set_footer(text="내 정보 확인: /내정보")
+            embed.set_footer(text="내 정보 확인: /내정보 | 배틀태그 관리: /배틀태그목록")
             
             await interaction.followup.send(embed=embed, ephemeral=True)
             

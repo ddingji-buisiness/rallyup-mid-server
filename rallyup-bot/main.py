@@ -53,6 +53,8 @@ class RallyUpBot(commands.Bot):
             await self.db_manager.initialize()
             logger.info("데이터베이스 초기화 완료")
 
+            await self.db_manager.migrate_battle_tags_to_new_table()
+
             await self.load_commands()
             
             await self.bamboo_scheduler.start()
@@ -100,7 +102,8 @@ class RallyUpBot(commands.Bot):
             'commands.wordle_game',
             'commands.inter_guild_scrim',
             'commands.team_balancing',
-            'commands.nickname_format_admin'
+            'commands.nickname_format_admin',
+            'commands.battle_tag_commands',
         ]
 
         for command_module in commands_to_load:
