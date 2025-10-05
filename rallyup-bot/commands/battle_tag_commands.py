@@ -142,15 +142,16 @@ class BattleTagCommands(commands.Cog):
             guild_id = str(interaction.guild_id)
 
             if 유저:
-                target_member = interaction.guild.get_member(int(유저))
-                if not target_member:
-                    await interaction.followup.send("❌ 유저를 찾을 수 없습니다.", ephemeral=True)
+                target_user = interaction.guild.get_member(int(유저))
+                if not target_user:
+                    await interaction.followup.send(
+                        "❌ 해당 유저를 서버에서 찾을 수 없습니다.",
+                        ephemeral=True
+                    )
                     return
             else:
-                target_member = interaction.user
+                target_user = interaction.user
             
-            # 조회 대상 결정
-            target_user = 유저 if 유저 else interaction.user
             user_id = str(target_user.id)
             
             # 등록된 유저인지 확인
