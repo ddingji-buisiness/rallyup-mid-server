@@ -840,7 +840,6 @@ class BattleTagSelectDropdown(discord.ui.Select):
                 value=str(i),
                 description=description[:100],
                 emoji=emoji,
-                default=(i == 0)  # 첫 번째 항목 기본 선택
             ))
         
         super().__init__(
