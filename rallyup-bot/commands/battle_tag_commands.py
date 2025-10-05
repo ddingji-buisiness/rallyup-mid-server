@@ -134,12 +134,20 @@ class BattleTagCommands(commands.Cog):
     async def list_battle_tags(
         self,
         interaction: discord.Interaction,
-        유저: Optional[discord.Member] = None
+        유저: Optional[str] = None
     ):
         await interaction.response.defer(ephemeral=True)
         
         try:
             guild_id = str(interaction.guild_id)
+
+            if 유저:
+                target_member = interaction.guild.get_member(int(유저))
+                if not target_member:
+                    await interaction.followup.send("❌ 유저를 찾을 수 없습니다.", ephemeral=True)
+                    return
+            else:
+                target_member = interaction.user
             
             # 조회 대상 결정
             target_user = 유저 if 유저 else interaction.user
@@ -199,6 +207,37 @@ class BattleTagCommands(commands.Cog):
                 f"❌ 배틀태그 목록 조회 중 오류가 발생했습니다: {str(e)}",
                 ephemeral=True
             )
+
+    @list_battle_tags.autocomplete('유저')
+    async def user_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> List[app_commands.Choice[str]]:
+        """등록된 유저만 자동완성"""
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # DB에서 등록된 유저 조회
+            registered = await self.bot.db_manager.get_all_registered_users(guild_id)
+            
+            # 현재 서버에 있는 멤버만 필터링
+            choices = []
+            for user in registered:
+                member = interaction.guild.get_member(int(user['user_id']))
+                if member and (current.lower() in member.display_name.lower() or current == ""):
+                    choices.append(
+                        app_commands.Choice(
+                            name=f"{member.display_name} (@{member.name})",
+                            value=user['user_id']
+                        )
+                    )
+            
+            return choices[:25]  # 최대 25개
+            
+        except Exception as e:
+            print(f"❌ Autocomplete 오류: {e}")
+            return []
     
     @app_commands.command(name="배틀태그삭제", description="등록된 배틀태그를 삭제합니다")
     @app_commands.describe(배틀태그="삭제할 배틀태그 (자동완성)")

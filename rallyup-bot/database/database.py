@@ -7549,3 +7549,19 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 로그 채널 초기화 실패: {e}")
             return False
+
+    async def get_all_registered_users(self, guild_id: str) -> List[Dict]:
+        """서버의 모든 등록된 유저 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id, username
+                    FROM registered_users
+                    WHERE guild_id = ? AND is_active = TRUE
+                    ORDER BY username
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return [{'user_id': row[0], 'username': row[1]} for row in rows]
+        except Exception as e:
+            print(f"❌ 등록 유저 조회 실패: {e}")
+            return []
