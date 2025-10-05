@@ -1514,6 +1514,20 @@ class DatabaseManager:
             await db.execute('PRAGMA journal_mode=WAL')
             
             try:
+                print(f"[DEBUG] 신청 데이터:")
+                print(f"  - guild_id: {guild_id}")
+                print(f"  - user_id: {user_id}")
+                print(f"  - username: {username}")
+                print(f"  - entry_method: {entry_method}")
+                print(f"  - battle_tag: {battle_tag}")
+                print(f"  - birth_year: '{birth_year}' (type: {type(birth_year)}, length: {len(birth_year) if birth_year else 0})")
+                print(f"  - main_position: {main_position}")
+                
+                # birth_year 검증 추가
+                if not birth_year or len(birth_year) != 2 or not birth_year.isdigit():
+                    print(f"❌ birth_year 검증 실패: '{birth_year}'")
+                    return False
+
                 await db.execute('''
                     INSERT INTO user_applications 
                     (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 

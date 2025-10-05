@@ -178,6 +178,23 @@ class OnePageApplicationView(discord.ui.View):
             guild_id = str(interaction.guild_id)
             user_id = str(interaction.user.id)
             username = interaction.user.display_name
+
+            # ✅ 입력값 검증 추가
+            if not all([self.entry_method, self.battle_tag, self.birth_year, self.main_position,
+                        self.previous_tier, self.current_tier, self.highest_tier]):
+                await interaction.followup.send(
+                    "❌ 모든 항목을 입력해주세요. 누락된 정보가 있습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # birth_year 검증
+            if not self.birth_year.isdigit() or len(self.birth_year) != 2:
+                await interaction.followup.send(
+                    "❌ 생년은 2자리 숫자여야 합니다 (예: 00, 95)",
+                    ephemeral=True
+                )
+                return
             
             # 이미 등록된 유저 체크
             if await self.bot.db_manager.is_user_registered(guild_id, user_id):
@@ -249,7 +266,12 @@ class OnePageApplicationView(discord.ui.View):
                     print(f"❌ 관리자 DM 알림 실패: {dm_error}")
                     
             else:
-                await interaction.followup.send("❌ 신청 처리 실패", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ 신청 처리 중 오류가 발생했습니다.\n"
+                    "잠시 후 다시 시도하거나, 관리자에게 문의해주세요.\n"
+                    f"(디버그 정보: user_id={user_id})",
+                    ephemeral=True
+                )
                 
         except Exception as e:
             await interaction.followup.send(f"❌ 오류: {str(e)}", ephemeral=True)
@@ -366,9 +388,25 @@ class QuickTextModal(discord.ui.Modal, title="텍스트 정보 입력"):
         self.parent_view = parent_view
     
     async def on_submit(self, interaction: discord.Interaction):
+        birth_year_value = self.birth_year.value.strip()
+
+        if not birth_year_value:
+            await interaction.response.send_message(
+                "❌ 생년을 입력해주세요",
+                ephemeral=True
+            )
+            return
+        
         if not self.birth_year.value.isdigit():
             await interaction.response.send_message(
                 "❌ 출생년도는 숫자 2자리만 입력해주세요 (예: 00, 95)",
+                ephemeral=True
+            )
+            return
+        
+        if len(birth_year_value) != 2:
+            await interaction.response.send_message(
+                f"❌ 생년은 정확히 2자리여야 합니다 (입력값: '{birth_year_value}')",
                 ephemeral=True
             )
             return

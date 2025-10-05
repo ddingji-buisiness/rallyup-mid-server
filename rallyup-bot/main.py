@@ -58,9 +58,9 @@ class RallyUpBot(commands.Bot):
 
             await self.load_commands()
 
-            logger.info("🔄 배틀태그 마이그레이션 시작...")
-            migration_result = await self.db_manager.migrate_battle_tags_to_new_table()
-            logger.info(f"✅ 마이그레이션 결과: {migration_result}")
+            # logger.info("🔄 배틀태그 마이그레이션 시작...")
+            # migration_result = await self.db_manager.migrate_battle_tags_to_new_table()
+            # logger.info(f"✅ 마이그레이션 결과: {migration_result}")
 
             from utils.battle_tag_logger import BattleTagLogger
             self.battle_tag_logger = BattleTagLogger(self)
