@@ -3,10 +3,12 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Dict, Optional, List
 from datetime import datetime
+from utils.battle_tag_logger import BattleTagLogger
 
 class BattleTagCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.logger = BattleTagLogger(bot)
     
     @app_commands.command(name="배틀태그추가", description="배틀태그를 추가합니다 (오버워치 랭크 정보 자동 조회)")
     @app_commands.describe(
@@ -61,6 +63,18 @@ class BattleTagCommands(commands.Cog):
                     ephemeral=True
                 )
                 return
+            
+            user_tags = await self.bot.db_manager.get_user_battle_tags(guild_id, user_id)
+            is_primary = len(user_tags) == 1  # 첫 배틀태그면 주계정
+            
+            await self.logger.log_battle_tag_add(
+                guild_id=guild_id,
+                user=interaction.user,
+                battle_tag=배틀태그,
+                account_type=계정타입,
+                is_primary=is_primary,
+                rank_info=rank_info
+            )
             
             # 성공 메시지
             embed = discord.Embed(
@@ -207,6 +221,18 @@ class BattleTagCommands(commands.Cog):
                 )
                 return
             
+            tags = await self.bot.db_manager.get_user_battle_tags(guild_id, user_id)
+            target_tag = next((t for t in tags if t['battle_tag'] == 배틀태그), None)
+            
+            if not target_tag:
+                await interaction.followup.send(
+                    f"❌ **{배틀태그}** 삭제 실패\n등록되지 않은 배틀태그입니다.",
+                    ephemeral=True
+                )
+                return
+            
+            was_primary = target_tag['is_primary']
+            
             # 배틀태그 삭제
             success = await self.bot.db_manager.delete_battle_tag(guild_id, user_id, 배틀태그)
             
@@ -217,6 +243,18 @@ class BattleTagCommands(commands.Cog):
                     ephemeral=True
                 )
                 return
+            
+            # 삭제 후 남은 배틀태그 확인
+            remaining_tags = await self.bot.db_manager.get_user_battle_tags(guild_id, user_id)
+            new_primary = next((t for t in remaining_tags if t['is_primary']), None)
+            
+            await self.logger.log_battle_tag_delete(
+                guild_id=guild_id,
+                user=interaction.user,
+                battle_tag=배틀태그,
+                was_primary=was_primary,
+                new_primary_tag=new_primary['battle_tag'] if new_primary else None
+            )
             
             # 성공 메시지
             embed = discord.Embed(
@@ -316,6 +354,8 @@ class BattleTagCommands(commands.Cog):
                 )
                 return
             
+            old_primary = await self.bot.db_manager.get_primary_battle_tag(guild_id, user_id)
+            
             # 주계정 설정
             success = await self.bot.db_manager.set_primary_battle_tag(guild_id, user_id, 배틀태그)
             
@@ -326,6 +366,18 @@ class BattleTagCommands(commands.Cog):
                     ephemeral=True
                 )
                 return
+            
+            tags = await self.bot.db_manager.get_user_battle_tags(guild_id, user_id)
+            new_primary_tag = next((t for t in tags if t['battle_tag'] == 배틀태그), None)
+            
+            if old_primary and old_primary != 배틀태그:  # 실제로 변경된 경우만
+                await self.logger.log_primary_change(
+                    guild_id=guild_id,
+                    user=interaction.user,
+                    old_primary=old_primary,
+                    new_primary=배틀태그,
+                    new_rank_info=new_primary_tag.get('rank_info') if new_primary_tag else None
+                )
             
             # 성공 메시지
             embed = discord.Embed(

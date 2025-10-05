@@ -10,6 +10,7 @@ from scheduler.recruitment_scheduler import RecruitmentScheduler
 from scheduler.wordle_scheduler import WordleScheduler
 from scheduler.scrim_scheduler import ScrimScheduler
 from commands.scrim_recruitment import RecruitmentView
+from utils.battle_tag_logger import BattleTagLogger
 
 from config.settings import Settings
 
@@ -46,6 +47,8 @@ class RallyUpBot(commands.Bot):
         self.challenge_engine = None
         self.challenge_event_manager = None
         self._continuous_challenge_enabled = False
+        self.battle_tag_logger = None
+        self.tier_change_scheduler = None  
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
@@ -56,6 +59,10 @@ class RallyUpBot(commands.Bot):
             await self.db_manager.migrate_battle_tags_to_new_table()
 
             await self.load_commands()
+
+            from utils.battle_tag_logger import BattleTagLogger
+            self.battle_tag_logger = BattleTagLogger(self)
+            logger.info("배틀태그 로거 초기화 완료")
             
             await self.bamboo_scheduler.start()
             logger.info("대나무숲 스케줄러 시작")
@@ -74,6 +81,13 @@ class RallyUpBot(commands.Bot):
                 self.wordle_scheduler = WordleScheduler(self)
                 await self.wordle_scheduler.start()
                 logger.info("띵지워들 스케줄러 시작")
+
+            # 티어 변동 스케줄러 시작
+            if not self.tier_change_scheduler:
+                from scheduler.tier_change_scheduler import TierChangeScheduler
+                self.tier_change_scheduler = TierChangeScheduler(self)
+                await self.tier_change_scheduler.start()
+                logger.info("티어 변동 감지 스케줄러 시작")
 
             try:
                 print("슬래시 커맨드 동기화 중...")
@@ -104,6 +118,7 @@ class RallyUpBot(commands.Bot):
             'commands.team_balancing',
             'commands.nickname_format_admin',
             'commands.battle_tag_commands',
+            'commands.battle_tag_log_admin',
         ]
 
         for command_module in commands_to_load:
@@ -331,6 +346,10 @@ class RallyUpBot(commands.Bot):
             if self.wordle_scheduler:
                 await self.wordle_scheduler.stop()
                 logger.info("띵지워들 스케줄러 종료")
+
+            if self.tier_change_scheduler:
+                await self.tier_change_scheduler.stop()
+                logger.info("티어 변동 감지 스케줄러 종료")
 
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")

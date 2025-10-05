@@ -323,6 +323,20 @@ class DatabaseManager:
                     UNIQUE(user_id, guild_id)
                 )
             ''')
+
+            # 배틀태그 로그 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS battle_tag_log_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    log_channel_id TEXT,
+                    log_add BOOLEAN DEFAULT TRUE,
+                    log_delete BOOLEAN DEFAULT TRUE,
+                    log_primary_change BOOLEAN DEFAULT TRUE,
+                    log_tier_change BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -7437,3 +7451,101 @@ class DatabaseManager:
                 tag['rank_display'] = "랭크 정보 없음"
         
         return tags
+
+    async def get_battle_tag_log_settings(self, guild_id: str) -> Optional[Dict]:
+        """배틀태그 로그 설정 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT log_channel_id, log_add, log_delete, log_primary_change, log_tier_change
+                    FROM battle_tag_log_settings
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'log_channel_id': row[0],
+                            'log_add': bool(row[1]),
+                            'log_delete': bool(row[2]),
+                            'log_primary_change': bool(row[3]),
+                            'log_tier_change': bool(row[4])
+                        }
+                    return None
+        except Exception as e:
+            print(f"❌ 로그 설정 조회 실패: {e}")
+            return None
+
+
+    async def set_battle_tag_log_channel(self, guild_id: str, channel_id: str) -> bool:
+        """로그 채널 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # UPSERT (없으면 INSERT, 있으면 UPDATE)
+                await db.execute('''
+                    INSERT INTO battle_tag_log_settings (guild_id, log_channel_id, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) 
+                    DO UPDATE SET 
+                        log_channel_id = excluded.log_channel_id,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (guild_id, channel_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 로그 채널 설정 실패: {e}")
+            return False
+
+
+    async def update_battle_tag_log_toggle(self, guild_id: str, log_type: str, enabled: bool) -> bool:
+        """로그 항목 토글"""
+        try:
+            valid_types = ['log_add', 'log_delete', 'log_primary_change', 'log_tier_change']
+            if log_type not in valid_types:
+                return False
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 설정이 없으면 먼저 생성
+                await db.execute('''
+                    INSERT INTO battle_tag_log_settings (guild_id)
+                    VALUES (?)
+                    ON CONFLICT(guild_id) DO NOTHING
+                ''', (guild_id,))
+                
+                # 토글 업데이트
+                query = f'''
+                    UPDATE battle_tag_log_settings
+                    SET {log_type} = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                '''
+                await db.execute(query, (enabled, guild_id))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 로그 토글 업데이트 실패: {e}")
+            return False
+
+
+    async def reset_battle_tag_log_channel(self, guild_id: str) -> bool:
+        """로그 채널 설정 초기화 (채널 삭제 시)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    UPDATE battle_tag_log_settings
+                    SET log_channel_id = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                ''', (guild_id,))
+                
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 로그 채널 초기화 실패: {e}")
+            return False
