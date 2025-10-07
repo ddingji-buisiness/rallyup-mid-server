@@ -184,18 +184,30 @@ class CustomTimeModal(discord.ui.Modal):
         self.parent_view.selected_time = time_str
         print(f"DEBUG: CustomTimeModal에서 시간 설정됨: {time_str}")
         
-        # 다음 단계 활성화 (중요: edit_message 전에 호출)
+        # UI 상태 업데이트 (다음 단계 활성화)
         self.parent_view._update_ui_state()
         
-        # 성공 메시지와 함께 UI 업데이트
-        await interaction.response.edit_message(
-            content=f"✅ 선택된 시간: **{self._format_time_display(time_str)}**\n"
-                   f"이제 모집 마감시간을 선택해주세요.",
-            view=self.parent_view  # 업데이트된 뷰를 다시 전달
-        )
+        await interaction.response.defer()
+        
+        # 원본 메시지를 찾아서 업데이트
+        try:
+            # interaction.message가 원본 메시지
+            await interaction.message.edit(
+                content=f"✅ 선택된 시간: **{self._format_time_display(time_str)}**\n"
+                       f"이제 모집 마감시간을 선택해주세요.",
+                view=self.parent_view
+            )
+        except Exception as e:
+            print(f"⚠️ 메시지 업데이트 실패: {e}")
+            # 폴백: followup으로 알림
+            await interaction.followup.send(
+                f"✅ 시간 설정: {self._format_time_display(time_str)}",
+                ephemeral=True
+            )
     
     def _validate_time_format(self, time_str: str) -> bool:
         """시간 형식 검증 (HH:MM)"""
+        import re
         pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
         if not re.match(pattern, time_str):
             return False
@@ -210,7 +222,6 @@ class CustomTimeModal(discord.ui.Modal):
         """시간을 사용자 친화적 형식으로 포맷팅"""
         try:
             hour, minute = map(int, time_str.split(':'))
-            time_obj = time(hour, minute)
             
             if hour == 0:
                 return f"자정 ({time_str})"
@@ -238,19 +249,9 @@ class CustomDeadlineModal(discord.ui.Modal):
             style=discord.TextStyle.short
         )
         self.add_item(self.datetime_input)
-        
-        # 도움말 추가
-        self.help_input = discord.ui.TextInput(
-            label="입력 형식 안내 (읽기 전용)",
-            placeholder="형식: MM-DD HH:MM 또는 YYYY-MM-DD HH:MM",
-            required=False,
-            max_length=1,
-            style=discord.TextStyle.short
-        )
-        self.add_item(self.help_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        """마감시간 입력 처리"""
+        """마감시간 입력 처리 - 수정됨"""
         datetime_str = self.datetime_input.value.strip()
         
         # 날짜시간 형식 검증 및 파싱
@@ -272,7 +273,7 @@ class CustomDeadlineModal(discord.ui.Modal):
             )
             return
         
-        # 내전 시간과 비교 (내전 시간이 설정된 경우)
+        # 내전 시간과 비교
         if self.parent_view.selected_date and self.parent_view.selected_time:
             scrim_datetime = self.parent_view._calculate_datetime()
             if parsed_datetime >= scrim_datetime:
@@ -283,18 +284,26 @@ class CustomDeadlineModal(discord.ui.Modal):
                 )
                 return
         
-        # 부모 뷰에 선택된 마감시간 전달 (특별한 형식으로 저장)
+        # 부모 뷰에 선택된 마감시간 전달
         self.parent_view.selected_deadline = f"custom_datetime_{parsed_datetime.isoformat()}"
         print(f"DEBUG: CustomDeadlineModal에서 마감시간 설정됨: {self.parent_view.selected_deadline}")
 
         self.parent_view._update_ui_state()
 
-        # 성공 메시지와 함께 UI 업데이트
-        await interaction.response.edit_message(
-            content=f"✅ 선택된 마감시간: **{self._format_datetime_display(parsed_datetime)}**\n"
-                   f"모든 정보가 설정되었습니다! 등록 버튼을 눌러주세요.",
-            view=self.parent_view
-        )
+        await interaction.response.defer()
+        
+        try:
+            await interaction.message.edit(
+                content=f"✅ 선택된 마감시간: **{self._format_datetime_display(parsed_datetime)}**\n"
+                       f"모든 정보가 설정되었습니다! 등록 버튼을 눌러주세요.",
+                view=self.parent_view
+            )
+        except Exception as e:
+            print(f"⚠️ 메시지 업데이트 실패: {e}")
+            await interaction.followup.send(
+                f"✅ 마감시간 설정: {self._format_datetime_display(parsed_datetime)}",
+                ephemeral=True
+            )
     
     def _parse_deadline_datetime(self, datetime_str: str) -> datetime:
         """마감시간 문자열을 datetime 객체로 파싱"""
@@ -488,6 +497,8 @@ class DateTimeSelectionView(discord.ui.View):
             await interaction.response.send_modal(modal)
         else:
             self.selected_time = selected_value
+
+            self._update_ui_state()
             
             # UI 업데이트
             await interaction.response.edit_message(
@@ -496,8 +507,6 @@ class DateTimeSelectionView(discord.ui.View):
                 view=self
             )
             
-            self._update_ui_state()
-
     def _update_ui_state(self):
         """UI 상태 업데이트 - 수정됨"""
         print(f"DEBUG: _update_ui_state 호출됨")
@@ -548,8 +557,9 @@ class DateTimeSelectionView(discord.ui.View):
             modal = CustomDeadlineModal(self)
             await interaction.response.send_modal(modal)
         else:
-            # 기존 로직 - 미리 정의된 마감시간 선택
             self.selected_deadline = selected_value
+            
+            self._update_ui_state()
             
             await interaction.response.edit_message(
                 content=f"✅ **날짜**: {self.selected_date}\n"
@@ -915,42 +925,6 @@ class RecruitmentView(discord.ui.View):
         self.add_item(DeclineButton(recruitment_id))
         self.add_item(LateJoinButton(recruitment_id))
         self.add_item(ParticipantsButton(recruitment_id))
-    
-    # @discord.ui.button(
-    #     label="✅ 참가",
-    #     style=discord.ButtonStyle.success,
-    #     custom_id="join_scrim"
-    # )
-    # async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    #     """참가 버튼 클릭 처리"""
-    #     await self._handle_participation(interaction, "joined")
-    
-    # @discord.ui.button(
-    #     label="❌ 불참", 
-    #     style=discord.ButtonStyle.danger,
-    #     custom_id="decline_scrim"
-    # )
-    # async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    #     """불참 버튼 클릭 처리"""
-    #     await self._handle_participation(interaction, "declined")
-
-    # @discord.ui.button(
-    #     label="⏰ 늦참",
-    #     style=discord.ButtonStyle.primary,
-    #     custom_id="late_join_scrim"
-    # )
-    # async def late_join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    #     """늦참 버튼 클릭 처리"""
-    #     await self._handle_participation(interaction, "late_join")
-    
-    # @discord.ui.button(
-    #     label="📋 참가자 목록",
-    #     style=discord.ButtonStyle.secondary,
-    #     custom_id="show_participants"
-    # ) 
-    # async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-    #     """참가자 목록 보기"""
-    #     await self._show_participants_list(interaction)
     
     async def _handle_participation(self, interaction: discord.Interaction, status: str):
         """참가/불참 처리 공통 로직"""
