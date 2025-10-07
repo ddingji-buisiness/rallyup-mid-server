@@ -17,6 +17,118 @@ class NicknameFormatCommands(commands.Cog):
             return True
         
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
+
+    @app_commands.command(name="닉네임일괄적용", description="[관리자] 모든 등록 유저의 닉네임을 현재 포맷에 맞춰 변경합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def apply_nickname_format_bulk(self, interaction: discord.Interaction):
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            guild = interaction.guild
+            
+            # 현재 포맷 확인
+            format_settings = await self.bot.db_manager.get_nickname_format(guild_id)
+            
+            # 모든 등록 유저 조회
+            registered_users = await self.bot.db_manager.get_all_registered_users(guild_id)
+            
+            if not registered_users:
+                await interaction.followup.send(
+                    "❌ 등록된 유저가 없습니다.", ephemeral=True
+                )
+                return
+            
+            # 진행 메시지
+            progress_embed = discord.Embed(
+                title="🔄 닉네임 일괄 변경 진행 중...",
+                description=f"총 {len(registered_users)}명의 유저 닉네임을 변경합니다.\n잠시만 기다려주세요...",
+                color=0xffaa00
+            )
+            await interaction.followup.send(embed=progress_embed, ephemeral=True)
+            
+            # 결과 추적
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+            failed_users = []
+            
+            # 각 유저에 대해 닉네임 변경
+            for user_data in registered_users:
+                user_id = user_data['user_id']
+                member = guild.get_member(int(user_id))
+                
+                if not member:
+                    skipped_count += 1
+                    continue
+                
+                # 닉네임 변경 시도
+                result = await self.bot.db_manager._update_user_nickname(
+                    member,
+                    user_data['main_position'],
+                    user_data['current_season_tier'],
+                    user_data['battle_tag'],  # 이제는 대표 닉네임
+                    user_data.get('birth_year')
+                )
+                
+                if "✅" in result:
+                    success_count += 1
+                elif "⚠️" in result or "❌" in result:
+                    failed_count += 1
+                    failed_users.append({
+                        'name': member.display_name,
+                        'reason': result
+                    })
+            
+            # 결과 임베드
+            result_embed = discord.Embed(
+                title="✅ 닉네임 일괄 변경 완료",
+                color=0x00ff88
+            )
+            
+            result_embed.add_field(
+                name="📊 변경 결과",
+                value=f"✅ 성공: {success_count}명\n"
+                    f"❌ 실패: {failed_count}명\n"
+                    f"⏭️ 건너뜀: {skipped_count}명 (서버 미참여)",
+                inline=False
+            )
+            
+            result_embed.add_field(
+                name="🎨 적용된 포맷",
+                value=f"`{format_settings['format_template']}`",
+                inline=False
+            )
+            
+            # 실패 목록 (최대 5개만 표시)
+            if failed_users:
+                failed_list = "\n".join([
+                    f"• {u['name']}: {u['reason'][:50]}" 
+                    for u in failed_users[:5]
+                ])
+                if len(failed_users) > 5:
+                    failed_list += f"\n... 외 {len(failed_users) - 5}명"
+                
+                result_embed.add_field(
+                    name="⚠️ 실패 사유",
+                    value=failed_list,
+                    inline=False
+                )
+            
+            result_embed.set_footer(text=f"관리자: {interaction.user.display_name}")
+            
+            await interaction.edit_original_response(embed=result_embed)
+            
+        except Exception as e:
+            await interaction.edit_original_response(
+                content=f"❌ 일괄 변경 중 오류가 발생했습니다: {str(e)}"
+            )
     
     @app_commands.command(name="닉네임포맷설정", description="[관리자] 서버 닉네임 자동 변경 포맷 설정")
     @app_commands.default_permissions(manage_guild=True)

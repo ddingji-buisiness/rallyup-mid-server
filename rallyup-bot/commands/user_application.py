@@ -415,10 +415,7 @@ class QuickTextModal(discord.ui.Modal, title="텍스트 정보 입력"):
         self.parent_view.battle_tag = self.battle_tag.value
         self.parent_view.birth_year = self.birth_year.value
 
-        await interaction.response.edit_message(
-            embed=self.parent_view._create_status_embed(),
-            view=self.parent_view
-        )
+        await self.parent_view.update_view(interaction)
 
 class UserApplicationCommands(commands.Cog):
     def __init__(self, bot):
