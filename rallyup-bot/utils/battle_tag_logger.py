@@ -354,7 +354,7 @@ class BattleTagLogger:
             for change in changes:
                 role_kr = {
                     'tank': '탱커',
-                    'damage': '딜러',
+                    'offense': '딜러',
                     'support': '힐러'
                 }.get(change['role'], change['role'])
                 
@@ -372,7 +372,7 @@ class BattleTagLogger:
             
             timestamp = int(datetime.now().timestamp())
             embed.add_field(
-                name="⏰ 감지 시간",
+                name="⏰ 변동 시간",
                 value=f"<t:{timestamp}:R>",
                 inline=True
             )

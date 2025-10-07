@@ -159,14 +159,14 @@ class TierChangeScheduler:
             
             # 변동 감지
             tier_order = {
-                'Bronze 5': 1, 'Bronze 4': 2, 'Bronze 3': 3, 'Bronze 2': 4, 'Bronze 1': 5,
-                'Silver 5': 6, 'Silver 4': 7, 'Silver 3': 8, 'Silver 2': 9, 'Silver 1': 10,
-                'Gold 5': 11, 'Gold 4': 12, 'Gold 3': 13, 'Gold 2': 14, 'Gold 1': 15,
-                'Platinum 5': 16, 'Platinum 4': 17, 'Platinum 3': 18, 'Platinum 2': 19, 'Platinum 1': 20,
-                'Diamond 5': 21, 'Diamond 4': 22, 'Diamond 3': 23, 'Diamond 2': 24, 'Diamond 1': 25,
-                'Master 5': 26, 'Master 4': 27, 'Master 3': 28, 'Master 2': 29, 'Master 1': 30,
-                'Grandmaster 5': 31, 'Grandmaster 4': 32, 'Grandmaster 3': 33, 'Grandmaster 2': 34, 'Grandmaster 1': 35,
-                'Champion 5': 36, 'Champion 4': 37, 'Champion 3': 38, 'Champion 2': 39, 'Champion 1': 40,
+                '브론즈 5': 1, '브론즈 4': 2, '브론즈 3': 3, '브론즈 2': 4, '브론즈 1': 5,
+                '실버 5': 6, '실버 4': 7, '실버 3': 8, '실버 2': 9, '실버 1': 10,
+                '골드 5': 11, '골드 4': 12, '골드 3': 13, '골드 2': 14, '골드 1': 15,
+                '플레티넘 5': 16, '플레티넘 4': 17, '플레티넘 3': 18, '플레티넘 2': 19, '플레티넘 1': 20,
+                '다이아 5': 21, '다이아 4': 22, '다이아 3': 23, '다이아 2': 24, '다이아 1': 25,
+                '마스터 5': 26, '마스터 4': 27, '마스터 3': 28, '마스터 2': 29, '마스터 1': 30,
+                '그마 5': 31, '그마 4': 32, '그마 3': 33, '그마 2': 34, '그마 1': 35,
+                '챔피언 5': 36, '챔피언 4': 37, '챔피언 3': 38, '챔피언 2': 39, '챔피언 1': 40,
             }
             
             for role in set(old_tiers.keys()) | set(new_tiers.keys()):
