@@ -17,9 +17,7 @@ class TeamInfoCommands(commands.Cog):
         self.channel_messages: Dict[str, Dict[str, int]] = {}  # {guild_id: {voice_channel_id: message_id}}
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # Debouncing 태스크
         self.active_guilds: set = set()  # 모니터링 활성화된 서버
-    
-    # ==================== 기존 /팀정보 명령어 ====================
-    
+        
     @app_commands.command(name="팀정보", description="음성 채널에 있는 팀원들의 배틀태그와 티어 정보를 표시합니다")
     @app_commands.describe(채널="정보를 확인할 음성 채널 (생략 시 본인이 속한 채널)")
     async def team_info(
@@ -171,7 +169,7 @@ class TeamInfoCommands(commands.Cog):
             text_channel = await self._find_text_channel(voice_channel)
             if not text_channel:
                 # 로그: 채널 없음 또는 권한 없음
-                print(f"ℹ️ 팀정보 발송 불가: {voice_channel.name} (같은 이름의 텍스트 채널 없음 또는 권한 부족)")
+                print(f"ℹ️ 팀정보 발송 불가: {voice_channel.name} (권한 부족 또는 채널 접근 불가)")
                 return
             
             # 3. 멤버 정보 수집
@@ -244,6 +242,10 @@ class TeamInfoCommands(commands.Cog):
         try:
             guild_id = str(interaction.guild_id)
             
+            # DB에 저장
+            await self._save_voice_monitor_setting(guild_id, 활성화)
+            
+            # 캐시 업데이트
             if 활성화:
                 self.active_guilds.add(guild_id)
                 status = "활성화"
@@ -263,23 +265,26 @@ class TeamInfoCommands(commands.Cog):
                 name="📋 동작 방식",
                 value="• 유저가 음성 채널 입장 시 자동으로 팀정보 메시지 발송\n"
                       "• 유저 입장/퇴장 시 실시간 업데이트 (2초 딜레이)\n"
-                      "• 같은 이름의 텍스트 채널에 자동 발송\n"
+                      "• 음성 채널의 내장 텍스트 채널에 자동 발송\n"
                       "• 모든 유저 퇴장 시 메시지 자동 삭제",
                 inline=False
             )
             
             if 활성화:
                 embed.add_field(
-                    name="💡 권장 채널 구조",
-                    value="```\n"
-                          "📁 스크림\n"
-                          "  ├─ 🔊 스크림-1 (음성)\n"
-                          "  ├─ 💬 스크림-1 (텍스트) ← 여기에 발송\n"
-                          "  ├─ 🔊 스크림-2 (음성)\n"
-                          "  └─ 💬 스크림-2 (텍스트)\n"
-                          "```",
+                    name="💡 중요 안내",
+                    value="• 디스코드 음성 채널은 자동으로 텍스트 기능이 있습니다\n"
+                          "• **별도의 텍스트 채널을 만들 필요가 없습니다**\n"
+                          "• 봇에게 음성 채널의 '메시지 보내기' 권한만 부여하세요\n"
+                          "• 음성 참가자들만 팀정보 메시지를 볼 수 있습니다",
                     inline=False
                 )
+            
+            embed.add_field(
+                name="🔍 상태 확인",
+                value="`/음성진단` 명령어로 현재 설정을 확인할 수 있습니다",
+                inline=False
+            )
             
             embed.set_footer(text="RallyUp Bot | 음성 채널 모니터링")
             
@@ -290,110 +295,130 @@ class TeamInfoCommands(commands.Cog):
                 f"❌ 설정 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
     
-    @app_commands.command(name="음성진단", description="[관리자] 음성 채널 모니터링 상태 및 권한 진단")
-    @app_commands.default_permissions(manage_guild=True)
-    async def voice_diagnose(self, interaction: discord.Interaction):
-        """음성 모니터링 진단"""
-        if not await self._is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-        
+    async def _save_voice_monitor_setting(self, guild_id: str, enabled: bool):
+        """음성 모니터링 설정을 DB에 저장"""
+        try:
+            import aiosqlite
+            
+            async with aiosqlite.connect(self.bot.db_manager.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # UPSERT (있으면 업데이트, 없으면 삽입)
+                await db.execute('''
+                    INSERT INTO voice_monitor_settings (guild_id, enabled)
+                    VALUES (?, ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (guild_id, enabled))
+                
+                await db.commit()
+                print(f"✅ 음성 모니터링 설정 저장: {guild_id} = {enabled}")
+                
+        except Exception as e:
+            print(f"❌ 음성 모니터링 설정 저장 실패: {e}")
+            raise
+    
+    @app_commands.command(name="음성진단", description="음성 채널 자동 모니터링 상태를 확인합니다")
+    async def voice_monitor_status(self, interaction: discord.Interaction):
+        """음성 모니터링 상태 확인"""
         await interaction.response.defer(ephemeral=True)
         
         try:
-            guild = interaction.guild
-            guild_id = str(guild.id)
-            bot_member = guild.get_member(self.bot.user.id)
+            guild_id = str(interaction.guild_id)
+            
+            # DB에서 설정 조회
+            is_enabled = await self._get_voice_monitor_setting(guild_id)
+            
+            # 캐시와 DB 동기화 확인
+            in_cache = guild_id in self.active_guilds
             
             embed = discord.Embed(
-                title="🔍 음성 모니터링 진단 결과",
-                color=0x0099ff,
+                title="🔍 음성 모니터링 진단",
+                color=0x00ff88 if is_enabled else 0x666666,
                 timestamp=datetime.now()
             )
             
-            # 1. 모니터링 활성화 상태 (DB에서 확인)
-            is_active = await self.bot.db_manager.is_voice_monitor_enabled(guild_id)
             embed.add_field(
                 name="📊 모니터링 상태",
-                value=f"{'✅ 활성화' if is_active else '⬜ 비활성화'}\n"
-                      f"명령어: `/음성모니터 활성화:{'False' if is_active else 'True'}`",
+                value=f"**활성화**: {'✅ 켜짐' if is_enabled else '⬜ 꺼짐'}\n"
+                      f"**캐시**: {'✅ 로드됨' if in_cache else '⚠️ 미로드'}\n"
+                      f"**동기화**: {'✅ 정상' if (is_enabled == in_cache) else '❌ 불일치'}",
                 inline=False
             )
             
-            # 2. 음성 채널 목록 및 권한 체크
-            voice_channels = guild.voice_channels
-            channel_status = []
-            
-            for vc in voice_channels[:10]:  # 최대 10개
-                # 텍스트 채널 찾기
-                text_channel = None
-                for tc in guild.text_channels:
-                    if tc.name.lower() == vc.name.lower():
-                        text_channel = tc
-                        break
-                
-                if text_channel:
-                    # 권한 체크
-                    perms = text_channel.permissions_for(bot_member)
-                    has_send = perms.send_messages
-                    has_embed = perms.embed_links
-                    
-                    if has_send and has_embed:
-                        status = "✅"
-                        detail = "정상"
-                    elif has_send:
-                        status = "⚠️"
-                        detail = "임베드 권한 없음"
-                    else:
-                        status = "❌"
-                        detail = "메시지 전송 권한 없음"
-                else:
-                    status = "⬜"
-                    detail = "텍스트 채널 없음"
-                
-                # 인원 수
-                member_count = len([m for m in vc.members if not m.bot])
-                
-                channel_status.append(
-                    f"{status} **{vc.name}** ({member_count}명)\n"
-                    f"   └ {detail}"
+            if not is_enabled:
+                embed.add_field(
+                    name="⚙️ 활성화 명령어",
+                    value="`/음성모니터 활성화:True`",
+                    inline=False
                 )
             
-            if len(voice_channels) > 10:
-                channel_status.append(f"\n... 외 {len(voice_channels) - 10}개 채널")
+            # 음성 채널 분석
+            voice_channels = interaction.guild.voice_channels
+            bot_member = interaction.guild.get_member(self.bot.user.id)
+            
+            available_channels = []
+            no_permission_channels = []
+            
+            for vc in voice_channels:
+                member_count = len([m for m in vc.members if not m.bot])
+                
+                # 권한 체크
+                perms = vc.permissions_for(bot_member)
+                has_permission = perms.send_messages and perms.embed_links and perms.view_channel
+                
+                if has_permission:
+                    available_channels.append(f"• {vc.name} ({member_count}명) ✅")
+                else:
+                    no_permission_channels.append(f"• {vc.name} ({member_count}명) ❌ 권한 없음")
+            
+            if is_enabled:
+                if available_channels:
+                    # 최대 15개만 표시
+                    display_list = available_channels[:15]
+                    remaining = len(available_channels) - 15
+                    
+                    embed.add_field(
+                        name=f"✅ 모니터링 가능 채널 ({len(available_channels)}개)",
+                        value="\n".join(display_list) + 
+                              (f"\n... 외 {remaining}개 채널" if remaining > 0 else ""),
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="⚠️ 모니터링 가능 채널",
+                        value="모든 음성 채널에 권한이 없습니다",
+                        inline=False
+                    )
+                
+                if no_permission_channels:
+                    display_list = no_permission_channels[:5]
+                    remaining = len(no_permission_channels) - 5
+                    
+                    embed.add_field(
+                        name=f"❌ 권한 없는 채널 ({len(no_permission_channels)}개)",
+                        value="\n".join(display_list) +
+                              (f"\n... 외 {remaining}개" if remaining > 0 else ""),
+                        inline=False
+                    )
+            
+            # 활성 메시지 개수
+            active_messages = 0
+            if guild_id in self.channel_messages:
+                active_messages = len(self.channel_messages[guild_id])
             
             embed.add_field(
-                name="🔊 음성 채널 상태",
-                value="\n".join(channel_status) if channel_status else "음성 채널 없음",
+                name="📨 활성 모니터링 메시지",
+                value=f"{active_messages}개 채널에서 활성 중",
                 inline=False
             )
             
-            # 3. 봇 권한 확인
-            bot_perms = bot_member.guild_permissions
-            required_perms = {
-                "메시지 보내기": bot_perms.send_messages,
-                "임베드 링크": bot_perms.embed_links,
-                "메시지 기록 보기": bot_perms.read_message_history,
-                "채널 보기": bot_perms.view_channel,
-            }
-            
-            perm_status = []
-            for perm_name, has_perm in required_perms.items():
-                perm_status.append(f"{'✅' if has_perm else '❌'} {perm_name}")
-            
             embed.add_field(
-                name="🔐 봇 기본 권한",
-                value="\n".join(perm_status),
-                inline=False
-            )
-            
-            # 4. 캐시된 메시지 개수
-            cached_count = len(self.channel_messages.get(guild_id, {}))
-            embed.add_field(
-                name="📝 활성 모니터링 메시지",
-                value=f"{cached_count}개 채널에서 활성 중",
+                name="💡 안내",
+                value="• 모든 음성 채널은 자동으로 텍스트 채널 기능이 있습니다\n"
+                      "• 별도의 텍스트 채널을 만들 필요가 없습니다\n"
+                      "• 봇에게 음성 채널의 '메시지 보내기' 권한만 있으면 됩니다",
                 inline=False
             )
             
@@ -402,196 +427,30 @@ class TeamInfoCommands(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
             
         except Exception as e:
-            print(f"❌ 진단 오류: {e}")
+            print(f"❌ 음성진단 오류: {e}")
             import traceback
             traceback.print_exc()
             await interaction.followup.send(
-                f"❌ 진단 중 오류가 발생했습니다: {str(e)}", ephemeral=True
-            )
-    
-    @app_commands.command(name="음성채널자동생성", description="[관리자] 음성 채널에 대응하는 텍스트 채널 자동 생성")
-    @app_commands.describe(
-        카테고리="텍스트 채널을 생성할 카테고리 (선택사항)",
-        미리보기="실제 생성하지 않고 미리보기만"
-    )
-    @app_commands.default_permissions(manage_guild=True)
-    async def auto_create_text_channels(
-        self,
-        interaction: discord.Interaction,
-        카테고리: Optional[str] = None,
-        미리보기: bool = True
-    ):
-        """음성 채널에 대응하는 텍스트 채널 자동 생성"""
-        if not await self._is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            guild = interaction.guild
-            
-            # 카테고리 필터링
-            target_category = None
-            if 카테고리:
-                for cat in guild.categories:
-                    if cat.name.lower() == 카테고리.lower():
-                        target_category = cat
-                        break
-                
-                if not target_category:
-                    await interaction.followup.send(
-                        f"❌ '{카테고리}' 카테고리를 찾을 수 없습니다.",
-                        ephemeral=True
-                    )
-                    return
-            
-            # 생성할 채널 목록 수집
-            channels_to_create = []
-            
-            voice_channels = guild.voice_channels
-            if target_category:
-                voice_channels = [vc for vc in voice_channels if vc.category == target_category]
-            
-            for vc in voice_channels:
-                # 같은 이름의 텍스트 채널이 이미 있는지 확인
-                text_exists = False
-                for tc in guild.text_channels:
-                    if tc.name.lower() == vc.name.lower():
-                        text_exists = True
-                        break
-                
-                if not text_exists:
-                    channels_to_create.append(vc)
-            
-            if not channels_to_create:
-                await interaction.followup.send(
-                    "✅ 모든 음성 채널에 이미 대응하는 텍스트 채널이 있습니다!",
-                    ephemeral=True
-                )
-                return
-            
-            # 미리보기 또는 실제 생성
-            if 미리보기:
-                # 미리보기 임베드
-                embed = discord.Embed(
-                    title="📋 생성 예정 텍스트 채널 목록",
-                    description=f"총 **{len(channels_to_create)}개** 채널이 생성됩니다",
-                    color=0x0099ff
-                )
-                
-                preview_lines = []
-                for vc in channels_to_create[:15]:  # 최대 15개
-                    category_name = vc.category.name if vc.category else "카테고리 없음"
-                    preview_lines.append(
-                        f"💬 **{vc.name}**\n"
-                        f"   └ 위치: {category_name}"
-                    )
-                
-                if len(channels_to_create) > 15:
-                    preview_lines.append(f"\n... 외 {len(channels_to_create) - 15}개")
-                
-                embed.add_field(
-                    name="\u200b",
-                    value="\n".join(preview_lines),
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="⚠️ 다음 명령어로 실제 생성",
-                    value=f"`/음성채널자동생성 미리보기:False`" + 
-                          (f" `카테고리:{카테고리}`" if 카테고리 else ""),
-                    inline=False
-                )
-                
-                embed.set_footer(text="생성된 채널은 같은 카테고리에 배치됩니다")
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
-                # 실제 생성
-                created_count = 0
-                failed_channels = []
-                
-                for vc in channels_to_create:
-                    try:
-                        # 같은 카테고리에 텍스트 채널 생성
-                        await guild.create_text_channel(
-                            name=vc.name,
-                            category=vc.category,
-                            reason=f"음성 채널 '{vc.name}'에 대응하는 텍스트 채널 자동 생성"
-                        )
-                        created_count += 1
-                    except discord.Forbidden:
-                        failed_channels.append(f"{vc.name} (권한 부족)")
-                    except discord.HTTPException as e:
-                        failed_channels.append(f"{vc.name} ({str(e)})")
-                
-                # 결과 임베드
-                embed = discord.Embed(
-                    title="✅ 텍스트 채널 생성 완료",
-                    description=f"**{created_count}개** 채널이 생성되었습니다",
-                    color=0x00ff88,
-                    timestamp=datetime.now()
-                )
-                
-                if failed_channels:
-                    embed.add_field(
-                        name="⚠️ 생성 실패",
-                        value="\n".join(failed_channels[:10]),
-                        inline=False
-                    )
-                
-                embed.add_field(
-                    name="💡 다음 단계",
-                    value="1. `/음성진단` 명령어로 상태 확인\n"
-                          "2. 봇 권한 확인 (메시지 보내기, 임베드)\n"
-                          "3. 음성 채널 입장 테스트",
-                    inline=False
-                )
-                
-                embed.set_footer(text="RallyUp Bot | 자동 채널 생성")
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            print(f"❌ 채널 생성 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            await interaction.followup.send(
-                f"❌ 채널 생성 중 오류가 발생했습니다: {str(e)}",
+                f"❌ 상태 확인 중 오류가 발생했습니다: {str(e)}",
                 ephemeral=True
             )
     
-    @auto_create_text_channels.autocomplete('카테고리')
-    async def category_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str
-    ) -> List[app_commands.Choice[str]]:
-        """카테고리 자동완성"""
+    async def _get_voice_monitor_setting(self, guild_id: str) -> bool:
+        """DB에서 음성 모니터링 설정 조회"""
         try:
-            categories = interaction.guild.categories
+            import aiosqlite
             
-            matching = []
-            for category in categories:
-                if current.lower() in category.name.lower() or current == "":
-                    # 카테고리 내 음성 채널 개수
-                    voice_count = len([c for c in category.voice_channels])
+            async with aiosqlite.connect(self.bot.db_manager.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT enabled FROM voice_monitor_settings
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return bool(row[0]) if row else False
                     
-                    matching.append(
-                        app_commands.Choice(
-                            name=f"{category.name} ({voice_count}개 음성 채널)",
-                            value=category.name
-                        )
-                    )
-            
-            return matching[:25]
-            
         except Exception as e:
-            print(f"❌ 카테고리 자동완성 오류: {e}")
-            return []
+            print(f"⚠️ 음성 모니터링 설정 조회 실패: {e}")
+            return False
     
     # ==================== 공통 유틸리티 메서드 ====================
     
@@ -612,27 +471,40 @@ class TeamInfoCommands(commands.Cog):
         
         return None
     
-    async def _find_text_channel(self, voice_channel: discord.VoiceChannel) -> Optional[discord.TextChannel]:
+    async def _find_text_channel(self, voice_channel: discord.VoiceChannel) -> Optional[discord.abc.Messageable]:
         """
         음성 채널에 대응하는 텍스트 채널 찾기
-        ⚠️ 보안: 같은 이름의 채널만 허용, 없으면 None 반환
+        1순위: 음성 채널 자체 (내장 텍스트 채널 기능)
+        2순위: 같은 이름의 독립 텍스트 채널
+        
+        Returns:
+            VoiceChannel (내장 텍스트) 또는 TextChannel (독립 채널)
         """
         guild = voice_channel.guild
         bot_member = guild.get_member(self.bot.user.id)
         
-        # 같은 이름의 텍스트 채널만 찾기
+        # 1. 음성 채널 자체가 텍스트 메시지를 받을 수 있는지 확인
+        # discord.VoiceChannel은 Messageable을 상속하므로 직접 메시지 보낼 수 있음
+        try:
+            voice_perms = voice_channel.permissions_for(bot_member)
+            if voice_perms.send_messages and voice_perms.embed_links and voice_perms.view_channel:
+                # 음성 채널 자체를 텍스트 채널로 사용 (내장 텍스트 채널)
+                return voice_channel
+        except Exception as e:
+            print(f"⚠️ 음성 채널 권한 확인 실패: {voice_channel.name} - {e}")
+        
+        # 2. 같은 이름의 독립 텍스트 채널 찾기
         for channel in guild.text_channels:
             if channel.name.lower() == voice_channel.name.lower():
                 # 권한 체크
-                perms = channel.permissions_for(bot_member)
-                if perms.send_messages and perms.embed_links:
+                text_perms = channel.permissions_for(bot_member)
+                if text_perms.send_messages and text_perms.embed_links:
                     return channel
                 else:
-                    # 권한 없음 로그
-                    print(f"⚠️ 채널 권한 없음: {channel.name} (메시지 전송/임베드 권한 필요)")
+                    print(f"⚠️ 텍스트 채널 권한 없음: {channel.name}")
                     return None
         
-        # 같은 이름의 채널이 없으면 None 반환 (절대 다른 채널 사용 안 함)
+        # 아무것도 찾지 못함
         return None
     
     async def _collect_members_info(self, guild_id: str, members: List[discord.Member]) -> List[Dict]:
