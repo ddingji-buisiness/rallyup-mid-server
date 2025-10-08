@@ -16,10 +16,11 @@ class TeamInfoCommands(commands.Cog):
         # 음성 모니터링 관련
         self.channel_messages: Dict[str, Dict[str, int]] = {}  # {guild_id: {voice_channel_id: message_id}}
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # Debouncing 태스크
-        self.active_guilds: set = set()  # 모니터링 활성화된 서버
-    
-    # ==================== 기존 /팀정보 명령어 ====================
-    
+        self.active_guilds: set = set()  # 캐시용 (DB에서 로드)
+        
+        # 봇 준비 시 DB에서 설정 로드
+        self.bot.loop.create_task(self._load_monitor_settings())
+        
     @app_commands.command(name="팀정보", description="음성 채널에 있는 팀원들의 배틀태그와 티어 정보를 표시합니다")
     @app_commands.describe(채널="정보를 확인할 음성 채널 (생략 시 본인이 속한 채널)")
     async def team_info(
@@ -102,9 +103,7 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-    
-    # ==================== 음성 모니터링 이벤트 ====================
-    
+        
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, 
@@ -119,8 +118,9 @@ class TeamInfoCommands(commands.Cog):
         
         guild_id = str(member.guild.id)
         
-        # 모니터링 활성화 확인
-        if guild_id not in self.active_guilds:
+        # DB에서 모니터링 활성화 확인
+        is_enabled = await self.bot.db_manager.is_voice_monitor_enabled(guild_id)
+        if not is_enabled:
             return
         
         # before 채널 업데이트
@@ -221,9 +221,7 @@ class TeamInfoCommands(commands.Cog):
             print(f"❌ 자동 팀정보 업데이트 실패: {voice_channel.name} - {e}")
             import traceback
             traceback.print_exc()
-    
-    # ==================== 음성 모니터링 설정 명령어 ====================
-    
+        
     @app_commands.command(name="음성모니터", description="[관리자] 음성 채널 자동 팀정보 모니터링 설정")
     @app_commands.describe(활성화="모니터링 활성화 여부")
     @app_commands.default_permissions(manage_guild=True)
@@ -244,6 +242,17 @@ class TeamInfoCommands(commands.Cog):
         try:
             guild_id = str(interaction.guild_id)
             
+            # DB에 저장
+            success = await self.bot.db_manager.set_voice_monitor_enabled(guild_id, 활성화)
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 설정 저장에 실패했습니다. 다시 시도해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 메모리 캐시도 업데이트
             if 활성화:
                 self.active_guilds.add(guild_id)
                 status = "활성화"
@@ -313,8 +322,8 @@ class TeamInfoCommands(commands.Cog):
                 timestamp=datetime.now()
             )
             
-            # 1. 모니터링 활성화 상태
-            is_active = guild_id in self.active_guilds
+            # 1. 모니터링 활성화 상태 (DB에서 확인)
+            is_active = await self.bot.db_manager.is_voice_monitor_enabled(guild_id)
             embed.add_field(
                 name="📊 모니터링 상태",
                 value=f"{'✅ 활성화' if is_active else '⬜ 비활성화'}\n"
@@ -408,6 +417,190 @@ class TeamInfoCommands(commands.Cog):
             await interaction.followup.send(
                 f"❌ 진단 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
+    
+    @app_commands.command(name="음성채널자동생성", description="[관리자] 음성 채널에 대응하는 텍스트 채널 자동 생성")
+    @app_commands.describe(
+        카테고리="텍스트 채널을 생성할 카테고리 (선택사항)",
+        미리보기="실제 생성하지 않고 미리보기만"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def auto_create_text_channels(
+        self,
+        interaction: discord.Interaction,
+        카테고리: Optional[str] = None,
+        미리보기: bool = True
+    ):
+        """음성 채널에 대응하는 텍스트 채널 자동 생성"""
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild = interaction.guild
+            
+            # 카테고리 필터링
+            target_category = None
+            if 카테고리:
+                for cat in guild.categories:
+                    if cat.name.lower() == 카테고리.lower():
+                        target_category = cat
+                        break
+                
+                if not target_category:
+                    await interaction.followup.send(
+                        f"❌ '{카테고리}' 카테고리를 찾을 수 없습니다.",
+                        ephemeral=True
+                    )
+                    return
+            
+            # 생성할 채널 목록 수집
+            channels_to_create = []
+            
+            voice_channels = guild.voice_channels
+            if target_category:
+                voice_channels = [vc for vc in voice_channels if vc.category == target_category]
+            
+            for vc in voice_channels:
+                # 같은 이름의 텍스트 채널이 이미 있는지 확인
+                text_exists = False
+                for tc in guild.text_channels:
+                    if tc.name.lower() == vc.name.lower():
+                        text_exists = True
+                        break
+                
+                if not text_exists:
+                    channels_to_create.append(vc)
+            
+            if not channels_to_create:
+                await interaction.followup.send(
+                    "✅ 모든 음성 채널에 이미 대응하는 텍스트 채널이 있습니다!",
+                    ephemeral=True
+                )
+                return
+            
+            # 미리보기 또는 실제 생성
+            if 미리보기:
+                # 미리보기 임베드
+                embed = discord.Embed(
+                    title="📋 생성 예정 텍스트 채널 목록",
+                    description=f"총 **{len(channels_to_create)}개** 채널이 생성됩니다",
+                    color=0x0099ff
+                )
+                
+                preview_lines = []
+                for vc in channels_to_create[:15]:  # 최대 15개
+                    category_name = vc.category.name if vc.category else "카테고리 없음"
+                    preview_lines.append(
+                        f"💬 **{vc.name}**\n"
+                        f"   └ 위치: {category_name}"
+                    )
+                
+                if len(channels_to_create) > 15:
+                    preview_lines.append(f"\n... 외 {len(channels_to_create) - 15}개")
+                
+                embed.add_field(
+                    name="\u200b",
+                    value="\n".join(preview_lines),
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="⚠️ 다음 명령어로 실제 생성",
+                    value=f"`/음성채널자동생성 미리보기:False`" + 
+                          (f" `카테고리:{카테고리}`" if 카테고리 else ""),
+                    inline=False
+                )
+                
+                embed.set_footer(text="생성된 채널은 같은 카테고리에 배치됩니다")
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                # 실제 생성
+                created_count = 0
+                failed_channels = []
+                
+                for vc in channels_to_create:
+                    try:
+                        # 같은 카테고리에 텍스트 채널 생성
+                        await guild.create_text_channel(
+                            name=vc.name,
+                            category=vc.category,
+                            reason=f"음성 채널 '{vc.name}'에 대응하는 텍스트 채널 자동 생성"
+                        )
+                        created_count += 1
+                    except discord.Forbidden:
+                        failed_channels.append(f"{vc.name} (권한 부족)")
+                    except discord.HTTPException as e:
+                        failed_channels.append(f"{vc.name} ({str(e)})")
+                
+                # 결과 임베드
+                embed = discord.Embed(
+                    title="✅ 텍스트 채널 생성 완료",
+                    description=f"**{created_count}개** 채널이 생성되었습니다",
+                    color=0x00ff88,
+                    timestamp=datetime.now()
+                )
+                
+                if failed_channels:
+                    embed.add_field(
+                        name="⚠️ 생성 실패",
+                        value="\n".join(failed_channels[:10]),
+                        inline=False
+                    )
+                
+                embed.add_field(
+                    name="💡 다음 단계",
+                    value="1. `/음성진단` 명령어로 상태 확인\n"
+                          "2. 봇 권한 확인 (메시지 보내기, 임베드)\n"
+                          "3. 음성 채널 입장 테스트",
+                    inline=False
+                )
+                
+                embed.set_footer(text="RallyUp Bot | 자동 채널 생성")
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            print(f"❌ 채널 생성 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(
+                f"❌ 채널 생성 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+    
+    @auto_create_text_channels.autocomplete('카테고리')
+    async def category_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> List[app_commands.Choice[str]]:
+        """카테고리 자동완성"""
+        try:
+            categories = interaction.guild.categories
+            
+            matching = []
+            for category in categories:
+                if current.lower() in category.name.lower() or current == "":
+                    # 카테고리 내 음성 채널 개수
+                    voice_count = len([c for c in category.voice_channels])
+                    
+                    matching.append(
+                        app_commands.Choice(
+                            name=f"{category.name} ({voice_count}개 음성 채널)",
+                            value=category.name
+                        )
+                    )
+            
+            return matching[:25]
+            
+        except Exception as e:
+            print(f"❌ 카테고리 자동완성 오류: {e}")
+            return []
     
     # ==================== 공통 유틸리티 메서드 ====================
     
@@ -654,8 +847,6 @@ class TeamInfoCommands(commands.Cog):
         
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
-
-# ==================== View 클래스 ====================
 
 class TeamInfoPaginationView(discord.ui.View):
     """수동 /팀정보 명령어용 View"""

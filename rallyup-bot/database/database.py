@@ -337,6 +337,16 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # voice_monitor_settings 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voice_monitor_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -358,7 +368,7 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_server_admins_user ON server_admins(user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_user ON user_battle_tags(guild_id, user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_tag ON user_battle_tags(battle_tag)')
-
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_monitor_guild ON voice_monitor_settings(guild_id)')
             await db.commit()
 
     async def initialize_clan_tables(self):
@@ -7640,3 +7650,33 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 유저 통계 조회 실패: {e}")
             return None
+
+    async def set_voice_monitor_enabled(self, guild_id: str, enabled: bool) -> bool:
+        """음성 모니터링 활성화 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('''
+                    INSERT INTO voice_monitor_settings (guild_id, enabled, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) 
+                    DO UPDATE SET enabled = ?, updated_at = CURRENT_TIMESTAMP
+                ''', (guild_id, enabled, enabled))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 음성 모니터링 설정 저장 실패: {e}")
+            return False
+
+    async def is_voice_monitor_enabled(self, guild_id: str) -> bool:
+        """음성 모니터링 활성화 여부 확인"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT enabled FROM voice_monitor_settings
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else False
+        except Exception as e:
+            print(f"❌ 음성 모니터링 설정 조회 실패: {e}")
+            return False
