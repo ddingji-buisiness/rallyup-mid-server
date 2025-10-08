@@ -16,11 +16,10 @@ class TeamInfoCommands(commands.Cog):
         # 음성 모니터링 관련
         self.channel_messages: Dict[str, Dict[str, int]] = {}  # {guild_id: {voice_channel_id: message_id}}
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # Debouncing 태스크
-        self.active_guilds: set = set()  # 캐시용 (DB에서 로드)
-        
-        # 봇 준비 시 DB에서 설정 로드
-        self.bot.loop.create_task(self._load_monitor_settings())
-        
+        self.active_guilds: set = set()  # 모니터링 활성화된 서버
+    
+    # ==================== 기존 /팀정보 명령어 ====================
+    
     @app_commands.command(name="팀정보", description="음성 채널에 있는 팀원들의 배틀태그와 티어 정보를 표시합니다")
     @app_commands.describe(채널="정보를 확인할 음성 채널 (생략 시 본인이 속한 채널)")
     async def team_info(
@@ -103,7 +102,9 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-        
+    
+    # ==================== 음성 모니터링 이벤트 ====================
+    
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, 
@@ -118,9 +119,8 @@ class TeamInfoCommands(commands.Cog):
         
         guild_id = str(member.guild.id)
         
-        # DB에서 모니터링 활성화 확인
-        is_enabled = await self.bot.db_manager.is_voice_monitor_enabled(guild_id)
-        if not is_enabled:
+        # 모니터링 활성화 확인
+        if guild_id not in self.active_guilds:
             return
         
         # before 채널 업데이트
@@ -221,7 +221,9 @@ class TeamInfoCommands(commands.Cog):
             print(f"❌ 자동 팀정보 업데이트 실패: {voice_channel.name} - {e}")
             import traceback
             traceback.print_exc()
-        
+    
+    # ==================== 음성 모니터링 설정 명령어 ====================
+    
     @app_commands.command(name="음성모니터", description="[관리자] 음성 채널 자동 팀정보 모니터링 설정")
     @app_commands.describe(활성화="모니터링 활성화 여부")
     @app_commands.default_permissions(manage_guild=True)
@@ -242,17 +244,6 @@ class TeamInfoCommands(commands.Cog):
         try:
             guild_id = str(interaction.guild_id)
             
-            # DB에 저장
-            success = await self.bot.db_manager.set_voice_monitor_enabled(guild_id, 활성화)
-            
-            if not success:
-                await interaction.followup.send(
-                    "❌ 설정 저장에 실패했습니다. 다시 시도해주세요.",
-                    ephemeral=True
-                )
-                return
-            
-            # 메모리 캐시도 업데이트
             if 활성화:
                 self.active_guilds.add(guild_id)
                 status = "활성화"
@@ -847,6 +838,8 @@ class TeamInfoCommands(commands.Cog):
         
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
+
+# ==================== View 클래스 ====================
 
 class TeamInfoPaginationView(discord.ui.View):
     """수동 /팀정보 명령어용 View"""
