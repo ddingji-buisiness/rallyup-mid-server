@@ -7,6 +7,8 @@ import logging
 
 from utils.balance_ui import PlayerSelectionView
 from utils.balance_algorithm import TeamBalancer, BalancingMode
+from utils.balancing_session_manager import session_manager
+from utils.game_ready_view import GameReadyView
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -16,7 +18,7 @@ class TeamBalancingCommand(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
-        self.active_sessions = {}  # 길드별 활성 세션 추적
+        self.active_sessions = {}
     
     async def is_admin_or_elevated_user(self, interaction: discord.Interaction) -> bool:
         """
@@ -44,12 +46,6 @@ class TeamBalancingCommand(commands.Cog):
         except Exception as e:
             logger.warning(f"관리자 권한 확인 중 오류: {e}")
         
-        # TODO: 추가적인 권한 확인 로직 (예: 특정 역할)
-        # 예를 들어, "내전 관리자" 역할을 가진 사용자에게 권한 부여
-        # balancing_role = discord.utils.get(interaction.guild.roles, name="내전 관리자")
-        # if balancing_role and balancing_role in interaction.user.roles:
-        #     return True
-        
         return False
     
     @app_commands.command(name="팀밸런싱", description="자동 밸런싱 또는 수동 팀의 밸런스를 체크합니다")
@@ -57,8 +53,8 @@ class TeamBalancingCommand(commands.Cog):
         모드="밸런싱 모드를 선택하세요"
     )
     @app_commands.choices(모드=[
-        app_commands.Choice(name="🤖 자동 밸런싱 (AI가 최적 팀 구성)", value="auto"),
-        app_commands.Choice(name="🔍 밸런스 체크 (수동 팀 입력)", value="check")
+        app_commands.Choice(name="🤖 AI 자동 밸런싱", value="auto"),
+        app_commands.Choice(name="📝 밸런스 체크 (수동 팀 입력)", value="check")
     ])
     @app_commands.default_permissions(manage_guild=True)
     async def team_balancing(self, interaction: discord.Interaction, 모드: str = "auto"):
@@ -121,7 +117,7 @@ class TeamBalancingCommand(commands.Cog):
                 color=0xff4444
             )
             embed.add_field(
-                name="🔍 오류 정보",
+                name="📝 오류 정보",
                 value=f"```{str(e)[:1000]}```",
                 inline=False
             )
@@ -168,7 +164,7 @@ class TeamBalancingCommand(commands.Cog):
             )
             embed.add_field(
                 name="💡 대안",
-                value="• 🔍 **밸런스 체크 모드**를 사용하면 모든 등록된 유저 포함 가능\n• 신규 유저도 티어 기반으로 밸런스 분석 가능",
+                value="• 📝 **밸런스 체크 모드**를 사용하면 모든 등록된 유저 포함 가능\n• 신규 유저도 티어 기반으로 밸런스 분석 가능",
                 inline=False
             )
             
@@ -187,8 +183,14 @@ class TeamBalancingCommand(commands.Cog):
         
         # 플레이어 선택 View 시작
         from utils.balance_ui import PlayerSelectionView
-        selection_view = PlayerSelectionView(self.bot, guild_id, eligible_players)
+        selection_view = PlayerSelectionView(
+            self.bot, 
+            guild_id, 
+            eligible_players,
+            on_complete_callback=self.on_balancing_complete  # 콜백 추가
+        )
         selection_view.interaction_user = interaction.user
+        selection_view.balancing_mode = "auto"  # 모드 저장
         
         embed = discord.Embed(
             title="🤖 자동 팀 밸런싱",
@@ -280,11 +282,17 @@ class TeamBalancingCommand(commands.Cog):
         }
         
         from utils.balance_ui import ManualTeamSelectionView
-        manual_view = ManualTeamSelectionView(self.bot, guild_id, all_users)
+        manual_view = ManualTeamSelectionView(
+            self.bot, 
+            guild_id, 
+            all_users,
+            on_complete_callback=self.on_balancing_complete  # 콜백 추가
+        )
         manual_view.interaction_user = interaction.user
+        manual_view.balancing_mode = "check"  # 모드 저장
         
         embed = discord.Embed(
-            title="🔍 팀 밸런스 체크 (개선된 버전)",
+            title="📝 팀 밸런스 체크 (개선된 버전)",
             description="이미 구성된 팀의 밸런스를 정밀 분석합니다.\n"
                     "**새로운 기능**: 포지션까지 지정하여 더 정확한 분석이 가능합니다!",
             color=0x9966ff
@@ -333,6 +341,185 @@ class TeamBalancingCommand(commands.Cog):
         
         # 세션 타임아웃 관리
         await self.manage_session_timeout(guild_id, manual_view)
+    
+    async def on_balancing_complete(
+        self, 
+        interaction: discord.Interaction,
+        team_a: List[dict],
+        team_b: List[dict],
+        team_a_positions: dict,
+        team_b_positions: dict,
+        balancing_mode: str
+    ):
+        """
+        밸런싱 완료 시 호출되는 콜백
+        세션을 생성하고 영구 메시지를 전송합니다.
+        """
+        guild_id = str(interaction.guild_id)
+        user_id = str(interaction.user.id)
+        
+        try:
+            # 🔧 먼저 확인 메시지 전송 (interaction 소비)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "⏳ 게임 준비 중... 잠시만 기다려주세요!",
+                    ephemeral=True
+                )
+            
+            # 세션 생성
+            session = session_manager.create_session(
+                guild_id=guild_id,
+                team_a=team_a,
+                team_b=team_b,
+                team_a_positions=team_a_positions,
+                team_b_positions=team_b_positions,
+                balancing_mode=balancing_mode,
+                created_by=user_id
+            )
+            
+            # 영구 View 생성
+            game_ready_view = GameReadyView(session.session_id)
+            
+            # 임베드 생성
+            embed = discord.Embed(
+                title="✅ 팀 밸런싱 완료!",
+                description="팀 구성이 완료되었습니다. 게임 종료 후 아래 버튼을 눌러 결과를 기록하세요.",
+                color=0x00ff88
+            )
+            
+            # 팀 구성 표시
+            team_a_text = "\n".join([
+                f"{i+1}. **{p['username']}** - {team_a_positions.get(p['user_id'], '미설정')}"
+                for i, p in enumerate(team_a)
+            ])
+            team_b_text = "\n".join([
+                f"{i+1}. **{p['username']}** - {team_b_positions.get(p['user_id'], '미설정')}"
+                for i, p in enumerate(team_b)
+            ])
+            
+            embed.add_field(
+                name="🔵 A팀",
+                value=team_a_text,
+                inline=True
+            )
+            embed.add_field(
+                name="🔴 B팀",
+                value=team_b_text,
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🎮 다음 단계",
+                value="1️⃣ 게임을 진행하세요\n"
+                      "2️⃣ 게임 종료 후 **📝 결과 기록하기** 버튼 클릭\n"
+                      "3️⃣ 승리팀 선택 및 맵 선택 (선택사항)\n"
+                      "4️⃣ 자동으로 통계에 반영!",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="⏰ 세션 정보",
+                value=f"• 세션 ID: `{session.session_id[:8]}...`\n"
+                      f"• 유효 시간: 2시간\n"
+                      f"• 밸런싱 모드: {balancing_mode}",
+                inline=False
+            )
+            
+            embed.set_footer(
+                text=f"생성자: {interaction.user.display_name}",
+                icon_url=interaction.user.display_avatar.url
+            )
+            
+            # 🔧 채널 객체 가져오기 (봇 객체 사용)
+            channel = interaction.channel
+            
+            # 권한 확인
+            if not channel:
+                logger.error(f"채널을 찾을 수 없음: guild={guild_id}")
+                await interaction.followup.send(
+                    "❌ 채널을 찾을 수 없습니다. 다시 시도해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 봇 권한 확인
+            bot_member = interaction.guild.get_member(self.bot.user.id)
+            permissions = channel.permissions_for(bot_member)
+            
+            if not permissions.send_messages:
+                logger.error(f"메시지 전송 권한 없음: channel={channel.id}")
+                await interaction.followup.send(
+                    "❌ 봇이 이 채널에 메시지를 보낼 권한이 없습니다.\n"
+                    "채널 권한을 확인해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 🔧 채널에 새 메시지 전송 (interaction과 별개)
+            try:
+                message = await channel.send(
+                    embed=embed,
+                    view=game_ready_view
+                )
+                
+                # 세션에 메시지 정보 저장
+                session_manager.update_session_message(
+                    session.session_id,
+                    str(message.id),
+                    str(message.channel.id)
+                )
+                
+                logger.info(f"밸런싱 세션 메시지 전송 완료: {session.session_id[:8]} (채널: {channel.id})")
+                
+                # 사용자에게 완료 알림
+                await interaction.followup.send(
+                    f"✅ 팀 구성이 완료되었습니다!\n"
+                    f"위 메시지의 버튼을 사용하여 게임 결과를 기록할 수 있습니다.",
+                    ephemeral=True
+                )
+                
+            except discord.Forbidden as e:
+                logger.error(f"메시지 전송 실패 (권한 없음): {e}")
+                await interaction.followup.send(
+                    "❌ 메시지를 전송할 권한이 없습니다.\n"
+                    "봇 권한을 확인해주세요.",
+                    ephemeral=True
+                )
+                # 세션 정리
+                session_manager.remove_session(session.session_id)
+                return
+                
+            except Exception as e:
+                logger.error(f"메시지 전송 중 예상치 못한 오류: {e}", exc_info=True)
+                await interaction.followup.send(
+                    f"❌ 메시지 전송 중 오류가 발생했습니다: {str(e)}",
+                    ephemeral=True
+                )
+                # 세션 정리
+                session_manager.remove_session(session.session_id)
+                return
+            
+            # 기존 active_sessions 정리
+            if guild_id in self.active_sessions:
+                del self.active_sessions[guild_id]
+            
+        except Exception as e:
+            logger.error(f"밸런싱 완료 콜백 처리 중 오류: {e}", exc_info=True)
+            
+            # interaction이 아직 유효한 경우에만 응답
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ 세션 생성 중 오류가 발생했습니다: {str(e)}",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"❌ 세션 생성 중 오류가 발생했습니다: {str(e)}",
+                        ephemeral=True
+                    )
+            except:
+                logger.error("오류 메시지 전송 실패")
     
     async def manage_session_timeout(self, guild_id: str, view: discord.ui.View):
         """세션 타임아웃 관리"""
@@ -452,7 +639,7 @@ class TeamBalancingCommand(commands.Cog):
         )
         
         embed.add_field(
-            name="🔍 밸런스 체크 모드 (NEW!)",
+            name="📝 밸런스 체크 모드 (NEW!)",
             value="• **목적**: 이미 구성된 팀의 밸런스 정밀 분석\n"
                 "• **과정**: A팀 5명 → B팀 5명 → A팀 포지션 → B팀 포지션 → 분석\n"
                 "• **장점**: 실제 포지션 기준 정확한 밸런스 측정\n"
@@ -471,21 +658,22 @@ class TeamBalancingCommand(commands.Cog):
         )
         
         embed.add_field(
+            name="🎯 새로운 기능: 간편 결과 기록",
+            value="• **게임 시작**: 밸런싱 완료 후 바로 게임 진행\n"
+                "• **게임 종료**: **📝 결과 기록하기** 버튼 클릭\n"
+                "• **간편 입력**: 승리팀과 맵만 선택\n"
+                "• **자동 저장**: 팀 구성/포지션은 이미 설정됨!\n"
+                "• **통계 반영**: 즉시 개인 통계 및 랭킹 업데이트",
+            inline=False
+        )
+        
+        embed.add_field(
             name="📊 밸런싱 기준",
             value="• **포지션별 숙련도**: 탱/딜/힐 각각의 승률\n"
                 "• **경험치 보정**: 게임 수에 따른 신뢰도\n"
                 "• **팀 밸런스**: 양팀 스킬 차이 최소화\n"
                 "• **포지션 적합도**: 주포지션 일치도\n"
                 "• **하이브리드 스코어링**: 내전 데이터 + 티어 정보",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🎯 사용 시나리오",
-            value="**자동 밸런싱**: 내전 시작 전 공정한 팀 구성\n"
-                "**밸런스 체크**: 이미 짜인 팀의 밸런스 검증\n"
-                "**포지션 최적화**: 포지션 변경 시 효과 측정\n"
-                "**스크림 준비**: 연습 경기용 균형잡힌 팀 구성",
             inline=False
         )
         
@@ -511,22 +699,22 @@ class TeamBalancingCommand(commands.Cog):
                 "• **정밀 모드** 추천 (가장 균형잡힌 결과)\n"
                 "• **여러 조합** 비교 후 최적의 팀 선택\n"
                 "• **포지션 체크 모드**로 기존 팀 검증\n"
-                "• **개선 제안** 활용하여 밸런스 최적화",
+                "• **개선 제안** 활용하여 밸런스 최적화\n"
+                "• **결과 기록** 버튼으로 빠른 통계 저장",
             inline=False
         )
         
         embed.add_field(
             name="🆕 최신 업데이트",
-            value="• 포지션 설정 기능 추가\n"
-                "• 포지션 적합도 분석\n"
-                "• 신규 유저 포함 가능\n"
-                "• 구체적인 개선 제안\n"
-                "• 더 정확한 밸런스 측정",
+            value="• ✨ **원클릭 결과 기록** 기능 추가\n"
+                "• 게임 종료 후 버튼 한 번으로 결과 저장\n"
+                "• 세션 데이터 자동 연계 (2시간 유효)\n"
+                "• 승리팀/맵만 선택하면 즉시 통계 반영",
             inline=False
         )
         
         embed.set_footer(
-            text="🤖 RallyUp Bot AI Team Balancing System v2.0",
+            text="🤖 RallyUp Bot AI Team Balancing System v2.1",
             icon_url=self.bot.user.display_avatar.url if self.bot.user else None
         )
         

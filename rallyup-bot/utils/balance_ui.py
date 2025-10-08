@@ -1,3 +1,4 @@
+import logging
 import discord
 from discord.ext import commands
 from typing import List, Dict, Optional
@@ -5,16 +6,19 @@ import asyncio
 
 from utils.balance_algorithm import TeamBalancer, BalancingMode, BalanceResult
 
+logger = logging.getLogger(__name__)  
+
 class PlayerSelectionView(discord.ui.View):
     """10명의 참가자를 선택하는 View"""
     
-    def __init__(self, bot, guild_id: str, eligible_players: List[Dict]):
+    def __init__(self, bot, guild_id: str, eligible_players: List[Dict], on_complete_callback=None):
         super().__init__(timeout=300)  # 5분 타임아웃
         self.bot = bot
         self.guild_id = guild_id
         self.eligible_players = eligible_players
         self.selected_players = []
         self.interaction_user = None
+        self.on_complete_callback = on_complete_callback
         
         # 드롭다운 메뉴 생성
         self.add_player_select()
@@ -122,7 +126,12 @@ class PlayerSelectionView(discord.ui.View):
             return
         
         # 다음 단계로 이동
-        options_view = BalancingOptionsView(self.bot, self.guild_id, self.selected_players)
+        options_view = BalancingOptionsView(
+            self.bot, 
+            self.guild_id, 
+            self.selected_players,
+            on_complete_callback=self.on_complete_callback 
+        )
         
         embed = discord.Embed(
             title="⚙️ 밸런싱 옵션 설정",
@@ -172,13 +181,14 @@ class PlayerSelectionView(discord.ui.View):
 class ManualTeamSelectionView(discord.ui.View):
     """수동 팀 선택 View (밸런스 체크 모드)"""
     
-    def __init__(self, bot, guild_id: str, all_users: List[Dict]):
-        super().__init__(timeout=900)  # 15분 타임아웃 (포지션 설정 시간 고려)
+    def __init__(self, bot, guild_id: str, all_users: List[Dict], on_complete_callback=None):
+        super().__init__(timeout=900)
         self.bot = bot
         self.guild_id = guild_id
         self.all_users = all_users
         self.interaction_user = None
-        
+        self.on_complete_callback = on_complete_callback
+
         # 팀 구성
         self.team_a_players = []
         self.team_b_players = []
@@ -590,7 +600,8 @@ class ManualTeamSelectionView(discord.ui.View):
             # 결과 표시
             result_view = BalanceCheckResultView(
                 self.bot, result, self.team_a_players, self.team_b_players, 
-                self.all_users, self.team_a_positions, self.team_b_positions
+                self.all_users, self.team_a_positions, self.team_b_positions,
+                on_complete_callback=self.on_complete_callback 
             )
             result_embed = result_view.create_balance_check_embed(result)
             
@@ -732,7 +743,7 @@ class BalanceCheckResultView(discord.ui.View):
     """밸런스 체크 결과 표시 View (포지션 정보 포함)"""
     
     def __init__(self, bot, result, team_a_players, team_b_players, all_users, 
-                 team_a_positions=None, team_b_positions=None):
+                 team_a_positions=None, team_b_positions=None, on_complete_callback=None):
         super().__init__(timeout=600)
         self.bot = bot
         self.result = result
@@ -741,12 +752,56 @@ class BalanceCheckResultView(discord.ui.View):
         self.all_users = all_users
         self.team_a_positions = team_a_positions or {}
         self.team_b_positions = team_b_positions or {}
+        self.on_complete_callback = on_complete_callback
         
         # 버튼 추가
         self.add_result_buttons()
+
+    async def confirm_this_composition(self, interaction: discord.Interaction):
+        """🆕 현재 팀 구성 확정 및 콜백 호출"""
+        if not self.on_complete_callback:
+            await interaction.response.send_message(
+                "❌ 이 기능을 사용할 수 없습니다.",
+                ephemeral=True
+            )
+            return
+        
+        try:
+            # 콜백 호출
+            await self.on_complete_callback(
+                interaction=interaction,
+                team_a=self.original_team_a,
+                team_b=self.original_team_b,
+                team_a_positions=self.team_a_positions,
+                team_b_positions=self.team_b_positions,
+                balancing_mode="check"
+            )
+            # 콜백이 메시지를 처리하므로 여기서는 추가 응답 불필요
+            
+        except Exception as e:
+            logger.error(f"구성 확정 중 오류: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ 구성 확정 중 오류가 발생했습니다: {str(e)}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"❌ 구성 확정 중 오류가 발생했습니다: {str(e)}",
+                    ephemeral=True
+                )
     
     def add_result_buttons(self):
         """결과 화면 버튼들 추가"""
+        if self.on_complete_callback:
+            confirm_button = discord.ui.Button(
+                label="이 구성으로 확정",
+                style=discord.ButtonStyle.success,
+                emoji="✅"
+            )
+            confirm_button.callback = self.confirm_this_composition
+            self.add_item(confirm_button)
+
         # 팀 구성 수정 버튼
         edit_button = discord.ui.Button(
             label="팀 구성 수정",
@@ -1312,13 +1367,14 @@ class PlayerSelectDropdown(discord.ui.Select):
 class BalancingOptionsView(discord.ui.View):
     """밸런싱 옵션 선택 View"""
     
-    def __init__(self, bot, guild_id: str, selected_players: List[Dict]):
+    def __init__(self, bot, guild_id: str, selected_players: List[Dict], on_complete_callback=None): 
         super().__init__(timeout=300)
         self.bot = bot
         self.guild_id = guild_id
         self.selected_players = selected_players
         self.selected_mode = BalancingMode.PRECISE
         self.interaction_user = None
+        self.on_complete_callback = on_complete_callback
         
         # 모드 선택 드롭다운 추가
         self.add_mode_select()
@@ -1330,20 +1386,20 @@ class BalancingOptionsView(discord.ui.View):
             placeholder="밸런싱 모드를 선택하세요",
             options=[
                 discord.SelectOption(
-                    label="⚡ 빠른 밸런싱",
+                    label="빠른 밸런싱",
                     value="quick",
                     description="기본 승률 기반 빠른 계산 (~1초)",
                     emoji="⚡"
                 ),
                 discord.SelectOption(
-                    label="🎯 정밀 밸런싱",
+                    label="정밀 밸런싱",
                     value="precise",
                     description="모든 요소를 고려한 정밀 계산 (~5초)",
                     emoji="🎯",
                     default=True
                 ),
                 discord.SelectOption(
-                    label="🔬 실험적 밸런싱",
+                    label="실험적 밸런싱",
                     value="experimental",
                     description="새로운 조합을 시도하는 실험적 계산 (~2초)",
                     emoji="🔬"
@@ -1388,15 +1444,15 @@ class BalancingOptionsView(discord.ui.View):
         
         if selected_value == "quick":
             self.selected_mode = BalancingMode.QUICK
-            mode_name = "⚡ 빠른 밸런싱"
+            mode_name = "빠른 밸런싱"
             mode_desc = "기본 승률을 중심으로 빠르게 계산합니다."
         elif selected_value == "experimental":
             self.selected_mode = BalancingMode.EXPERIMENTAL
-            mode_name = "🔬 실험적 밸런싱"
+            mode_name = "실험적 밸런싱"
             mode_desc = "다양한 조합을 시도하여 새로운 팀 구성을 제안합니다."
         else:
             self.selected_mode = BalancingMode.PRECISE
-            mode_name = "🎯 정밀 밸런싱"
+            mode_name = "정밀 밸런싱"
             mode_desc = "포지션 적합도, 팀 시너지 등을 종합적으로 고려합니다."
         
         embed = discord.Embed(
@@ -1444,7 +1500,12 @@ class BalancingOptionsView(discord.ui.View):
                 return
             
             # 결과 표시
-            result_view = BalanceResultView(self.bot, results, self.selected_players)
+            result_view = BalanceResultView(
+                self.bot, 
+                results, 
+                self.selected_players,
+                on_complete_callback=self.on_complete_callback 
+            )
             result_embed = result_view.create_result_embed(results[0])
             
             await interaction.edit_original_response(embed=result_embed, view=result_view)
@@ -1492,12 +1553,13 @@ class BalancingOptionsView(discord.ui.View):
 class BalanceResultView(discord.ui.View):
     """밸런싱 결과 표시 View"""
     
-    def __init__(self, bot, results: List[BalanceResult], original_players: List[Dict]):
+    def __init__(self, bot, results: List[BalanceResult], original_players: List[Dict], on_complete_callback=None):
         super().__init__(timeout=600)  # 10분 타임아웃
         self.bot = bot
         self.results = results
         self.original_players = original_players
         self.current_index = 0
+        self.on_complete_callback = on_complete_callback
         
         self.add_buttons()
     
@@ -1666,9 +1728,99 @@ class BalanceResultView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=options_view)
     
     async def confirm_teams(self, interaction: discord.Interaction):
-        """팀 구성 확정"""
+        """팀 구성 확정 - 🆕 콜백 호출 추가"""
         result = self.results[self.current_index]
         
+        # 🔧 먼저 defer (버튼 클릭 후 3초 이내 응답)
+        await interaction.response.defer(ephemeral=True)
+        
+        # 팀 데이터 구성 (to_dict 메서드 사용)
+        try:
+            team_a_players = [
+                result.team_a.tank.to_dict(),
+                result.team_a.dps1.to_dict(),
+                result.team_a.dps2.to_dict(),
+                result.team_a.support1.to_dict(),
+                result.team_a.support2.to_dict()
+            ]
+            
+            team_b_players = [
+                result.team_b.tank.to_dict(),
+                result.team_b.dps1.to_dict(),
+                result.team_b.dps2.to_dict(),
+                result.team_b.support1.to_dict(),
+                result.team_b.support2.to_dict()
+            ]
+        except AttributeError:
+            # to_dict 메서드가 없는 경우 대체 방법
+            logger.warning("PlayerSkillData.to_dict() 메서드가 없습니다. 기본 변환 사용")
+            team_a_players = [
+                {'user_id': result.team_a.tank.user_id, 'username': result.team_a.tank.username},
+                {'user_id': result.team_a.dps1.user_id, 'username': result.team_a.dps1.username},
+                {'user_id': result.team_a.dps2.user_id, 'username': result.team_a.dps2.username},
+                {'user_id': result.team_a.support1.user_id, 'username': result.team_a.support1.username},
+                {'user_id': result.team_a.support2.user_id, 'username': result.team_a.support2.username}
+            ]
+            
+            team_b_players = [
+                {'user_id': result.team_b.tank.user_id, 'username': result.team_b.tank.username},
+                {'user_id': result.team_b.dps1.user_id, 'username': result.team_b.dps1.username},
+                {'user_id': result.team_b.dps2.user_id, 'username': result.team_b.dps2.username},
+                {'user_id': result.team_b.support1.user_id, 'username': result.team_b.support1.username},
+                {'user_id': result.team_b.support2.user_id, 'username': result.team_b.support2.username}
+            ]
+        
+        # 포지션 매핑
+        team_a_positions = {
+            result.team_a.tank.user_id: "탱커",
+            result.team_a.dps1.user_id: "딜러",
+            result.team_a.dps2.user_id: "딜러",
+            result.team_a.support1.user_id: "힐러",
+            result.team_a.support2.user_id: "힐러"
+        }
+        
+        team_b_positions = {
+            result.team_b.tank.user_id: "탱커",
+            result.team_b.dps1.user_id: "딜러",
+            result.team_b.dps2.user_id: "딜러",
+            result.team_b.support1.user_id: "힐러",
+            result.team_b.support2.user_id: "힐러"
+        }
+        
+        # 🆕 콜백 호출
+        if self.on_complete_callback:
+            try:
+                await self.on_complete_callback(
+                    interaction=interaction,
+                    team_a=team_a_players,
+                    team_b=team_b_players,
+                    team_a_positions=team_a_positions,
+                    team_b_positions=team_b_positions,
+                    balancing_mode="auto"
+                )
+                
+                # 🔧 콜백이 성공하면 원본 메시지 업데이트
+                embed = discord.Embed(
+                    title="✅ 팀 구성 확정!",
+                    description="게임 준비가 완료되었습니다.\n위 메시지의 버튼으로 결과를 기록할 수 있습니다.",
+                    color=0x00ff00
+                )
+                
+                self.clear_items()
+                await interaction.edit_original_response(embed=embed, view=self)
+                self.stop()
+                return
+                
+            except Exception as e:
+                logger.error(f"콜백 처리 중 오류: {e}", exc_info=True)
+                # 콜백 실패 시 기존 방식으로 처리
+                await interaction.followup.send(
+                    f"⚠️ 게임 준비 메시지 생성 중 문제가 발생했습니다.\n"
+                    f"팀 구성은 확정되었습니다.",
+                    ephemeral=True
+                )
+        
+        # 콜백이 없거나 실패한 경우 기존 방식
         embed = discord.Embed(
             title="✅ 팀 구성 확정 완료!",
             description="선택된 팀 구성이 확정되었습니다.",
@@ -1698,7 +1850,7 @@ class BalanceResultView(discord.ui.View):
         )
         
         self.clear_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
         self.stop()
     
     async def cancel(self, interaction: discord.Interaction):

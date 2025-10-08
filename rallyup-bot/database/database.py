@@ -7498,3 +7498,145 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 등록 유저 조회 실패: {e}")
             return []
+
+    async def record_scrim_result(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        position: str, 
+        result: str,
+        map_type: Optional[str] = None,
+        map_name: Optional[str] = None
+    ) -> None:
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 포지션 매핑
+                position_map = {
+                    '탱커': 'tank',
+                    '딜러': 'dps', 
+                    '힐러': 'support'
+                }
+                
+                position_key = position_map.get(position)
+                
+                if not position_key:
+                    print(f"⚠️ 알 수 없는 포지션: {position}, 기본값 'dps' 사용")
+                    position_key = 'dps'
+                
+                # 승리 여부
+                is_win = 1 if result == 'win' else 0
+                
+                # 기존 통계 조회
+                async with db.execute('''
+                    SELECT total_games, total_wins,
+                        tank_games, tank_wins,
+                        dps_games, dps_wins,
+                        support_games, support_wins
+                    FROM user_statistics
+                    WHERE user_id = ? AND guild_id = ?
+                ''', (user_id, guild_id)) as cursor:
+                    existing = await cursor.fetchone()
+                
+                if existing:
+                    # 기존 데이터 업데이트
+                    total_games = existing[0] + 1
+                    total_wins = existing[1] + is_win
+                    tank_games = existing[2] + (1 if position_key == 'tank' else 0)
+                    tank_wins = existing[3] + (is_win if position_key == 'tank' else 0)
+                    dps_games = existing[4] + (1 if position_key == 'dps' else 0)
+                    dps_wins = existing[5] + (is_win if position_key == 'dps' else 0)
+                    support_games = existing[6] + (1 if position_key == 'support' else 0)
+                    support_wins = existing[7] + (is_win if position_key == 'support' else 0)
+                    
+                    await db.execute('''
+                        UPDATE user_statistics
+                        SET total_games = ?,
+                            total_wins = ?,
+                            tank_games = ?,
+                            tank_wins = ?,
+                            dps_games = ?,
+                            dps_wins = ?,
+                            support_games = ?,
+                            support_wins = ?,
+                            last_updated = ?
+                        WHERE user_id = ? AND guild_id = ?
+                    ''', (
+                        total_games, total_wins,
+                        tank_games, tank_wins,
+                        dps_games, dps_wins,
+                        support_games, support_wins,
+                        datetime.now().isoformat(),
+                        user_id, guild_id
+                    ))
+                else:
+                    # 새 레코드 생성
+                    total_games = 1
+                    total_wins = is_win
+                    tank_games = 1 if position_key == 'tank' else 0
+                    tank_wins = is_win if position_key == 'tank' else 0
+                    dps_games = 1 if position_key == 'dps' else 0
+                    dps_wins = is_win if position_key == 'dps' else 0
+                    support_games = 1 if position_key == 'support' else 0
+                    support_wins = is_win if position_key == 'support' else 0
+                    
+                    await db.execute('''
+                        INSERT INTO user_statistics (
+                            user_id, guild_id,
+                            total_games, total_wins,
+                            tank_games, tank_wins,
+                            dps_games, dps_wins,
+                            support_games, support_wins,
+                            last_updated
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        user_id, guild_id,
+                        total_games, total_wins,
+                        tank_games, tank_wins,
+                        dps_games, dps_wins,
+                        support_games, support_wins,
+                        datetime.now().isoformat()
+                    ))
+                
+                await db.commit()
+                
+                # 로그 출력
+                result_text = "승리" if is_win else "패배"
+                print(f"✅ 통계 업데이트: User {user_id} - {position}({position_key}) {result_text}")
+                
+        except Exception as e:
+            print(f"❌ record_scrim_result 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+    async def get_user_statistics(self, guild_id: str, user_id: str) -> Optional[Dict]:
+        """특정 유저의 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT total_games, total_wins,
+                        tank_games, tank_wins,
+                        dps_games, dps_wins,
+                        support_games, support_wins
+                    FROM user_statistics
+                    WHERE user_id = ? AND guild_id = ?
+                ''', (user_id, guild_id)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result:
+                        return {
+                            'total_games': result[0],
+                            'total_wins': result[1],
+                            'tank_games': result[2],
+                            'tank_wins': result[3],
+                            'dps_games': result[4],
+                            'dps_wins': result[5],
+                            'support_games': result[6],
+                            'support_wins': result[7]
+                        }
+                    
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 유저 통계 조회 실패: {e}")
+            return None

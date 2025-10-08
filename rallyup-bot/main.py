@@ -11,6 +11,7 @@ from scheduler.wordle_scheduler import WordleScheduler
 from scheduler.scrim_scheduler import ScrimScheduler
 from commands.scrim_recruitment import RecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
+from utils.balancing_session_manager import session_manager
 
 from config.settings import Settings
 
@@ -162,6 +163,9 @@ class RallyUpBot(commands.Bot):
         await self.change_presence(
             activity=discord.Game(name="RallyUp 클랜 관리 | /help")
         )
+
+        await session_manager.start_cleanup_task()
+        print('✅ 밸런싱 세션 자동 정리 태스크 시작됨')
 
         # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:

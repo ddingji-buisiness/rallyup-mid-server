@@ -38,6 +38,17 @@ class PlayerSkillData:
     current_tier: Optional[str] = None
     recent_winrate: float = 0.0
 
+    def to_dict(self) -> dict:
+        """딕셔너리 변환"""
+        return {
+            'user_id': self.user_id,
+            'username': self.username,
+            'main_position': self.main_position,
+            'current_season_tier': getattr(self, 'current_season_tier', '배치안함'),
+            'total_games': getattr(self, 'total_games', 0),
+            'total_wins': getattr(self, 'total_wins', 0),
+        }
+
 @dataclass
 class TeamComposition:
     """팀 구성 정보"""
