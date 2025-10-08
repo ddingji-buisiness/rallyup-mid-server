@@ -100,9 +100,7 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-    
-    # ==================== 음성 모니터링 이벤트 ====================
-    
+        
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, 
@@ -451,9 +449,7 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"⚠️ 음성 모니터링 설정 조회 실패: {e}")
             return False
-    
-    # ==================== 공통 유틸리티 메서드 ====================
-    
+        
     async def _find_voice_channel(
         self, 
         interaction: discord.Interaction, 
@@ -610,7 +606,7 @@ class TeamInfoCommands(commands.Cog):
         if is_manual:
             embed.set_footer(text="💡 각 배틀태그 옆 복사 버튼을 클릭하세요")
         else:
-            embed.set_footer(text="🔄 자동 업데이트 | 위 코드블록을 드래그하여 복사하세요")
+            embed.set_footer(text="위 코드블록을 드래그하여 복사하세요")
         
         return embed
     
@@ -657,7 +653,7 @@ class TeamInfoCommands(commands.Cog):
         
         tier_map = {
             '브론즈': ('Bronze', 1), '실버': ('Silver', 2), '골드': ('Gold', 3),
-            '플래티넘': ('Platinum', 4), '플레티넘': ('Platinum', 4), '플레': ('Platinum', 4),
+            '플래티넘': ('Platinum', 4), '플레티넘': ('Platinum', 4), '플래': ('Platinum', 4),
             '다이아': ('Diamond', 5), '다이아몬드': ('Diamond', 5),
             '마스터': ('Master', 6), '그랜드마스터': ('Grandmaster', 7), '그마': ('Grandmaster', 7),
             '챌린저': ('Champion', 8), '챔피언': ('Champion', 8)
@@ -711,8 +707,6 @@ class TeamInfoCommands(commands.Cog):
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
 
-# ==================== View 클래스 ====================
-
 class TeamInfoPaginationView(discord.ui.View):
     """수동 /팀정보 명령어용 View"""
     
@@ -725,17 +719,38 @@ class TeamInfoPaginationView(discord.ui.View):
         self.cog = cog
         self.current_page = 0
         self.members_per_page = 5
-        self.total_pages = math.ceil(len(members_info) / self.members_per_page)
+        self.total_pages = math.ceil(len(members_info) / self.members_per_page) if members_info else 1
         
-        self.update_buttons()
+        # 버튼 초기 상태 설정
+        self._setup_buttons()
+    
+    def _setup_buttons(self):
+        """버튼 초기 설정"""
+        # 페이지가 1개면 페이징 버튼 제거
+        if self.total_pages <= 1:
+            # 이전/다음 버튼 찾아서 제거
+            items_to_remove = []
+            for item in self.children:
+                if isinstance(item, discord.ui.Button) and item.custom_id in ["prev_manual", "next_manual"]:
+                    items_to_remove.append(item)
+            for item in items_to_remove:
+                self.remove_item(item)
+        else:
+            # 버튼 상태 업데이트
+            self.update_buttons()
     
     def update_buttons(self):
         """버튼 상태 업데이트"""
-        self.prev_button.disabled = (self.current_page == 0)
-        self.next_button.disabled = (self.current_page >= self.total_pages - 1)
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.custom_id == "prev_manual":
+                    item.disabled = (self.current_page == 0)
+                elif item.custom_id == "next_manual":
+                    item.disabled = (self.current_page >= self.total_pages - 1)
     
-    @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="⬅️", custom_id="prev", row=0)
+    @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="⬅️", custom_id="prev_manual", row=0)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """이전 페이지"""
         if self.current_page > 0:
             self.current_page -= 1
             self.update_buttons()
@@ -743,12 +758,16 @@ class TeamInfoPaginationView(discord.ui.View):
                 self.voice_channel, self.members_info, self.avg_tier, self.current_page, is_manual=True
             )
             await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
     
-    @discord.ui.button(label="배틀태그 추가", style=discord.ButtonStyle.success, emoji="➕", custom_id="add_tag", row=0)
+    @discord.ui.button(label="배틀태그 추가", style=discord.ButtonStyle.success, emoji="➕", custom_id="add_tag_manual", row=0)
     async def add_battle_tag_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """배틀태그 추가"""
         guild_id = str(interaction.guild_id)
         user_id = str(interaction.user.id)
         
+        # 등록된 유저인지 확인
         import aiosqlite
         async with aiosqlite.connect(self.bot.db_manager.db_path, timeout=30.0) as db:
             async with db.execute('''
@@ -764,15 +783,17 @@ class TeamInfoPaginationView(discord.ui.View):
             )
             return
         
-        view = AccountTypeSelectView(self, self.bot)
+        # 계정 타입 선택 View
+        view = AccountTypeSelectView(self, self.bot, self.cog)
         await interaction.response.send_message(
             "**계정 타입을 선택해주세요:**",
             view=view,
             ephemeral=True
         )
     
-    @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="➡️", custom_id="next", row=0)
+    @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="➡️", custom_id="next_manual", row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """다음 페이지"""
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
             self.update_buttons()
@@ -780,13 +801,21 @@ class TeamInfoPaginationView(discord.ui.View):
                 self.voice_channel, self.members_info, self.avg_tier, self.current_page, is_manual=True
             )
             await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+    
+    async def on_timeout(self):
+        """타임아웃 시 버튼 비활성화"""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
 
 
 class AutoTeamInfoView(discord.ui.View):
     """자동 음성 모니터링용 View"""
     
     def __init__(self, voice_channel: discord.VoiceChannel, members_info: List[Dict], avg_tier: str, bot, cog):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # 타임아웃 없음 (자동 업데이트)
         self.voice_channel = voice_channel
         self.members_info = members_info
         self.avg_tier = avg_tier
@@ -794,14 +823,15 @@ class AutoTeamInfoView(discord.ui.View):
         self.cog = cog
         self.current_page = 0
         self.members_per_page = 5
-        self.total_pages = math.ceil(len(members_info) / self.members_per_page)
+        self.total_pages = math.ceil(len(members_info) / self.members_per_page) if members_info else 1
         
-        self.update_buttons()
+        # 버튼 초기 설정
+        self._setup_buttons()
     
-    def update_buttons(self):
-        """페이지가 1개면 페이징 버튼 숨김"""
+    def _setup_buttons(self):
+        """버튼 초기 설정"""
+        # 페이지가 1개면 페이징 버튼 제거
         if self.total_pages <= 1:
-            # 페이징 버튼 제거
             items_to_remove = []
             for item in self.children:
                 if isinstance(item, discord.ui.Button) and item.custom_id in ["prev_auto", "next_auto"]:
@@ -809,15 +839,20 @@ class AutoTeamInfoView(discord.ui.View):
             for item in items_to_remove:
                 self.remove_item(item)
         else:
-            for item in self.children:
-                if isinstance(item, discord.ui.Button):
-                    if item.custom_id == "prev_auto":
-                        item.disabled = (self.current_page == 0)
-                    elif item.custom_id == "next_auto":
-                        item.disabled = (self.current_page >= self.total_pages - 1)
+            self.update_buttons()
+    
+    def update_buttons(self):
+        """버튼 상태 업데이트"""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.custom_id == "prev_auto":
+                    item.disabled = (self.current_page == 0)
+                elif item.custom_id == "next_auto":
+                    item.disabled = (self.current_page >= self.total_pages - 1)
     
     @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="⬅️", custom_id="prev_auto", row=0)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """이전 페이지"""
         if self.current_page > 0:
             self.current_page -= 1
             self.update_buttons()
@@ -825,14 +860,18 @@ class AutoTeamInfoView(discord.ui.View):
                 self.voice_channel, self.members_info, self.avg_tier, self.current_page, is_manual=False
             )
             await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
     
     @discord.ui.button(label="새로고침", style=discord.ButtonStyle.success, emoji="🔄", custom_id="refresh_auto", row=0)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """수동 새로고침"""
         await interaction.response.defer()
         await self.cog._auto_update_team_info(self.voice_channel)
     
     @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="➡️", custom_id="next_auto", row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """다음 페이지"""
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
             self.update_buttons()
@@ -840,24 +879,29 @@ class AutoTeamInfoView(discord.ui.View):
                 self.voice_channel, self.members_info, self.avg_tier, self.current_page, is_manual=False
             )
             await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
 
 
 class AccountTypeSelectView(discord.ui.View):
     """계정 타입 선택 View"""
     
-    def __init__(self, parent_view, bot):
+    def __init__(self, parent_view, bot, cog):
         super().__init__(timeout=60)
         self.parent_view = parent_view
         self.bot = bot
+        self.cog = cog
     
     @discord.ui.button(label="본계정", style=discord.ButtonStyle.primary, emoji="⭐")
     async def main_account_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = AddBattleTagModal(self.parent_view, self.bot, "main")
+        """본계정 선택"""
+        modal = AddBattleTagModal(self.parent_view, self.bot, self.cog, "main")
         await interaction.response.send_modal(modal)
     
     @discord.ui.button(label="부계정", style=discord.ButtonStyle.secondary, emoji="💫")
     async def sub_account_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = AddBattleTagModal(self.parent_view, self.bot, "sub")
+        """부계정 선택"""
+        modal = AddBattleTagModal(self.parent_view, self.bot, self.cog, "sub")
         await interaction.response.send_modal(modal)
 
 
@@ -872,12 +916,14 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
         max_length=50
     )
     
-    def __init__(self, parent_view, bot, account_type: str):
+    def __init__(self, parent_view, bot, cog, account_type: str):
         super().__init__()
         self.parent_view = parent_view
         self.bot = bot
+        self.cog = cog
         self.account_type = account_type
         
+        # 타이틀 변경
         if account_type == "main":
             self.title = "본계정 배틀태그 추가"
         else:
@@ -891,6 +937,7 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
             user_id = str(interaction.user.id)
             battle_tag = self.battle_tag_input.value.strip()
             
+            # 배틀태그 형식 검증
             from utils.helpers import validate_battle_tag_format
             
             if not validate_battle_tag_format(battle_tag):
@@ -901,6 +948,7 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
                 )
                 return
             
+            # 배틀태그 추가 + API 호출
             success, rank_info = await self.bot.db_manager.add_battle_tag_with_api(
                 guild_id, user_id, battle_tag, self.account_type
             )
@@ -914,12 +962,17 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
                 )
                 return
             
+            # 성공 메시지
             account_type_text = "본계정" if self.account_type == "main" else "부계정"
             success_msg = f"✅ **{battle_tag}** ({account_type_text}) 추가 완료!"
             if rank_info:
                 success_msg += f"\n🎮 랭크 정보도 자동으로 저장되었습니다."
             
             await interaction.followup.send(success_msg, ephemeral=True)
+            
+            # 팀정보 임베드 새로고침 (수동 명령어인 경우만)
+            if isinstance(self.parent_view, TeamInfoPaginationView):
+                await self._refresh_team_info_embed(interaction)
             
         except Exception as e:
             print(f"❌ 배틀태그 추가 오류: {e}")
@@ -929,6 +982,47 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
                 f"❌ 배틀태그 추가 중 오류가 발생했습니다.",
                 ephemeral=True
             )
+    
+    async def _refresh_team_info_embed(self, interaction: discord.Interaction):
+        """팀정보 임베드 새로고침 (수동 /팀정보용)"""
+        try:
+            voice_channel = self.parent_view.voice_channel
+            guild_id = str(interaction.guild_id)
+            
+            # 음성 채널의 모든 멤버 정보 다시 조회
+            members = [m for m in voice_channel.members if not m.bot]
+            members_info = await self.cog._collect_members_info(guild_id, members)
+            avg_tier = self.cog._calculate_average_tier(members_info)
+            
+            # View 업데이트
+            self.parent_view.members_info = members_info
+            self.parent_view.avg_tier = avg_tier
+            self.parent_view.total_pages = math.ceil(len(members_info) / self.parent_view.members_per_page) if members_info else 1
+            
+            # 현재 페이지가 범위를 벗어나면 조정
+            if self.parent_view.current_page >= self.parent_view.total_pages:
+                self.parent_view.current_page = max(0, self.parent_view.total_pages - 1)
+            
+            # 버튼 재설정
+            self.parent_view._setup_buttons()
+            
+            # 임베드 재생성
+            embed = self.cog._create_team_embed(
+                voice_channel, members_info, avg_tier, self.parent_view.current_page, is_manual=True
+            )
+            
+            # 원본 메시지 찾아서 수정
+            async for msg in interaction.channel.history(limit=20):
+                if msg.author == self.bot.user and len(msg.embeds) > 0:
+                    embed_title = msg.embeds[0].title
+                    if voice_channel.name in embed_title and "팀 정보" in embed_title:
+                        await msg.edit(embed=embed, view=self.parent_view)
+                        break
+            
+        except Exception as e:
+            print(f"❌ 팀정보 새로고침 오류: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 async def setup(bot):
