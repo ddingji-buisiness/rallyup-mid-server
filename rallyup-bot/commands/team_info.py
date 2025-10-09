@@ -17,7 +17,9 @@ class TeamInfoCommands(commands.Cog):
         self.channel_messages: Dict[str, Dict[str, int]] = {}  # {guild_id: {voice_channel_id: message_id}}
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # Debouncing 태스크
         self.active_guilds: set = set()  # 모니터링 활성화된 서버
-        
+    
+    # ==================== 기존 /팀정보 명령어 ====================
+    
     @app_commands.command(name="팀정보", description="음성 채널에 있는 팀원들의 배틀태그와 티어 정보를 표시합니다")
     @app_commands.describe(채널="정보를 확인할 음성 채널 (생략 시 본인이 속한 채널)")
     async def team_info(
@@ -100,7 +102,9 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-        
+    
+    # ==================== 음성 모니터링 이벤트 ====================
+    
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, 
@@ -449,7 +453,9 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"⚠️ 음성 모니터링 설정 조회 실패: {e}")
             return False
-        
+    
+    # ==================== 공통 유틸리티 메서드 ====================
+    
     async def _find_voice_channel(
         self, 
         interaction: discord.Interaction, 
@@ -606,7 +612,7 @@ class TeamInfoCommands(commands.Cog):
         if is_manual:
             embed.set_footer(text="💡 각 배틀태그 옆 복사 버튼을 클릭하세요")
         else:
-            embed.set_footer(text="위 코드블록을 드래그하여 복사하세요")
+            embed.set_footer(text="🔄 자동 업데이트 | 위 코드블록을 드래그하여 복사하세요")
         
         return embed
     
@@ -653,7 +659,7 @@ class TeamInfoCommands(commands.Cog):
         
         tier_map = {
             '브론즈': ('Bronze', 1), '실버': ('Silver', 2), '골드': ('Gold', 3),
-            '플래티넘': ('Platinum', 4), '플레티넘': ('Platinum', 4), '플래': ('Platinum', 4),
+            '플래티넘': ('Platinum', 4), '플레티넘': ('Platinum', 4), '플레': ('Platinum', 4),
             '다이아': ('Diamond', 5), '다이아몬드': ('Diamond', 5),
             '마스터': ('Master', 6), '그랜드마스터': ('Grandmaster', 7), '그마': ('Grandmaster', 7),
             '챌린저': ('Champion', 8), '챔피언': ('Champion', 8)
@@ -706,6 +712,8 @@ class TeamInfoCommands(commands.Cog):
         
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
+
+# ==================== View 클래스 ====================
 
 class TeamInfoPaginationView(discord.ui.View):
     """수동 /팀정보 명령어용 View"""
@@ -863,11 +871,35 @@ class AutoTeamInfoView(discord.ui.View):
         else:
             await interaction.response.defer()
     
-    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.success, emoji="🔄", custom_id="refresh_auto", row=0)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """수동 새로고침"""
-        await interaction.response.defer()
-        await self.cog._auto_update_team_info(self.voice_channel)
+    @discord.ui.button(label="배틀태그 추가", style=discord.ButtonStyle.primary, emoji="➕", custom_id="add_tag_auto", row=0)
+    async def add_battle_tag_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """배틀태그 추가"""
+        guild_id = str(interaction.guild_id)
+        user_id = str(interaction.user.id)
+        
+        # 등록된 유저인지 확인
+        import aiosqlite
+        async with aiosqlite.connect(self.bot.db_manager.db_path, timeout=30.0) as db:
+            async with db.execute('''
+                SELECT user_id FROM registered_users
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+            ''', (guild_id, user_id)) as cursor:
+                is_registered = await cursor.fetchone() is not None
+        
+        if not is_registered:
+            await interaction.response.send_message(
+                "❌ 등록되지 않은 유저입니다. `/유저신청` 명령어로 먼저 가입 신청을 해주세요.",
+                ephemeral=True
+            )
+            return
+        
+        # 계정 타입 선택 View
+        view = AccountTypeSelectView(self, self.bot, self.cog)
+        await interaction.response.send_message(
+            "**계정 타입을 선택해주세요:**",
+            view=view,
+            ephemeral=True
+        )
     
     @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="➡️", custom_id="next_auto", row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -970,9 +1002,13 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
             
             await interaction.followup.send(success_msg, ephemeral=True)
             
-            # 팀정보 임베드 새로고침 (수동 명령어인 경우만)
+            # 임베드 새로고침
             if isinstance(self.parent_view, TeamInfoPaginationView):
-                await self._refresh_team_info_embed(interaction)
+                # 수동 /팀정보 명령어
+                await self._refresh_manual_team_info(interaction)
+            elif isinstance(self.parent_view, AutoTeamInfoView):
+                # 자동 음성 모니터링
+                await self._refresh_auto_team_info(interaction)
             
         except Exception as e:
             print(f"❌ 배틀태그 추가 오류: {e}")
@@ -983,8 +1019,8 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
                 ephemeral=True
             )
     
-    async def _refresh_team_info_embed(self, interaction: discord.Interaction):
-        """팀정보 임베드 새로고침 (수동 /팀정보용)"""
+    async def _refresh_manual_team_info(self, interaction: discord.Interaction):
+        """수동 /팀정보 명령어 임베드 새로고침"""
         try:
             voice_channel = self.parent_view.voice_channel
             guild_id = str(interaction.guild_id)
@@ -1020,7 +1056,20 @@ class AddBattleTagModal(discord.ui.Modal, title="배틀태그 추가"):
                         break
             
         except Exception as e:
-            print(f"❌ 팀정보 새로고침 오류: {e}")
+            print(f"❌ 수동 팀정보 새로고침 오류: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def _refresh_auto_team_info(self, interaction: discord.Interaction):
+        """자동 음성 모니터링 메시지 새로고침"""
+        try:
+            voice_channel = self.parent_view.voice_channel
+            
+            # 자동 업데이트 트리거 (기존 로직 재사용)
+            await self.cog._auto_update_team_info(voice_channel)
+            
+        except Exception as e:
+            print(f"❌ 자동 팀정보 새로고침 오류: {e}")
             import traceback
             traceback.print_exc()
 
