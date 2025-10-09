@@ -15,7 +15,8 @@ class TeamInfoCommands(commands.Cog):
         self.channel_messages: Dict[str, Dict[str, int]] = {}
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  
         self.active_guilds: set = set()
-    
+        self.resend_threshold = 10
+
     @commands.Cog.listener()
     async def on_ready(self):
         """봇 시작 시 DB에서 음성 모니터링 설정 로드"""
@@ -122,9 +123,7 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-    
-    # ==================== 음성 모니터링 이벤트 ====================
-    
+        
     @commands.Cog.listener()
     async def on_voice_state_update(
         self, 
@@ -179,7 +178,7 @@ class TeamInfoCommands(commands.Cog):
             print(f"❌ 자동 팀정보 업데이트 오류: {e}")
     
     async def _auto_update_team_info(self, voice_channel: discord.VoiceChannel):
-        """팀정보 자동 업데이트 (음성 모니터링용)"""
+        """팀정보 자동 업데이트 (음성 모니터링용) - 스마트 하이브리드 방식"""
         try:
             guild_id = str(voice_channel.guild.id)
             channel_id = str(voice_channel.id)
@@ -190,7 +189,6 @@ class TeamInfoCommands(commands.Cog):
             # 2. 텍스트 채널 찾기 (같은 이름 + 권한 체크)
             text_channel = await self._find_text_channel(voice_channel)
             if not text_channel:
-                # 로그: 채널 없음 또는 권한 없음
                 print(f"ℹ️ 팀정보 발송 불가: {voice_channel.name} (권한 부족 또는 채널 접근 불가)")
                 return
             
@@ -201,23 +199,38 @@ class TeamInfoCommands(commands.Cog):
             # 4. 임베드 생성
             embed = self._create_team_embed(voice_channel, members_info, avg_tier, 0, is_manual=False)
             
-            # 5. 메시지 업데이트 또는 생성
+            # 5. 스마트 하이브리드: Edit vs Delete+Resend 결정
             if guild_id in self.channel_messages and channel_id in self.channel_messages[guild_id]:
-                # 기존 메시지 수정 시도
+                # 기존 메시지 존재
                 message_id = self.channel_messages[guild_id][channel_id]
+                
                 try:
-                    message = await text_channel.fetch_message(message_id)
+                    old_message = await text_channel.fetch_message(message_id)
                     
+                    # 멤버 없으면 삭제
                     if not members:
-                        # 멤버 없으면 삭제
-                        await message.delete()
+                        await old_message.delete()
                         del self.channel_messages[guild_id][channel_id]
                         return
                     
-                    view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
-                    await message.edit(embed=embed, view=view)
+                    # 🎯 스마트 결정: 마지막 팀정보 이후 메시지 개수 체크
+                    should_resend = await self._should_resend_message(text_channel, old_message)
+                    
+                    if should_resend:
+                        # 재발송: 삭제 후 새로 발송 (채팅 많을 때)
+                        await old_message.delete()
+                        view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
+                        new_message = await text_channel.send(embed=embed, view=view)
+                        self.channel_messages[guild_id][channel_id] = new_message.id
+                        print(f"🔄 팀정보 재발송: {voice_channel.name} (채팅 {self.resend_threshold}개 이상)")
+                    else:
+                        # Edit: 조용히 수정 (채팅 적을 때)
+                        view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
+                        await old_message.edit(embed=embed, view=view)
+                        print(f"✏️ 팀정보 수정: {voice_channel.name}")
                     
                 except discord.NotFound:
+                    # 메시지가 삭제됨 - 새로 생성
                     if members:
                         view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
                         new_message = await text_channel.send(embed=embed, view=view)
@@ -233,16 +246,36 @@ class TeamInfoCommands(commands.Cog):
                     if guild_id not in self.channel_messages:
                         self.channel_messages[guild_id] = {}
                     self.channel_messages[guild_id][channel_id] = new_message.id
+                    print(f"📨 팀정보 신규 발송: {voice_channel.name}")
         
         except discord.Forbidden:
-            # 권한 문제 - 이 경우는 발생하지 않아야 함 (_find_text_channel에서 미리 체크)
             print(f"❌ 예상치 못한 권한 오류: {voice_channel.name}")
         except Exception as e:
             print(f"❌ 자동 팀정보 업데이트 실패: {voice_channel.name} - {e}")
             import traceback
             traceback.print_exc()
-    
-    # ==================== 음성 모니터링 설정 명령어 ====================
+
+    async def _should_resend_message(
+        self, 
+        text_channel: discord.abc.Messageable, 
+        old_message: discord.Message
+    ) -> bool:
+        try:
+            # 마지막 팀정보 메시지 이후의 메시지 개수 세기
+            messages_after = 0
+            
+            async for message in text_channel.history(limit=50, after=old_message.created_at):
+                # 봇 메시지는 제외 (팀정보 메시지 제외)
+                if not message.author.bot:
+                    messages_after += 1
+            
+            # 임계값 이상이면 재발송
+            return messages_after >= self.resend_threshold
+            
+        except Exception as e:
+            print(f"⚠️ 메시지 카운트 실패: {e}")
+            # 오류 시 안전하게 Edit 선택
+            return False
     
     @app_commands.command(name="음성모니터", description="[관리자] 음성 채널 자동 팀정보 모니터링 설정")
     @app_commands.describe(활성화="모니터링 활성화 여부")
@@ -473,9 +506,7 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"⚠️ 음성 모니터링 설정 조회 실패: {e}")
             return False
-    
-    # ==================== 공통 유틸리티 메서드 ====================
-    
+        
     async def _find_voice_channel(
         self, 
         interaction: discord.Interaction, 
@@ -580,7 +611,7 @@ class TeamInfoCommands(commands.Cog):
         page_info = f" ({page + 1}/{total_pages})" if total_pages > 1 else ""
         
         embed = discord.Embed(
-            title=f"🎮 {voice_channel.name} 팀 정보{page_info}",
+            title=f"{voice_channel.name} 팀 정보{page_info}",
             color=0x00D9FF,
             description=f"━━━━━━━━━━━━━━━━━━\n"
                        f"**총 인원:** {len(members_info)}명 | **평균 티어:** {avg_tier}",
@@ -604,7 +635,7 @@ class TeamInfoCommands(commands.Cog):
             if tier:
                 tier_display = f" ({self._format_tier_display(tier)})"
             
-            member_lines.append(f"\n👤 **{member.display_name}**{tier_display}")
+            member_lines.append(f"\n👤 <@{member.id}>{tier_display}")
             
             if not battle_tags:
                 member_lines.append("   ⚠️ 등록된 배틀태그 없음")
@@ -632,7 +663,7 @@ class TeamInfoCommands(commands.Cog):
         if is_manual:
             embed.set_footer(text="💡 각 배틀태그 옆 복사 버튼을 클릭하세요")
         else:
-            embed.set_footer(text="🔄 자동 업데이트 | 위 코드블록을 드래그하여 복사하세요")
+            embed.set_footer(text="위 코드블록을 드래그하여 복사하세요")
         
         return embed
     
@@ -732,8 +763,6 @@ class TeamInfoCommands(commands.Cog):
         
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
-
-# ==================== View 클래스 ====================
 
 class TeamInfoPaginationView(discord.ui.View):
     """수동 /팀정보 명령어용 View"""
