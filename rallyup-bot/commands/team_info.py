@@ -12,13 +12,33 @@ class TeamInfoCommands(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
-        
-        # 음성 모니터링 관련
-        self.channel_messages: Dict[str, Dict[str, int]] = {}  # {guild_id: {voice_channel_id: message_id}}
-        self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # Debouncing 태스크
-        self.active_guilds: set = set()  # 모니터링 활성화된 서버
+        self.channel_messages: Dict[str, Dict[str, int]] = {}
+        self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  
+        self.active_guilds: set = set()
     
-    # ==================== 기존 /팀정보 명령어 ====================
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """봇 시작 시 DB에서 음성 모니터링 설정 로드"""
+        try:
+            import aiosqlite
+            
+            async with aiosqlite.connect(self.bot.db_manager.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT guild_id FROM voice_monitor_settings
+                    WHERE enabled = TRUE
+                ''') as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    for row in rows:
+                        self.active_guilds.add(row[0])
+                    
+                    if rows:
+                        print(f"✅ 음성 모니터링 설정 자동 로드: {len(rows)}개 서버")
+                    else:
+                        print(f"ℹ️ 활성화된 음성 모니터링 서버 없음")
+                        
+        except Exception as e:
+            print(f"⚠️ 음성 모니터링 설정 로드 실패: {e}")
     
     @app_commands.command(name="팀정보", description="음성 채널에 있는 팀원들의 배틀태그와 티어 정보를 표시합니다")
     @app_commands.describe(채널="정보를 확인할 음성 채널 (생략 시 본인이 속한 채널)")
