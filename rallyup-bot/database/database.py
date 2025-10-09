@@ -7486,15 +7486,24 @@ class DatabaseManager:
             return False
 
     async def get_all_registered_users(self, guild_id: str) -> List[Dict]:
-        """서버의 모든 등록된 유저 조회 (전체 정보 포함)"""
+        """서버의 모든 등록된 유저 조회 (대표 배틀태그 포함)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
-                    SELECT user_id, username, battle_tag, main_position, 
-                        current_season_tier, birth_year
-                    FROM registered_users
-                    WHERE guild_id = ? AND is_active = TRUE
-                    ORDER BY username
+                    SELECT 
+                        r.user_id, 
+                        r.username, 
+                        COALESCE(ubt.battle_tag, r.battle_tag) as battle_tag,  -- 🔥 핵심!
+                        r.main_position, 
+                        r.current_season_tier, 
+                        r.birth_year
+                    FROM registered_users r
+                    LEFT JOIN user_battle_tags ubt 
+                        ON r.guild_id = ubt.guild_id 
+                        AND r.user_id = ubt.user_id 
+                        AND ubt.is_primary = TRUE
+                    WHERE r.guild_id = ? AND r.is_active = TRUE
+                    ORDER BY r.username
                 ''', (guild_id,)) as cursor:
                     rows = await cursor.fetchall()
                     return [{
