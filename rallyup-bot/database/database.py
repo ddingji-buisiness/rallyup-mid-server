@@ -391,6 +391,8 @@ class DatabaseManager:
                     is_active BOOLEAN DEFAULT TRUE,
                     is_muted BOOLEAN DEFAULT FALSE,
                     duration_seconds INTEGER DEFAULT 0,
+                    is_solo BOOLEAN DEFAULT FALSE,
+                    last_solo_marked_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -8374,3 +8376,115 @@ class DatabaseManager:
             await db.commit()
             
             return total_duration, active_duration
+
+    async def mark_session_as_solo(self, session_uuid: str):
+        """세션을 혼자 있는 상태로 표시"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_solo = TRUE,
+                    last_solo_marked_at = CURRENT_TIMESTAMP
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            await db.commit()
+
+    async def mark_session_as_active_with_partners(self, session_uuid: str):
+        """세션을 파트너와 함께 있는 상태로 표시"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_solo = FALSE
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            await db.commit()
+
+    async def get_session_elapsed_seconds(self, session_uuid: str) -> int:
+        """세션의 경과 시간 계산 (초)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT started_at, total_muted_seconds
+                FROM voice_sessions
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            
+            row = await cursor.fetchone()
+            if not row:
+                return 0
+            
+            started_at = datetime.fromisoformat(row[0])
+            total_muted_seconds = row[1] or 0
+            
+            # 총 경과 시간 - 음소거 시간
+            total_elapsed = (datetime.utcnow() - started_at).total_seconds()
+            active_seconds = total_elapsed - total_muted_seconds
+            
+            return int(max(0, active_seconds))
+
+    async def batch_update_relationships(self, updates: list):
+        """관계 시간 배치 업데이트
+        
+        Args:
+            updates: [(guild_id, user1_id, user2_id, seconds_to_add), ...]
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            for guild_id, user1_id, user2_id, seconds in updates:
+                # user1_id가 항상 작도록 정렬
+                if user1_id > user2_id:
+                    user1_id, user2_id = user2_id, user1_id
+                
+                await db.execute('''
+                    INSERT INTO user_relationships (
+                        guild_id, user1_id, user2_id, 
+                        total_time_seconds, last_played_together
+                    )
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id, user1_id, user2_id) 
+                    DO UPDATE SET
+                        total_time_seconds = total_time_seconds + ?,
+                        last_played_together = CURRENT_TIMESTAMP
+                ''', (guild_id, user1_id, user2_id, seconds, seconds))
+            
+            await db.commit()
+
+    async def get_relationships_for_pairs(self, guild_id: str, pairs: list) -> dict:
+        """여러 페어의 관계 정보 한 번에 조회
+        
+        Args:
+            pairs: [(user1_id, user2_id), ...]
+            
+        Returns:
+            {(user1_id, user2_id): {'total_time_seconds': ..., ...}, ...}
+        """
+        if not pairs:
+            return {}
+        
+        results = {}
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # IN 절을 사용한 배치 조회
+            placeholders = ','.join(['(?,?)' for _ in pairs])
+            params = [guild_id]
+            for user1, user2 in pairs:
+                if user1 > user2:
+                    user1, user2 = user2, user1
+                params.extend([user1, user2])
+            
+            cursor = await db.execute(f'''
+                SELECT user1_id, user2_id, total_time_seconds, last_played_together
+                FROM user_relationships
+                WHERE guild_id = ? 
+                AND (user1_id, user2_id) IN ({placeholders})
+            ''', params)
+            
+            rows = await cursor.fetchall()
+            
+            for row in rows:
+                key = (row[0], row[1])
+                results[key] = {
+                    'user1_id': row[0],
+                    'user2_id': row[1],
+                    'total_time_seconds': row[2],
+                    'last_played_together': row[3]
+                }
+        
+        return results

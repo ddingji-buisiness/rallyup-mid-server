@@ -128,7 +128,12 @@ class VoiceLevelTracker:
             logger.error(f"Error in handle_voice_move: {e}", exc_info=True)
     
     async def handle_mute_change(self, member: discord.Member, was_muted: bool, is_muted: bool):
-        """음소거 상태 변경 처리"""
+        """
+        음소거 상태 변경 처리 + 즉시 시간 정산
+        
+        개선사항: 음소거 전환 시 그 시점까지의 시간을 즉시 정산하여
+                중간 시간 손실 방지
+        """
         try:
             if member.bot:
                 return
@@ -145,12 +150,83 @@ class VoiceLevelTracker:
             session_key = (guild_id, user_id)
             session_uuid = self.active_sessions.get(session_key)
             
-            if session_uuid:
-                await self.db.update_session_mute_status_with_time(session_uuid, is_muted)
-                logger.info(f"🔇 {member.display_name} mute status: {is_muted}")
+            if not session_uuid:
+                session_data = await self.db.get_active_session(guild_id, user_id)
+                if session_data:
+                    session_uuid = session_data['session_uuid']
+            
+            if not session_uuid:
+                return
+            
+            if was_muted and not is_muted:
+                logger.info(f"🔊 {member.display_name} unmuted - settling previous active period")
+                
+                # 마지막 음소거 해제 이후 경과 시간 계산
+                session_data = await self.db.get_active_session(guild_id, user_id)
+                if session_data and session_data.get('mute_started_at'):
+                    # 음소거 시작 시점부터 지금까지의 시간은 이미 total_muted_seconds에 반영됨
+                    pass
+                
+                # 음소거 해제 전까지의 활성 시간 정산
+                elapsed_seconds = await self.db.get_session_elapsed_seconds(session_uuid)
+                
+                if elapsed_seconds > 0:
+                    # 현재 채널의 다른 유저들과 관계 시간 업데이트
+                    channel_id = session_data['channel_id'] if session_data else None
+                    if channel_id:
+                        users_in_channel = await self.db.get_users_in_channel(guild_id, channel_id)
+                        partner_ids = [u['user_id'] for u in users_in_channel if u['user_id'] != user_id]
+                        
+                        if partner_ids:
+                            # 부분 시간 정산
+                            await self._settle_partial_time(
+                                guild_id, user_id, channel_id, elapsed_seconds, partner_ids, settings
+                            )
+            
+            # 음소거 상태 업데이트
+            await self.db.update_session_mute_status_with_time(session_uuid, is_muted)
+            
+            status_text = "음소거" if is_muted else "음소거 해제"
+            logger.info(f"🔇 {member.display_name} {status_text}")
         
         except Exception as e:
             logger.error(f"Error in handle_mute_change: {e}", exc_info=True)
+
+    async def _settle_partial_time(
+        self,
+        guild_id: str,
+        user_id: str,
+        channel_id: str,
+        elapsed_seconds: int,
+        partner_ids: list,
+        settings: dict
+    ):
+        """
+        부분 시간 정산 (음소거 전환 시점에 호출)
+        
+        Args:
+            guild_id: 서버 ID
+            user_id: 유저 ID  
+            channel_id: 채널 ID
+            elapsed_seconds: 정산할 시간 (초)
+            partner_ids: 함께 있던 파트너들
+            settings: 서버 설정
+        """
+        try:
+            # 관계 시간 업데이트
+            await self._update_relationships_for_session(
+                guild_id, user_id, channel_id, elapsed_seconds
+            )
+            
+            # EXP 지급
+            await self._award_exp_for_session(
+                guild_id, user_id, elapsed_seconds, partner_ids, settings
+            )
+            
+            logger.info(f"💰 Settled {elapsed_seconds}s for user {user_id}")
+        
+        except Exception as e:
+            logger.error(f"Error settling partial time: {e}", exc_info=True)
     
     async def _update_relationships_for_session(self, guild_id: str, user_id: str, channel_id: str, duration: int):
         """세션 종료 시 해당 유저와 함께 있던 모든 유저와의 관계 시간 업데이트"""
@@ -286,7 +362,10 @@ class VoiceLevelTracker:
     async def relationship_update_task(self):
         """
         백그라운드 태스크: 1분마다 활성 세션의 관계 시간 업데이트
-        현재 함께 있는 유저들 간의 시간을 실시간으로 누적
+        
+        개선사항:
+        1. 혼자 있는 유저는 solo 상태로 표시
+        2. 대규모 채널은 배치 업데이트
         """
         try:
             import random
@@ -314,6 +393,7 @@ class VoiceLevelTracker:
                 
                 # 음성 채널별로 그룹화
                 channels_users: Dict[str, List[str]] = {}
+                solo_users: List[str] = []  
                 
                 for voice_channel in guild.voice_channels:
                     channel_id = str(voice_channel.id)
@@ -329,83 +409,116 @@ class VoiceLevelTracker:
                         if session_key in self.active_sessions:
                             # 음소거 체크
                             if settings['check_mute_status'] and member.voice and member.voice.self_mute:
-                                continue  # 음소거 유저는 제외
+                                continue
                             
                             users_in_channel.append(user_id)
                     
-                    if len(users_in_channel) >= 2:
+                    if len(users_in_channel) == 1:
+                        solo_users.append(users_in_channel[0])
+                    elif len(users_in_channel) >= 2:
                         channels_users[channel_id] = users_in_channel
                 
-                # 각 채널의 유저 쌍에 대해 60초 누적
+                for user_id in solo_users:
+                    session_key = (guild_id, user_id)
+                    session_uuid = self.active_sessions.get(session_key)
+                    if session_uuid:
+                        await self.db.mark_session_as_solo(session_uuid)
+                        logger.debug(f"👤 User {user_id} is solo in voice channel")
+                
                 for channel_id, users in channels_users.items():
-                    await self._update_channel_relationships(guild_id, users, 60)
-
+                    for user_id in users:
+                        session_key = (guild_id, user_id)
+                        session_uuid = self.active_sessions.get(session_key)
+                        if session_uuid:
+                            await self.db.mark_session_as_active_with_partners(session_uuid)
+                    
+                    await self._update_channel_relationships_batch(guild_id, users, 60)
+                    
+                    # EXP 지급
                     for user_id in users:
                         partner_ids = [uid for uid in users if uid != user_id]
                         await self._award_exp_for_session(
                             guild_id, user_id, 60, partner_ids, settings
                         )
-                    logger.debug(f"Updated {len(users)} users in channel {channel_id}")
+                    
+                    logger.debug(f"✅ Updated {len(users)} users in channel {channel_id}")
         
         except Exception as e:
             logger.error(f"Error in relationship_update_task: {e}", exc_info=True)
-    
-    async def _update_channel_relationships(self, guild_id: str, user_ids: List[str], seconds: int):
-        """
-        특정 채널에 있는 유저들 간의 모든 관계 시간 업데이트
-        Phase 3: 하이브리드 알림 로직 + 음소거 & 중복 방지
-        """
+
+    async def _update_channel_relationships_batch(
+        self, 
+        guild_id: str, 
+        user_ids: List[str], 
+        seconds: int
+    ):
         try:
+            if len(user_ids) < 2:
+                return
+            
             # Guild 객체 조회
             guild = self.bot.get_guild(int(guild_id))
             if not guild:
                 return
             
-            # 총 인원 수
-            total_users = len(user_ids)
-            
-            # 채널 ID 추출 (첫 번째 유저의 활성 세션에서)
+            # 채널 ID 추출
             channel_id = None
             if user_ids:
                 session_data = await self.db.get_active_session(guild_id, user_ids[0])
                 if session_data:
                     channel_id = session_data['channel_id']
             
-            # 마일스톤 체크용 데이터 수집
-            milestone_data = []  # [(user1_id, user2_id, old_hours, new_hours, achieved_milestones)]
-            
-            # 모든 유저 쌍(pair) 생성 및 업데이트
+            # 모든 페어 생성
+            pairs = []
             for i in range(len(user_ids)):
                 for j in range(i + 1, len(user_ids)):
                     user1_id = user_ids[i]
                     user2_id = user_ids[j]
-                    
-                    # 이전 관계 시간 조회
-                    old_relationship = await self.db.get_relationship(guild_id, user1_id, user2_id)
-                    old_seconds = old_relationship['total_time_seconds'] if old_relationship else 0
-                    old_hours = old_seconds / 3600.0
-                    
-                    # 관계 시간 업데이트
-                    await self.db.update_relationship_time(
-                        guild_id, user1_id, user2_id, seconds
-                    )
-                    
-                    # 새로운 관계 시간 조회
-                    new_relationship = await self.db.get_relationship(guild_id, user1_id, user2_id)
-                    new_seconds = new_relationship['total_time_seconds'] if new_relationship else 0
-                    new_hours = new_seconds / 3600.0
-                    
-                    # 달성한 마일스톤 찾기
-                    achieved_milestones = []
-                    for milestone in self.notification_manager.RELATIONSHIP_MILESTONES:
-                        if old_hours < milestone <= new_hours:
-                            achieved_milestones.append(milestone)
-                    
+                    if user1_id > user2_id:
+                        user1_id, user2_id = user2_id, user1_id
+                    pairs.append((user1_id, user2_id))
+            
+            logger.debug(f"📊 Processing {len(pairs)} pairs in batch")
+            
+            # 기존 관계 정보 한 번에 조회
+            old_relationships = await self.db.get_relationships_for_pairs(guild_id, pairs)
+            
+            # 배치 업데이트 준비
+            updates = []
+            milestone_data = []  # [(user1_id, user2_id, old_hours, new_hours, achieved_milestones)]
+            
+            for user1_id, user2_id in pairs:
+                # 기존 시간
+                old_rel = old_relationships.get((user1_id, user2_id))
+                old_seconds = old_rel['total_time_seconds'] if old_rel else 0
+                old_hours = old_seconds / 3600.0
+                
+                # 새로운 시간
+                new_seconds = old_seconds + seconds
+                new_hours = new_seconds / 3600.0
+                
+                # 업데이트 목록에 추가
+                updates.append((guild_id, user1_id, user2_id, seconds))
+                
+                # 달성한 마일스톤 찾기
+                achieved_milestones = []
+                for milestone in self.notification_manager.RELATIONSHIP_MILESTONES:
+                    if old_hours < milestone <= new_hours:
+                        achieved_milestones.append(milestone)
+                
+                if achieved_milestones:
                     milestone_data.append((user1_id, user2_id, old_hours, new_hours, achieved_milestones))
             
-            # ✅ 알림 발송 로직 (하이브리드 방식)
+            # 단일 트랜잭션으로 모든 관계 업데이트
+            await self.db.batch_update_relationships(updates)
+            
+            logger.info(f"✅ Batch updated {len(updates)} relationships in single transaction")
+            
+            # 알림 발송 (기존 로직 유지)
+            total_users = len(user_ids)
+            
             if total_users == 2:
-                # ===== 2명만 있을 때 → 일반 텍스트 페어 알림 =====
+                # 2명만 있을 때
                 for user1_id, user2_id, old_hours, new_hours, achieved_milestones in milestone_data:
                     if achieved_milestones:
                         user1 = guild.get_member(int(user1_id))
@@ -413,36 +526,28 @@ class VoiceLevelTracker:
                         
                         if user1 and user2:
                             for milestone in achieved_milestones:
-                                # 특별 마일스톤(50h+)은 Embed로
                                 if self.notification_manager.is_special_milestone(milestone):
                                     await self.notification_manager.send_special_milestone_embed(
                                         guild, user1, user2, milestone, new_hours
                                     )
                                 else:
-                                    # 일반 마일스톤은 텍스트로
                                     await self.notification_manager.send_relationship_milestone(
                                         guild, user1, user2, milestone
                                     )
             
             elif total_users >= 3:
-                # ===== 3명 이상 있을 때 =====
-                
-                # 모든 달성된 마일스톤 수집
+                # 3명 이상
                 all_achieved = set()
                 for _, _, _, _, achieved in milestone_data:
                     all_achieved.update(achieved)
                 
-                # 일반 마일스톤과 특별 마일스톤 분리
                 regular_milestones = [m for m in all_achieved if not self.notification_manager.is_special_milestone(m)]
                 special_milestones = [m for m in all_achieved if self.notification_manager.is_special_milestone(m)]
                 
-                # 1) 일반 마일스톤 처리
+                # 일반 마일스톤
                 if regular_milestones:
                     if len(regular_milestones) == 1:
-                        # 단일 마일스톤 → 일반 텍스트 그룹 알림
                         milestone = regular_milestones[0]
-                        
-                        # 멤버 리스트 생성
                         member_list = []
                         for user_id in user_ids:
                             member = guild.get_member(int(user_id))
@@ -450,41 +555,32 @@ class VoiceLevelTracker:
                                 member_list.append(member)
                         
                         if member_list:
-                            # ✅ channel_id 전달
                             await self.notification_manager.send_group_milestone(
                                 guild, member_list, milestone, channel_id
                             )
                     else:
-                        # 여러 마일스톤 → Embed
                         milestone_pairs = []
-                        
                         for user1_id, user2_id, _, _, achieved in milestone_data:
-                            # 일반 마일스톤만 필터링
                             regular_achieved = [m for m in achieved if not self.notification_manager.is_special_milestone(m)]
-                            
                             if regular_achieved:
                                 user1 = guild.get_member(int(user1_id))
                                 user2 = guild.get_member(int(user2_id))
-                                
                                 if user1 and user2:
                                     for milestone in regular_achieved:
                                         milestone_pairs.append((user1, user2, milestone))
                         
                         if milestone_pairs:
-                            # ✅ channel_id 전달
                             await self.notification_manager.send_multiple_milestones_embed(
                                 guild, milestone_pairs, channel_id
                             )
                 
-                # 2) 특별 마일스톤 → 항상 개별 Embed
+                # 특별 마일스톤
                 if special_milestones:
                     for user1_id, user2_id, _, new_hours, achieved in milestone_data:
                         special_achieved = [m for m in achieved if self.notification_manager.is_special_milestone(m)]
-                        
                         if special_achieved:
                             user1 = guild.get_member(int(user1_id))
                             user2 = guild.get_member(int(user2_id))
-                            
                             if user1 and user2:
                                 for milestone in special_achieved:
                                     await self.notification_manager.send_special_milestone_embed(
@@ -492,7 +588,7 @@ class VoiceLevelTracker:
                                     )
         
         except Exception as e:
-            logger.error(f"Error updating channel relationships: {e}", exc_info=True)
+            logger.error(f"Error in _update_channel_relationships_batch: {e}", exc_info=True)
 
     async def _award_exp_for_session(
         self,

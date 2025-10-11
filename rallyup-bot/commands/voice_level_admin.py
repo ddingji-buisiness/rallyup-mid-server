@@ -430,6 +430,145 @@ class VoiceLevelAdmin(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="음성세션검증", description="[관리자] 음성 세션 데이터 무결성 검사")
+    async def verify_voice_sessions(self, interaction: discord.Interaction):
+        """데이터 검증 및 자동 복구"""
+        try:
+            # 권한 확인
+            if not await self.is_admin(interaction):
+                await interaction.response.send_message(
+                    "❌ 이 명령어는 관리자만 사용할 수 있습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            guild_id = str(interaction.guild.id)
+            issues = []
+            fixed = []
+            
+            # 1. 유령 세션 체크 (DB에는 있지만 실제로는 없음)
+            async with self.db.get_connection() as db:
+                cursor = await db.execute('''
+                    SELECT session_uuid, user_id, channel_id
+                    FROM voice_sessions
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,))
+                active_sessions = await cursor.fetchall()
+            
+            for session_uuid, user_id, channel_id in active_sessions:
+                member = interaction.guild.get_member(int(user_id))
+                
+                if not member or not member.voice:
+                    issues.append(f"👻 유령 세션: <@{user_id}> (채널에 없음)")
+                    
+                    # 자동 종료
+                    await self.db.end_voice_session_with_mute(session_uuid)
+                    fixed.append(f"✅ 세션 종료: <@{user_id}>")
+                
+                elif str(member.voice.channel.id) != channel_id:
+                    issues.append(f"🔄 채널 불일치: <@{user_id}>")
+                    
+                    # 세션 종료 후 새로 생성
+                    await self.db.end_voice_session_with_mute(session_uuid)
+                    
+                    is_muted = member.voice.self_mute if member.voice else False
+                    new_uuid = await self.db.create_voice_session(
+                        guild_id, user_id, str(member.voice.channel.id), is_muted
+                    )
+                    
+                    fixed.append(f"✅ 세션 재생성: <@{user_id}>")
+            
+            # 2. 누락된 세션 체크 (실제로는 있지만 DB에 없음)
+            for voice_channel in interaction.guild.voice_channels:
+                for member in voice_channel.members:
+                    if member.bot:
+                        continue
+                    
+                    user_id = str(member.id)
+                    
+                    session_data = await self.db.get_active_session(guild_id, user_id)
+                    
+                    if not session_data:
+                        issues.append(f"❌ 세션 누락: {member.mention}")
+                        
+                        # 세션 생성
+                        is_muted = member.voice.self_mute if member.voice else False
+                        session_uuid = await self.db.create_voice_session(
+                            guild_id, user_id, str(voice_channel.id), is_muted
+                        )
+                        
+                        # 메모리 캐시에도 추가
+                        if self.bot.voice_level_tracker:
+                            session_key = (guild_id, user_id)
+                            self.bot.voice_level_tracker.active_sessions[session_key] = session_uuid
+                        
+                        fixed.append(f"✅ 세션 생성: {member.mention}")
+            
+            # 3. 음수 시간 체크
+            async with self.db.get_connection() as db:
+                cursor = await db.execute('''
+                    SELECT user1_id, user2_id, total_time_seconds
+                    FROM user_relationships
+                    WHERE guild_id = ? AND total_time_seconds < 0
+                ''', (guild_id,))
+                negative_rels = await cursor.fetchall()
+            
+            if negative_rels:
+                for user1_id, user2_id, seconds in negative_rels:
+                    issues.append(f"⚠️ 음수 시간: <@{user1_id}> ↔ <@{user2_id}> ({seconds}초)")
+                    
+                    # 0으로 리셋
+                    async with self.db.get_connection() as db:
+                        await db.execute('''
+                            UPDATE user_relationships
+                            SET total_time_seconds = 0
+                            WHERE guild_id = ? AND user1_id = ? AND user2_id = ?
+                        ''', (guild_id, user1_id, user2_id))
+                        await db.commit()
+                    
+                    fixed.append(f"✅ 음수 시간 수정: <@{user1_id}> ↔ <@{user2_id}>")
+            
+            # 결과 출력
+            embed = discord.Embed(
+                title="🔍 음성 세션 검증 결과",
+                color=discord.Color.blue() if not issues else discord.Color.orange()
+            )
+            
+            if issues:
+                embed.add_field(
+                    name=f"⚠️ 발견된 문제 ({len(issues)}건)",
+                    value="\n".join(issues[:10]) + (f"\n... 외 {len(issues)-10}건" if len(issues) > 10 else ""),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="✅ 검증 완료",
+                    value="문제가 발견되지 않았습니다.",
+                    inline=False
+                )
+            
+            if fixed:
+                embed.add_field(
+                    name=f"🔧 자동 수정 ({len(fixed)}건)",
+                    value="\n".join(fixed[:10]) + (f"\n... 외 {len(fixed)-10}건" if len(fixed) > 10 else ""),
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"검사 완료 | 서버 ID: {guild_id}")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            logger.info(f"🔍 Session verification: {len(issues)} issues, {len(fixed)} fixed")
+        
+        except Exception as e:
+            logger.error(f"Error in verify_voice_sessions: {e}", exc_info=True)
+            await interaction.followup.send(
+                f"❌ 검증 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
 
 async def setup(bot):
     await bot.add_cog(VoiceLevelAdmin(bot))
