@@ -175,6 +175,14 @@ class RallyUpBot(commands.Bot):
         await session_manager.start_cleanup_task()
         print('✅ 밸런싱 세션 자동 정리 태스크 시작됨')
 
+        # 음성 세션 복구
+        if self.voice_level_tracker:
+            try:
+                await self.voice_level_tracker.restore_voice_sessions()
+                logger.info("🔄 음성 세션 복구 완료")
+            except Exception as e:
+                logger.error(f"❌ 음성 세션 복구 실패: {e}", exc_info=True)
+
         # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:
             logger.info("대나무숲 스케줄러가 실행중입니다.")

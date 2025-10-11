@@ -590,3 +590,67 @@ class VoiceLevelTracker:
         if self.relationship_update_task.is_running():
             self.relationship_update_task.cancel()
         logger.info("VoiceLevelTracker stopped")
+
+    async def restore_voice_sessions(self):
+        """
+        봇 재시작 시 활성 음성 세션 복구
+        현재 음성 채널에 있는 유저들의 세션 자동 생성
+        """
+        try:
+            restored_count = 0
+            
+            for guild in self.bot.guilds:
+                guild_id = str(guild.id)
+                
+                # 설정 확인
+                settings = await self.db.get_voice_level_settings(guild_id)
+                if not settings['enabled']:
+                    logger.debug(f"Voice level disabled for guild {guild.name}, skipping restore")
+                    continue
+                
+                # 각 음성 채널 확인
+                for voice_channel in guild.voice_channels:
+                    channel_id = str(voice_channel.id)
+                    
+                    for member in voice_channel.members:
+                        # 봇 제외
+                        if member.bot:
+                            continue
+                        
+                        user_id = str(member.id)
+                        session_key = (guild_id, user_id)
+                        
+                        # 이미 메모리에 세션이 있으면 스킵
+                        if session_key in self.active_sessions:
+                            continue
+                        
+                        # DB에 활성 세션이 있는지 확인
+                        existing_session = await self.db.get_active_session(guild_id, user_id)
+                        
+                        if existing_session:
+                            # 기존 세션 복구
+                            session_uuid = existing_session['session_uuid']
+                            self.active_sessions[session_key] = session_uuid
+                            logger.info(f"🔄 Restored existing session: {member.display_name} (Session: {session_uuid[:8]})")
+                            restored_count += 1
+                        else:
+                            # 새 세션 생성
+                            is_muted = member.voice.self_mute if member.voice else False
+                            
+                            session_uuid = await self.db.create_voice_session(
+                                guild_id, user_id, channel_id, is_muted
+                            )
+                            
+                            self.active_sessions[session_key] = session_uuid
+                            logger.info(f"🔄 Created new session: {member.display_name} (Session: {session_uuid[:8]})")
+                            restored_count += 1
+            
+            if restored_count > 0:
+                logger.info(f"✅ Restored {restored_count} voice session(s) after bot restart")
+            else:
+                logger.info("ℹ️ No active voice sessions to restore")
+        
+        except Exception as e:
+            logger.error(f"Error restoring voice sessions: {e}", exc_info=True)
+
+    
