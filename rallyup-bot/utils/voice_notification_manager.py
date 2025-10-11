@@ -28,10 +28,9 @@ class VoiceNotificationManager:
     def __init__(self, bot, db_manager):
         self.bot = bot
         self.db = db_manager
-        
-        # 스팸 방지: {(guild_id, user1_id, user2_id): [timestamp1, timestamp2, ...]}
         self.recent_notifications: Dict[Tuple[str, str, str], List[datetime]] = {}
-        
+        self.recent_channel_notifications: Dict[Tuple[str, str, int], datetime] = {}
+
         logger.info("✅ VoiceNotificationManager initialized")
 
     @staticmethod
@@ -113,7 +112,8 @@ class VoiceNotificationManager:
         self,
         guild: discord.Guild,
         members: List[discord.Member],
-        milestone_hours: int
+        milestone_hours: int,
+        channel_id: str = None  # ✅ 추가
     ):
         """
         그룹 마일스톤 알림 (3명 이상)
@@ -122,6 +122,7 @@ class VoiceNotificationManager:
             guild: 서버
             members: 멤버 리스트
             milestone_hours: 마일스톤 시간
+            channel_id: 음성 채널 ID (중복 방지용) - ✅ 추가
         """
         try:
             # 설정 조회
@@ -129,13 +130,21 @@ class VoiceNotificationManager:
             if not settings['enabled']:
                 return
             
-            channel_id = settings.get('notification_channel_id')
-            if not channel_id:
+            notification_channel_id = settings.get('notification_channel_id')
+            if not notification_channel_id:
                 return
             
-            channel = guild.get_channel(int(channel_id))
+            channel = guild.get_channel(int(notification_channel_id))
             if not channel:
                 return
+            
+            # ✅ 채널 중복 체크
+            if channel_id:
+                if not await self._can_send_channel_notification(
+                    str(guild.id), channel_id, milestone_hours
+                ):
+                    logger.debug(f"Group notification skipped (cooldown): channel {channel_id}, milestone {milestone_hours}h")
+                    return
             
             # 멤버 멘션 리스트 생성
             mentions = ", ".join([member.mention for member in members])
@@ -153,10 +162,14 @@ class VoiceNotificationManager:
             # 발송
             await channel.send(message)
             
+            # ✅ 채널 알림 기록
+            if channel_id:
+                self._record_channel_notification(str(guild.id), channel_id, milestone_hours)
+            
             logger.info(f"📢 Group milestone notification sent: {len(members)} members ({milestone_hours}h)")
         
         except discord.Forbidden:
-            logger.error(f"No permission to send message in channel {channel_id}")
+            logger.error(f"No permission to send message in channel {notification_channel_id}")
         except Exception as e:
             logger.error(f"Error sending group milestone notification: {e}", exc_info=True)
     
@@ -338,25 +351,32 @@ class VoiceNotificationManager:
         """오래된 알림 기록 정리 (메모리 관리)"""
         try:
             now = datetime.utcnow()
-            cutoff = now - timedelta(hours=24)
+            cutoff_24h = now - timedelta(hours=24)
+            cutoff_1h = now - timedelta(hours=1)
             
+            # 페어별 알림 기록 정리 (24시간)
             keys_to_delete = []
-            
             for key, timestamps in self.recent_notifications.items():
-                # 24시간 이내의 알림만 필터링
-                recent = [ts for ts in timestamps if ts > cutoff]
-                
+                recent = [ts for ts in timestamps if ts > cutoff_24h]
                 if recent:
                     self.recent_notifications[key] = recent
                 else:
                     keys_to_delete.append(key)
             
-            # 빈 키 삭제
             for key in keys_to_delete:
                 del self.recent_notifications[key]
             
-            if keys_to_delete:
-                logger.debug(f"Cleaned up {len(keys_to_delete)} old notification records")
+            # 채널별 알림 기록 정리 (1시간) - ✅ 추가
+            channel_keys_to_delete = []
+            for key, timestamp in self.recent_channel_notifications.items():
+                if timestamp <= cutoff_1h:
+                    channel_keys_to_delete.append(key)
+            
+            for key in channel_keys_to_delete:
+                del self.recent_channel_notifications[key]
+            
+            if keys_to_delete or channel_keys_to_delete:
+                logger.debug(f"Cleaned up {len(keys_to_delete)} pair and {len(channel_keys_to_delete)} channel notification records")
         
         except Exception as e:
             logger.error(f"Error cleaning up notifications: {e}", exc_info=True)
@@ -364,7 +384,8 @@ class VoiceNotificationManager:
     async def send_multiple_milestones_embed(
         self,
         guild: discord.Guild,
-        milestone_pairs: List[Tuple[discord.Member, discord.Member, int]]
+        milestone_pairs: List[Tuple[discord.Member, discord.Member, int]],
+        channel_id: str = None
     ):
         """
         여러 페어의 마일스톤을 Embed로 발송
@@ -378,14 +399,22 @@ class VoiceNotificationManager:
             settings = await self.db.get_voice_level_settings(str(guild.id))
             if not settings['enabled']:
                 return
-            
-            channel_id = settings.get('notification_channel_id')
-            if not channel_id:
+
+            notification_channel_id = settings.get('notification_channel_id')
+            if not notification_channel_id:
                 return
             
-            channel = guild.get_channel(int(channel_id))
+            channel = guild.get_channel(int(notification_channel_id))
             if not channel:
                 return
+                
+            if channel_id and milestone_pairs:
+                first_milestone = milestone_pairs[0][2]
+                if not await self._can_send_channel_notification(
+                    str(guild.id), channel_id, first_milestone
+                ):
+                    logger.debug(f"Multiple milestones embed skipped (cooldown): channel {channel_id}")
+                    return
             
             # 마일스톤별로 그룹화
             milestone_groups = {}  # {milestone_hours: [(user1, user2), ...]}
@@ -454,6 +483,10 @@ class VoiceNotificationManager:
             
             # 발송
             await channel.send(embed=embed)
+
+            if channel_id:
+                for _, _, milestone in milestone_pairs:
+                    self._record_channel_notification(str(guild.id), channel_id, milestone)
             
             logger.info(f"📢 Multiple milestones embed sent: {len(milestone_pairs)} pairs, {len(milestone_groups)} milestones")
         
@@ -567,3 +600,42 @@ class VoiceNotificationManager:
             logger.error(f"No permission to send message in channel {channel_id}")
         except Exception as e:
             logger.error(f"Error sending special milestone embed: {e}", exc_info=True)
+
+    async def _can_send_channel_notification(
+        self,
+        guild_id: str,
+        channel_id: str,
+        milestone: int,
+        cooldown_minutes: int = 5
+    ) -> bool:
+        """
+        채널별 알림 중복 방지
+        같은 채널에서 N분 이내 같은 마일스톤 알림은 발송 안함
+        
+        Args:
+            guild_id: 서버 ID
+            channel_id: 채널 ID
+            milestone: 마일스톤 시간
+            cooldown_minutes: 쿨다운 시간 (분)
+            
+        Returns:
+            알림 발송 가능 여부
+        """
+        key = (guild_id, channel_id, milestone)
+        now = datetime.utcnow()
+        
+        # 기존 기록 확인
+        if key in self.recent_channel_notifications:
+            last_time = self.recent_channel_notifications[key]
+            elapsed = (now - last_time).total_seconds() / 60.0
+            
+            if elapsed < cooldown_minutes:
+                logger.debug(f"Channel notification cooldown: {key} ({elapsed:.1f}분 경과)")
+                return False
+        
+        return True
+
+    def _record_channel_notification(self, guild_id: str, channel_id: str, milestone: int):
+        """채널 알림 발송 기록"""
+        key = (guild_id, channel_id, milestone)
+        self.recent_channel_notifications[key] = datetime.utcnow()

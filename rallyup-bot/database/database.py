@@ -8275,3 +8275,102 @@ class DatabaseManager:
             '''
             await db.execute(query, (value, datetime.utcnow().isoformat(), guild_id))
             await db.commit()
+
+    async def update_session_mute_status_with_time(self, session_uuid: str, is_muted: bool):
+        """
+        세션 음소거 상태 업데이트 및 음소거 시간 계산
+        
+        Args:
+            session_uuid: 세션 UUID
+            is_muted: 새로운 음소거 상태
+        """
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 현재 세션 정보 조회
+            cursor = await db.execute('''
+                SELECT is_muted, updated_at, muted_seconds 
+                FROM voice_sessions 
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            row = await cursor.fetchone()
+            
+            if not row:
+                return
+            
+            old_muted = bool(row[0])
+            last_update = datetime.fromisoformat(row[1])
+            current_muted_seconds = row[2] if row[2] else 0
+            
+            now = datetime.utcnow()
+            elapsed = (now - last_update).total_seconds()
+            
+            # 음소거 시간 계산
+            new_muted_seconds = current_muted_seconds
+            if old_muted:
+                # 이전에 음소거 상태였으면 경과 시간을 음소거 시간에 추가
+                new_muted_seconds += elapsed
+            
+            # 업데이트
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_muted = ?, updated_at = ?, muted_seconds = ?
+                WHERE session_uuid = ?
+            ''', (is_muted, now.isoformat(), new_muted_seconds, session_uuid))
+            await db.commit()
+
+
+    async def end_voice_session_with_mute(self, session_uuid: str):
+        """
+        음성 세션 종료 (음소거 시간 반영)
+        
+        Returns:
+            (total_duration, active_duration): 전체 시간, 활성 시간 (초)
+        """
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 세션 정보 조회
+            cursor = await db.execute('''
+                SELECT join_time, is_muted, updated_at, muted_seconds 
+                FROM voice_sessions 
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            row = await cursor.fetchone()
+            
+            if not row:
+                return 0, 0
+            
+            join_time = datetime.fromisoformat(row[0])
+            is_muted = bool(row[1])
+            last_update = datetime.fromisoformat(row[2])
+            muted_seconds = row[3] if row[3] else 0
+            
+            leave_time = datetime.utcnow()
+            
+            # 전체 체류 시간
+            total_duration = int((leave_time - join_time).total_seconds())
+            
+            # 마지막 구간 음소거 시간 추가
+            last_elapsed = (leave_time - last_update).total_seconds()
+            if is_muted:
+                muted_seconds += last_elapsed
+            
+            # 활성 시간 = 전체 시간 - 음소거 시간
+            active_duration = int(total_duration - muted_seconds)
+            active_duration = max(0, active_duration)  # 음수 방지
+            
+            # 세션 종료
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_active = FALSE, 
+                    leave_time = ?, 
+                    duration_seconds = ?,
+                    muted_seconds = ?,
+                    updated_at = ?
+                WHERE session_uuid = ?
+            ''', (leave_time.isoformat(), total_duration, int(muted_seconds), 
+                leave_time.isoformat(), session_uuid))
+            await db.commit()
+            
+            return total_duration, active_duration
