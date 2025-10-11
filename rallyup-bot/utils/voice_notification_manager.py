@@ -11,6 +11,7 @@ class VoiceNotificationManager:
     
     # 관계 마일스톤 (시간)
     RELATIONSHIP_MILESTONES = [1, 5, 10, 20, 50, 100, 200, 500]
+    SPECIAL_MILESTONES = [50, 100, 200, 500]
     
     # 알림 템플릿
     MILESTONE_TEMPLATES = {
@@ -32,6 +33,14 @@ class VoiceNotificationManager:
         self.recent_notifications: Dict[Tuple[str, str, str], List[datetime]] = {}
         
         logger.info("✅ VoiceNotificationManager initialized")
+
+    @staticmethod
+    def is_special_milestone(milestone_hours: int) -> bool:
+        """
+        특별 마일스톤인지 확인
+        50h, 100h, 200h, 500h는 3명 이상이어도 개별 알림 발송
+        """
+        return milestone_hours in VoiceNotificationManager.SPECIAL_MILESTONES
     
     async def send_relationship_milestone(
         self,
@@ -351,3 +360,210 @@ class VoiceNotificationManager:
         
         except Exception as e:
             logger.error(f"Error cleaning up notifications: {e}", exc_info=True)
+
+    async def send_multiple_milestones_embed(
+        self,
+        guild: discord.Guild,
+        milestone_pairs: List[Tuple[discord.Member, discord.Member, int]]
+    ):
+        """
+        여러 페어의 마일스톤을 Embed로 발송
+        
+        Args:
+            guild: 서버
+            milestone_pairs: [(user1, user2, milestone_hours), ...]
+        """
+        try:
+            # 설정 조회
+            settings = await self.db.get_voice_level_settings(str(guild.id))
+            if not settings['enabled']:
+                return
+            
+            channel_id = settings.get('notification_channel_id')
+            if not channel_id:
+                return
+            
+            channel = guild.get_channel(int(channel_id))
+            if not channel:
+                return
+            
+            # 마일스톤별로 그룹화
+            milestone_groups = {}  # {milestone_hours: [(user1, user2), ...]}
+            
+            for user1, user2, milestone in milestone_pairs:
+                if milestone not in milestone_groups:
+                    milestone_groups[milestone] = []
+                milestone_groups[milestone].append((user1, user2))
+            
+            # Embed 생성
+            embed = discord.Embed(
+                title="🎊 마일스톤 달성!",
+                description="여러 관계가 새로운 이정표를 달성했습니다!",
+                color=discord.Color.gold()
+            )
+            
+            # 마일스톤 순서대로 정렬
+            sorted_milestones = sorted(milestone_groups.keys())
+            
+            for milestone in sorted_milestones:
+                pairs = milestone_groups[milestone]
+                
+                # 이모지 및 제목
+                if milestone == 1:
+                    emoji = "🎉"
+                    title = "1시간 달성"
+                elif milestone == 5:
+                    emoji = "🔥"
+                    title = "5시간 돌파"
+                elif milestone == 10:
+                    emoji = "💎"
+                    title = "10시간 달성"
+                elif milestone == 20:
+                    emoji = "⭐"
+                    title = "20시간 달성"
+                elif milestone == 50:
+                    emoji = "🏆"
+                    title = "50시간 달성"
+                elif milestone == 100:
+                    emoji = "👑"
+                    title = "100시간 돌파"
+                elif milestone >= 200:
+                    emoji = "💫"
+                    title = f"{milestone}시간 달성"
+                else:
+                    emoji = "✨"
+                    title = f"{milestone}시간"
+                
+                # 페어 리스트 생성 (최대 5개까지만 표시)
+                pair_texts = []
+                for user1, user2 in pairs[:5]:
+                    pair_texts.append(f"{user1.mention} ↔ {user2.mention}")
+                
+                # 나머지가 있으면 추가
+                if len(pairs) > 5:
+                    remaining = len(pairs) - 5
+                    pair_texts.append(f"*외 {remaining}개 페어 더...*")
+                
+                value = "\n".join(pair_texts)
+                
+                embed.add_field(
+                    name=f"{emoji} {title}",
+                    value=value,
+                    inline=False
+                )
+            
+            # 발송
+            await channel.send(embed=embed)
+            
+            logger.info(f"📢 Multiple milestones embed sent: {len(milestone_pairs)} pairs, {len(milestone_groups)} milestones")
+        
+        except discord.Forbidden:
+            logger.error(f"No permission to send message in channel {channel_id}")
+        except Exception as e:
+            logger.error(f"Error sending multiple milestones embed: {e}", exc_info=True)
+    
+    async def send_special_milestone_embed(
+        self,
+        guild: discord.Guild,
+        user1: discord.Member,
+        user2: discord.Member,
+        milestone_hours: int,
+        total_hours: float
+    ):
+        """
+        특별 마일스톤을 강조된 Embed로 발송 (50h, 100h, 200h, 500h)
+        
+        Args:
+            guild: 서버
+            user1: 유저1
+            user2: 유저2
+            milestone_hours: 마일스톤 시간
+            total_hours: 총 누적 시간
+        """
+        try:
+            # 설정 조회
+            settings = await self.db.get_voice_level_settings(str(guild.id))
+            if not settings['enabled']:
+                return
+            
+            channel_id = settings.get('notification_channel_id')
+            if not channel_id:
+                return
+            
+            channel = guild.get_channel(int(channel_id))
+            if not channel:
+                return
+            
+            # 스팸 방지 체크
+            if not await self._can_send_notification(str(guild.id), str(user1.id), str(user2.id)):
+                logger.debug(f"Notification rate limit for special milestone {user1.id}-{user2.id}")
+                return
+            
+            # 마일스톤에 따른 내용
+            if milestone_hours == 50:
+                emoji = "🏆"
+                title = "진정한 단짝!"
+                description = f"{user1.mention}와 {user2.mention}가 **50시간**을 함께 플레이했습니다!"
+                color = discord.Color.from_rgb(255, 215, 0)  # 금색
+                status = "진정한 단짝"
+            elif milestone_hours == 100:
+                emoji = "👑"
+                title = "전설의 듀오!"
+                description = f"{user1.mention}와 {user2.mention}가 **100시간**을 돌파했습니다!"
+                color = discord.Color.from_rgb(147, 51, 234)  # 보라색
+                status = "전설의 듀오"
+            elif milestone_hours == 200:
+                emoji = "💫"
+                title = "놀라운 인연!"
+                description = f"{user1.mention}와 {user2.mention}가 **200시간**을 달성했습니다!"
+                color = discord.Color.from_rgb(59, 130, 246)  # 파란색
+                status = "놀라운 인연"
+            elif milestone_hours >= 500:
+                emoji = "🌟"
+                title = "영원한 파트너!"
+                description = f"{user1.mention}와 {user2.mention}가 **{milestone_hours}시간**을 돌파했습니다!"
+                color = discord.Color.from_rgb(236, 72, 153)  # 핑크색
+                status = "영원한 파트너"
+            else:
+                # 기본값 (예상치 못한 경우)
+                emoji = "✨"
+                title = "특별한 순간!"
+                description = f"{user1.mention}와 {user2.mention}가 **{milestone_hours}시간**을 함께 플레이했습니다!"
+                color = discord.Color.gold()
+                status = "특별한 관계"
+            
+            # Embed 생성
+            embed = discord.Embed(
+                title=f"{emoji} {title}",
+                description=description,
+                color=color
+            )
+            
+            # 상세 정보
+            embed.add_field(
+                name="⏱️ 함께한 시간",
+                value=f"**{int(total_hours)}시간 {int((total_hours % 1) * 60)}분**",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🎯 관계 등급",
+                value=f"**{status}**",
+                inline=True
+            )
+            
+            # 썸네일 (선택사항)
+            # embed.set_thumbnail(url=user1.display_avatar.url)
+            
+            # 발송
+            await channel.send(embed=embed)
+            
+            # 스팸 방지 기록
+            self._record_notification(str(guild.id), str(user1.id), str(user2.id))
+            
+            logger.info(f"📢 Special milestone embed sent: {user1.name}-{user2.name} ({milestone_hours}h)")
+        
+        except discord.Forbidden:
+            logger.error(f"No permission to send message in channel {channel_id}")
+        except Exception as e:
+            logger.error(f"Error sending special milestone embed: {e}", exc_info=True)

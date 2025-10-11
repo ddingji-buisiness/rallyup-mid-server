@@ -157,36 +157,133 @@ class VoiceLevelTracker:
                 logger.debug(f"No partners found for user {user_id} in channel {channel_id}")
                 return
             
+            # Guild 객체 조회 (알림용)
             guild = self.bot.get_guild(int(guild_id))
+            if not guild:
+                return
+            
+            # 총 인원 수 (본인 포함)
+            total_users = len(partners) + 1
+            
+            # 마일스톤 체크용 데이터 수집
+            milestone_data = []  # [(user_id, partner_id, old_hours, new_hours, achieved_milestones)]
             
             # 각 파트너와의 관계 시간 업데이트
             for partner in partners:
                 partner_id = partner['user_id']
-
-                # 이전 관계 시간 조회 (마일스톤 체크용)
+                
+                # 이전 관계 시간 조회
                 old_relationship = await self.db.get_relationship(guild_id, user_id, partner_id)
                 old_seconds = old_relationship['total_time_seconds'] if old_relationship else 0
                 old_hours = old_seconds / 3600.0
                 
-                # 관계 시간 업데이트 (duration 초만큼)
+                # 관계 시간 업데이트
                 await self.db.update_relationship_time(
                     guild_id, user_id, partner_id, duration
                 )
-
+                
                 # 새로운 관계 시간 조회
                 new_relationship = await self.db.get_relationship(guild_id, user_id, partner_id)
                 new_seconds = new_relationship['total_time_seconds'] if new_relationship else 0
                 new_hours = new_seconds / 3600.0
-
-                # 마일스톤 체크 및 알림
-                if guild:
-                    await self.notification_manager.check_and_send_milestone_notifications(
-                        guild, user_id, partner_id, old_hours, new_hours
-                    )
+                
+                # 달성한 마일스톤 찾기
+                achieved_milestones = []
+                for milestone in self.notification_manager.RELATIONSHIP_MILESTONES:
+                    if old_hours < milestone <= new_hours:
+                        achieved_milestones.append(milestone)
+                
+                milestone_data.append((user_id, partner_id, old_hours, new_hours, achieved_milestones))
                 
                 logger.debug(f"Updated relationship: {user_id} <-> {partner_id} (+{duration}s)")
             
-            logger.info(f"📊 Updated {len(partners)} relationships for user {user_id}")
+            # ✅ 알림 발송 로직 (하이브리드 방식)
+            if total_users == 2:
+                # ===== 2명만 있을 때 → 일반 텍스트 페어 알림 =====
+                for user_id, partner_id, old_hours, new_hours, achieved_milestones in milestone_data:
+                    if achieved_milestones:
+                        user = guild.get_member(int(user_id))
+                        partner = guild.get_member(int(partner_id))
+                        
+                        if user and partner:
+                            for milestone in achieved_milestones:
+                                # 특별 마일스톤(50h+)은 Embed로
+                                if self.notification_manager.is_special_milestone(milestone):
+                                    await self.notification_manager.send_special_milestone_embed(
+                                        guild, user, partner, milestone, new_hours
+                                    )
+                                else:
+                                    # 일반 마일스톤은 텍스트로
+                                    await self.notification_manager.send_relationship_milestone(
+                                        guild, user, partner, milestone
+                                    )
+            
+            elif total_users >= 3:
+                # ===== 3명 이상 있을 때 =====
+                
+                # 모든 달성된 마일스톤 수집
+                all_achieved = set()
+                for _, _, _, _, achieved in milestone_data:
+                    all_achieved.update(achieved)
+                
+                # 일반 마일스톤과 특별 마일스톤 분리
+                regular_milestones = [m for m in all_achieved if not self.notification_manager.is_special_milestone(m)]
+                special_milestones = [m for m in all_achieved if self.notification_manager.is_special_milestone(m)]
+                
+                # 1) 일반 마일스톤 처리
+                if regular_milestones:
+                    if len(regular_milestones) == 1:
+                        # 단일 마일스톤 → 일반 텍스트 그룹 알림
+                        milestone = regular_milestones[0]
+                        
+                        # 멤버 리스트 생성
+                        member_list = [guild.get_member(int(user_id))]
+                        for partner in partners:
+                            member = guild.get_member(int(partner['user_id']))
+                            if member:
+                                member_list.append(member)
+                        
+                        if member_list:
+                            await self.notification_manager.send_group_milestone(
+                                guild, member_list, milestone
+                            )
+                    else:
+                        # 여러 마일스톤 → Embed
+                        milestone_pairs = []
+                        
+                        for user_id, partner_id, _, _, achieved in milestone_data:
+                            # 일반 마일스톤만 필터링
+                            regular_achieved = [m for m in achieved if not self.notification_manager.is_special_milestone(m)]
+                            
+                            if regular_achieved:
+                                user = guild.get_member(int(user_id))
+                                partner = guild.get_member(int(partner_id))
+                                
+                                if user and partner:
+                                    for milestone in regular_achieved:
+                                        milestone_pairs.append((user, partner, milestone))
+                        
+                        if milestone_pairs:
+                            await self.notification_manager.send_multiple_milestones_embed(
+                                guild, milestone_pairs
+                            )
+                
+                # 2) 특별 마일스톤 → 항상 개별 Embed
+                if special_milestones:
+                    for user_id, partner_id, _, new_hours, achieved in milestone_data:
+                        special_achieved = [m for m in achieved if self.notification_manager.is_special_milestone(m)]
+                        
+                        if special_achieved:
+                            user = guild.get_member(int(user_id))
+                            partner = guild.get_member(int(partner_id))
+                            
+                            if user and partner:
+                                for milestone in special_achieved:
+                                    await self.notification_manager.send_special_milestone_embed(
+                                        guild, user, partner, milestone, new_hours
+                                    )
+            
+            logger.info(f"📊 Updated {len(partners)} relationships for user {user_id} (Total users: {total_users})")
         
         except Exception as e:
             logger.error(f"Error updating relationships: {e}", exc_info=True)
@@ -260,11 +357,23 @@ class VoiceLevelTracker:
             logger.error(f"Error in relationship_update_task: {e}", exc_info=True)
     
     async def _update_channel_relationships(self, guild_id: str, user_ids: List[str], seconds: int):
+        """
+        특정 채널에 있는 유저들 간의 모든 관계 시간 업데이트
+        Phase 3: 하이브리드 알림 로직
+        """
         try:
             # Guild 객체 조회
             guild = self.bot.get_guild(int(guild_id))
+            if not guild:
+                return
             
-            # 모든 유저 쌍(pair) 생성
+            # 총 인원 수
+            total_users = len(user_ids)
+            
+            # 마일스톤 체크용 데이터 수집
+            milestone_data = []  # [(user1_id, user2_id, old_hours, new_hours, achieved_milestones)]
+            
+            # 모든 유저 쌍(pair) 생성 및 업데이트
             for i in range(len(user_ids)):
                 for j in range(i + 1, len(user_ids)):
                     user1_id = user_ids[i]
@@ -285,11 +394,99 @@ class VoiceLevelTracker:
                     new_seconds = new_relationship['total_time_seconds'] if new_relationship else 0
                     new_hours = new_seconds / 3600.0
                     
-                    # 마일스톤 체크 및 알림
-                    if guild:
-                        await self.notification_manager.check_and_send_milestone_notifications(
-                            guild, user1_id, user2_id, old_hours, new_hours
-                        )
+                    # 달성한 마일스톤 찾기
+                    achieved_milestones = []
+                    for milestone in self.notification_manager.RELATIONSHIP_MILESTONES:
+                        if old_hours < milestone <= new_hours:
+                            achieved_milestones.append(milestone)
+                    
+                    milestone_data.append((user1_id, user2_id, old_hours, new_hours, achieved_milestones))
+            
+            # ✅ 알림 발송 로직 (하이브리드 방식)
+            if total_users == 2:
+                # ===== 2명만 있을 때 → 일반 텍스트 페어 알림 =====
+                for user1_id, user2_id, old_hours, new_hours, achieved_milestones in milestone_data:
+                    if achieved_milestones:
+                        user1 = guild.get_member(int(user1_id))
+                        user2 = guild.get_member(int(user2_id))
+                        
+                        if user1 and user2:
+                            for milestone in achieved_milestones:
+                                # 특별 마일스톤(50h+)은 Embed로
+                                if self.notification_manager.is_special_milestone(milestone):
+                                    await self.notification_manager.send_special_milestone_embed(
+                                        guild, user1, user2, milestone, new_hours
+                                    )
+                                else:
+                                    # 일반 마일스톤은 텍스트로
+                                    await self.notification_manager.send_relationship_milestone(
+                                        guild, user1, user2, milestone
+                                    )
+            
+            elif total_users >= 3:
+                # ===== 3명 이상 있을 때 =====
+                
+                # 모든 달성된 마일스톤 수집
+                all_achieved = set()
+                for _, _, _, _, achieved in milestone_data:
+                    all_achieved.update(achieved)
+                
+                # 일반 마일스톤과 특별 마일스톤 분리
+                regular_milestones = [m for m in all_achieved if not self.notification_manager.is_special_milestone(m)]
+                special_milestones = [m for m in all_achieved if self.notification_manager.is_special_milestone(m)]
+                
+                # 1) 일반 마일스톤 처리
+                if regular_milestones:
+                    if len(regular_milestones) == 1:
+                        # 단일 마일스톤 → 일반 텍스트 그룹 알림
+                        milestone = regular_milestones[0]
+                        
+                        # 멤버 리스트 생성
+                        member_list = []
+                        for user_id in user_ids:
+                            member = guild.get_member(int(user_id))
+                            if member:
+                                member_list.append(member)
+                        
+                        if member_list:
+                            await self.notification_manager.send_group_milestone(
+                                guild, member_list, milestone
+                            )
+                    else:
+                        # 여러 마일스톤 → Embed
+                        milestone_pairs = []
+                        
+                        for user1_id, user2_id, _, _, achieved in milestone_data:
+                            # 일반 마일스톤만 필터링
+                            regular_achieved = [m for m in achieved if not self.notification_manager.is_special_milestone(m)]
+                            
+                            if regular_achieved:
+                                user1 = guild.get_member(int(user1_id))
+                                user2 = guild.get_member(int(user2_id))
+                                
+                                if user1 and user2:
+                                    for milestone in regular_achieved:
+                                        milestone_pairs.append((user1, user2, milestone))
+                        
+                        if milestone_pairs:
+                            await self.notification_manager.send_multiple_milestones_embed(
+                                guild, milestone_pairs
+                            )
+                
+                # 2) 특별 마일스톤 → 항상 개별 Embed
+                if special_milestones:
+                    for user1_id, user2_id, _, new_hours, achieved in milestone_data:
+                        special_achieved = [m for m in achieved if self.notification_manager.is_special_milestone(m)]
+                        
+                        if special_achieved:
+                            user1 = guild.get_member(int(user1_id))
+                            user2 = guild.get_member(int(user2_id))
+                            
+                            if user1 and user2:
+                                for milestone in special_achieved:
+                                    await self.notification_manager.send_special_milestone_embed(
+                                        guild, user1, user2, milestone, new_hours
+                                    )
         
         except Exception as e:
             logger.error(f"Error updating channel relationships: {e}", exc_info=True)
