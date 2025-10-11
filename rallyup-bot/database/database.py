@@ -35,6 +35,7 @@ class DatabaseManager:
             await self.create_bamboo_tables()
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
+            await self.initialize_voice_level_tables()
 
             # users 테이블
             await db.execute('''
@@ -369,7 +370,94 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_user ON user_battle_tags(guild_id, user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_tag ON user_battle_tags(battle_tag)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_monitor_guild ON voice_monitor_settings(guild_id)')
+
             await db.commit()
+
+    async def initialize_voice_level_tables(self):
+        """음성 레벨 시스템 테이블 초기화"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 1. 음성 세션 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voice_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_uuid TEXT NOT NULL UNIQUE,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    join_time TIMESTAMP NOT NULL,
+                    leave_time TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_muted BOOLEAN DEFAULT FALSE,
+                    duration_seconds INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 2. 유저 간 관계 테이블 (핵심!)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_relationships (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user1_id TEXT NOT NULL,
+                    user2_id TEXT NOT NULL,
+                    total_time_seconds INTEGER DEFAULT 0,
+                    last_played_together TIMESTAMP,
+                    relationship_multiplier REAL DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, user1_id, user2_id),
+                    CHECK(user1_id < user2_id)
+                )
+            ''')
+            
+            # 3. 유저 레벨 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_levels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    current_level INTEGER DEFAULT 0,
+                    current_exp INTEGER DEFAULT 0,
+                    total_exp INTEGER DEFAULT 0,
+                    total_play_time_seconds INTEGER DEFAULT 0,
+                    unique_partners_count INTEGER DEFAULT 0,
+                    last_exp_gain TIMESTAMP,
+                    daily_exp_gained INTEGER DEFAULT 0,
+                    last_daily_reset TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, user_id)
+                )
+            ''')
+            
+            # 4. 서버별 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voice_level_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled BOOLEAN DEFAULT FALSE,
+                    notification_channel_id TEXT,
+                    base_exp_per_minute REAL DEFAULT 10.0,
+                    daily_exp_limit INTEGER DEFAULT 5000,
+                    min_session_minutes INTEGER DEFAULT 30,
+                    check_mute_status BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_sessions_active ON voice_sessions(guild_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_sessions_user ON voice_sessions(user_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_relationships_guild ON user_relationships(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_relationships_users ON user_relationships(user1_id, user2_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_levels_guild ON user_levels(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_levels_user ON user_levels(guild_id, user_id)')
+            
+            await db.commit()
+            print("✅ Voice level system tables initialized")
 
     async def initialize_clan_tables(self):
         """클랜전 관련 테이블 초기화"""
@@ -7689,3 +7777,501 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 음성 모니터링 설정 조회 실패: {e}")
             return False
+
+    async def create_voice_session(self, guild_id: str, user_id: str, channel_id: str, is_muted: bool = False):
+        """새로운 음성 세션 생성"""
+        import uuid
+        from datetime import datetime
+        
+        session_uuid = str(uuid.uuid4())
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO voice_sessions (session_uuid, guild_id, user_id, channel_id, join_time, is_muted)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (session_uuid, guild_id, user_id, channel_id, datetime.utcnow().isoformat(), is_muted))
+            await db.commit()
+        
+        return session_uuid
+
+
+    async def end_voice_session(self, session_uuid: str):
+        """음성 세션 종료"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 세션 정보 조회
+            cursor = await db.execute('''
+                SELECT join_time FROM voice_sessions WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            row = await cursor.fetchone()
+            
+            if row:
+                join_time = datetime.fromisoformat(row[0])
+                leave_time = datetime.utcnow()
+                duration = int((leave_time - join_time).total_seconds())
+                
+                await db.execute('''
+                    UPDATE voice_sessions 
+                    SET is_active = FALSE, leave_time = ?, duration_seconds = ?, updated_at = ?
+                    WHERE session_uuid = ?
+                ''', (leave_time.isoformat(), duration, datetime.utcnow().isoformat(), session_uuid))
+                await db.commit()
+                
+                return duration
+        
+        return 0
+
+
+    async def get_active_session(self, guild_id: str, user_id: str):
+        """유저의 활성 세션 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT session_uuid, channel_id, join_time, is_muted
+                FROM voice_sessions
+                WHERE guild_id = ? AND user_id = ? AND is_active = TRUE
+                ORDER BY join_time DESC
+                LIMIT 1
+            ''', (guild_id, user_id))
+            row = await cursor.fetchone()
+            
+            if row:
+                return {
+                    'session_uuid': row[0],
+                    'channel_id': row[1],
+                    'join_time': row[2],
+                    'is_muted': bool(row[3])
+                }
+        return None
+
+
+    async def update_session_mute_status(self, session_uuid: str, is_muted: bool):
+        """세션 음소거 상태 업데이트"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_muted = ?, updated_at = ?
+                WHERE session_uuid = ?
+            ''', (is_muted, datetime.utcnow().isoformat(), session_uuid))
+            await db.commit()
+
+
+    async def get_users_in_channel(self, guild_id: str, channel_id: str):
+        """특정 음성 채널에 있는 활성 유저 목록"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT user_id, session_uuid, is_muted
+                FROM voice_sessions
+                WHERE guild_id = ? AND channel_id = ? AND is_active = TRUE
+            ''', (guild_id, channel_id))
+            rows = await cursor.fetchall()
+            
+            return [{'user_id': row[0], 'session_uuid': row[1], 'is_muted': bool(row[2])} for row in rows]
+
+    async def update_relationship_time(self, guild_id: str, user1_id: str, user2_id: str, seconds: int):
+        """두 유저 간 함께한 시간 업데이트"""
+        from datetime import datetime
+        
+        # user1_id가 항상 작도록 정렬 (UNIQUE 제약 조건)
+        if user1_id > user2_id:
+            user1_id, user2_id = user2_id, user1_id
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 기존 관계 조회
+            cursor = await db.execute('''
+                SELECT total_time_seconds FROM user_relationships
+                WHERE guild_id = ? AND user1_id = ? AND user2_id = ?
+            ''', (guild_id, user1_id, user2_id))
+            row = await cursor.fetchone()
+            
+            now = datetime.utcnow().isoformat()
+            
+            if row:
+                # 기존 관계 업데이트
+                new_total = row[0] + seconds
+                await db.execute('''
+                    UPDATE user_relationships
+                    SET total_time_seconds = ?, last_played_together = ?, updated_at = ?
+                    WHERE guild_id = ? AND user1_id = ? AND user2_id = ?
+                ''', (new_total, now, now, guild_id, user1_id, user2_id))
+            else:
+                # 새 관계 생성
+                await db.execute('''
+                    INSERT INTO user_relationships 
+                    (guild_id, user1_id, user2_id, total_time_seconds, last_played_together)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (guild_id, user1_id, user2_id, seconds, now))
+            
+            await db.commit()
+
+    async def get_relationship(self, guild_id: str, user1_id: str, user2_id: str):
+        """두 유저 간 관계 정보 조회"""
+        # user1_id가 항상 작도록 정렬
+        if user1_id > user2_id:
+            user1_id, user2_id = user2_id, user1_id
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT total_time_seconds, last_played_together, relationship_multiplier
+                FROM user_relationships
+                WHERE guild_id = ? AND user1_id = ? AND user2_id = ?
+            ''', (guild_id, user1_id, user2_id))
+            row = await cursor.fetchone()
+            
+            if row:
+                return {
+                    'total_time_seconds': row[0],
+                    'last_played_together': row[1],
+                    'relationship_multiplier': row[2]
+                }
+        return None
+
+    async def get_user_relationships(self, guild_id: str, user_id: str):
+        """특정 유저의 모든 관계 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT 
+                    CASE WHEN user1_id = ? THEN user2_id ELSE user1_id END as partner_id,
+                    total_time_seconds,
+                    last_played_together
+                FROM user_relationships
+                WHERE guild_id = ? AND (user1_id = ? OR user2_id = ?)
+                ORDER BY total_time_seconds DESC
+            ''', (user_id, guild_id, user_id, user_id))
+            rows = await cursor.fetchall()
+            
+            return [{'partner_id': row[0], 'total_time_seconds': row[1], 'last_played_together': row[2]} 
+                    for row in rows]
+
+    async def get_voice_level_settings(self, guild_id: str):
+        """서버 음성 레벨 설정 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT enabled, notification_channel_id, base_exp_per_minute, 
+                    daily_exp_limit, min_session_minutes, check_mute_status
+                FROM voice_level_settings
+                WHERE guild_id = ?
+            ''', (guild_id,))
+            row = await cursor.fetchone()
+            
+            if row:
+                return {
+                    'enabled': bool(row[0]),
+                    'notification_channel_id': row[1],
+                    'base_exp_per_minute': row[2],
+                    'daily_exp_limit': row[3],
+                    'min_session_minutes': row[4],
+                    'check_mute_status': bool(row[5])
+                }
+            else:
+                # 기본값 반환
+                return {
+                    'enabled': False,
+                    'notification_channel_id': None,
+                    'base_exp_per_minute': 10.0,
+                    'daily_exp_limit': 5000,
+                    'min_session_minutes': 30,
+                    'check_mute_status': True
+                }
+
+    async def set_voice_level_enabled(self, guild_id: str, enabled: bool):
+        """음성 레벨 기능 활성화/비활성화"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO voice_level_settings (guild_id, enabled, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET enabled = ?, updated_at = ?
+            ''', (guild_id, enabled, datetime.utcnow().isoformat(), enabled, datetime.utcnow().isoformat()))
+            await db.commit()
+
+    async def get_user_level(self, guild_id: str, user_id: str):
+        """유저 레벨 정보 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT id, guild_id, user_id, current_level, current_exp, total_exp,
+                    total_play_time_seconds, unique_partners_count, last_exp_gain,
+                    daily_exp_gained, last_daily_reset, created_at, updated_at
+                FROM user_levels
+                WHERE guild_id = ? AND user_id = ?
+            ''', (guild_id, user_id))
+            row = await cursor.fetchone()
+            
+            if row:
+                return {
+                    'id': row[0],
+                    'guild_id': row[1],
+                    'user_id': row[2],
+                    'current_level': row[3],
+                    'current_exp': row[4],
+                    'total_exp': row[5],
+                    'total_play_time_seconds': row[6],
+                    'unique_partners_count': row[7],
+                    'last_exp_gain': row[8],
+                    'daily_exp_gained': row[9],
+                    'last_daily_reset': row[10],
+                    'created_at': row[11],
+                    'updated_at': row[12]
+                }
+        return None
+
+
+    async def create_user_level(self, guild_id: str, user_id: str):
+        """새로운 유저 레벨 레코드 생성"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.utcnow().isoformat()
+            await db.execute('''
+                INSERT INTO user_levels 
+                (guild_id, user_id, current_level, current_exp, total_exp, 
+                total_play_time_seconds, unique_partners_count, last_daily_reset)
+                VALUES (?, ?, 0, 0, 0, 0, 0, ?)
+            ''', (guild_id, user_id, now))
+            await db.commit()
+
+
+    async def update_user_level(
+        self,
+        guild_id: str,
+        user_id: str,
+        current_level: int,
+        current_exp: int,
+        total_exp: int,
+        daily_exp_gained: int
+    ):
+        """유저 레벨 정보 업데이트"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.utcnow().isoformat()
+            await db.execute('''
+                UPDATE user_levels
+                SET current_level = ?, current_exp = ?, total_exp = ?,
+                    daily_exp_gained = ?, last_exp_gain = ?, updated_at = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (current_level, current_exp, total_exp, daily_exp_gained, 
+                now, now, guild_id, user_id))
+            await db.commit()
+
+
+    async def update_user_play_time(self, guild_id: str, user_id: str, seconds_to_add: int):
+        """유저 총 플레이 시간 업데이트"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE user_levels
+                SET total_play_time_seconds = total_play_time_seconds + ?,
+                    updated_at = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (seconds_to_add, datetime.utcnow().isoformat(), guild_id, user_id))
+            await db.commit()
+
+
+    async def update_unique_partners_count(self, guild_id: str, user_id: str):
+        """유저의 고유 파트너 수 업데이트 (캐싱용)"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 현재 관계 수 계산
+            cursor = await db.execute('''
+                SELECT COUNT(*) FROM user_relationships
+                WHERE guild_id = ? AND (user1_id = ? OR user2_id = ?)
+            ''', (guild_id, user_id, user_id))
+            count = (await cursor.fetchone())[0]
+            
+            # 업데이트
+            await db.execute('''
+                UPDATE user_levels
+                SET unique_partners_count = ?, updated_at = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (count, datetime.utcnow().isoformat(), guild_id, user_id))
+            await db.commit()
+
+
+    async def reset_daily_exp(self, guild_id: str, user_id: str):
+        """일일 exp 리셋"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            now = datetime.utcnow().isoformat()
+            await db.execute('''
+                UPDATE user_levels
+                SET daily_exp_gained = 0, last_daily_reset = ?, updated_at = ?
+                WHERE guild_id = ? AND user_id = ?
+            ''', (now, now, guild_id, user_id))
+            await db.commit()
+
+
+    async def get_level_leaderboard(self, guild_id: str, limit: int = 10):
+        """레벨 순위표 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT user_id, current_level, total_exp, total_play_time_seconds, unique_partners_count
+                FROM user_levels
+                WHERE guild_id = ?
+                ORDER BY current_level DESC, total_exp DESC
+                LIMIT ?
+            ''', (guild_id, limit))
+            rows = await cursor.fetchall()
+            
+            return [
+                {
+                    'user_id': row[0],
+                    'current_level': row[1],
+                    'total_exp': row[2],
+                    'total_play_time_seconds': row[3],
+                    'unique_partners_count': row[4]
+                }
+                for row in rows
+            ]
+
+
+    async def get_diversity_leaderboard(self, guild_id: str, limit: int = 10):
+        """다양성 순위표 조회 (많은 사람과 플레이한 순)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT user_id, unique_partners_count, current_level, total_exp
+                FROM user_levels
+                WHERE guild_id = ? AND unique_partners_count > 0
+                ORDER BY unique_partners_count DESC, total_exp DESC
+                LIMIT ?
+            ''', (guild_id, limit))
+            rows = await cursor.fetchall()
+            
+            return [
+                {
+                    'user_id': row[0],
+                    'unique_partners_count': row[1],
+                    'current_level': row[2],
+                    'total_exp': row[3]
+                }
+                for row in rows
+            ]
+
+
+    async def get_user_rank(self, guild_id: str, user_id: str):
+        """유저의 서버 내 순위 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # 레벨 순위
+            cursor = await db.execute('''
+                SELECT COUNT(*) + 1 as rank
+                FROM user_levels
+                WHERE guild_id = ? 
+                AND (current_level > (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
+                    OR (current_level = (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
+                        AND total_exp > (SELECT total_exp FROM user_levels WHERE guild_id = ? AND user_id = ?)))
+            ''', (guild_id, guild_id, user_id, guild_id, user_id, guild_id, user_id))
+            level_rank = (await cursor.fetchone())[0]
+            
+            # 다양성 순위
+            cursor = await db.execute('''
+                SELECT COUNT(*) + 1 as rank
+                FROM user_levels
+                WHERE guild_id = ? 
+                AND unique_partners_count > (SELECT unique_partners_count FROM user_levels WHERE guild_id = ? AND user_id = ?)
+            ''', (guild_id, guild_id, user_id))
+            diversity_rank = (await cursor.fetchone())[0]
+            
+            # 총 유저 수
+            cursor = await db.execute('''
+                SELECT COUNT(*) FROM user_levels WHERE guild_id = ?
+            ''', (guild_id,))
+            total_users = (await cursor.fetchone())[0]
+            
+            return {
+                'level_rank': level_rank,
+                'diversity_rank': diversity_rank,
+                'total_users': total_users
+            }
+
+
+    async def get_top_relationships(self, guild_id: str, limit: int = 10):
+        """가장 많은 시간을 함께한 관계 순위"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT user1_id, user2_id, total_time_seconds, last_played_together
+                FROM user_relationships
+                WHERE guild_id = ?
+                ORDER BY total_time_seconds DESC
+                LIMIT ?
+            ''', (guild_id, limit))
+            rows = await cursor.fetchall()
+            
+            return [
+                {
+                    'user1_id': row[0],
+                    'user2_id': row[1],
+                    'total_time_seconds': row[2],
+                    'last_played_together': row[3]
+                }
+                for row in rows
+            ]
+
+    async def set_notification_channel(self, guild_id: str, channel_id: str):
+        """알림 채널 설정"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO voice_level_settings (guild_id, notification_channel_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET 
+                    notification_channel_id = ?, 
+                    updated_at = ?
+            ''', (guild_id, channel_id, datetime.utcnow().isoformat(), 
+                channel_id, datetime.utcnow().isoformat()))
+            await db.commit()
+
+
+    async def clear_notification_channel(self, guild_id: str):
+        """알림 채널 제거"""
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE voice_level_settings
+                SET notification_channel_id = NULL, updated_at = ?
+                WHERE guild_id = ?
+            ''', (datetime.utcnow().isoformat(), guild_id))
+            await db.commit()
+
+
+    async def update_voice_level_setting(self, guild_id: str, setting_name: str, value):
+        """개별 설정 업데이트 (범용)"""
+        from datetime import datetime
+        
+        # 허용된 설정 이름 체크
+        allowed_settings = [
+            'base_exp_per_minute',
+            'daily_exp_limit',
+            'min_session_minutes',
+            'check_mute_status'
+        ]
+        
+        if setting_name not in allowed_settings:
+            raise ValueError(f"Invalid setting name: {setting_name}")
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 기존 설정이 없으면 생성
+            cursor = await db.execute('''
+                SELECT guild_id FROM voice_level_settings WHERE guild_id = ?
+            ''', (guild_id,))
+            
+            if not await cursor.fetchone():
+                await db.execute('''
+                    INSERT INTO voice_level_settings (guild_id) VALUES (?)
+                ''', (guild_id,))
+            
+            # 설정 업데이트
+            query = f'''
+                UPDATE voice_level_settings
+                SET {setting_name} = ?, updated_at = ?
+                WHERE guild_id = ?
+            '''
+            await db.execute(query, (value, datetime.utcnow().isoformat(), guild_id))
+            await db.commit()

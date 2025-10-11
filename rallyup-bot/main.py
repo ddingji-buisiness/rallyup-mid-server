@@ -12,6 +12,7 @@ from scheduler.scrim_scheduler import ScrimScheduler
 from commands.scrim_recruitment import RecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
 from utils.balancing_session_manager import session_manager
+from utils.voice_level_tracker import VoiceLevelTracker
 
 from config.settings import Settings
 
@@ -50,6 +51,7 @@ class RallyUpBot(commands.Bot):
         self._continuous_challenge_enabled = False
         self.battle_tag_logger = None
         self.tier_change_scheduler = None  
+        self.voice_level_tracker = None
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
@@ -69,6 +71,10 @@ class RallyUpBot(commands.Bot):
             
             await self.bamboo_scheduler.start()
             logger.info("대나무숲 스케줄러 시작")
+
+            if not self.voice_level_tracker:
+                self.voice_level_tracker = VoiceLevelTracker(self)
+                logger.info("음성 레벨 트래커 시작")
 
             if not self.recruitment_scheduler:
                 self.recruitment_scheduler = RecruitmentScheduler(self)
@@ -122,7 +128,9 @@ class RallyUpBot(commands.Bot):
             'commands.nickname_format_admin',
             'commands.battle_tag_commands',
             'commands.battle_tag_log_admin',
-            'commands.team_info'
+            'commands.team_info',
+            'commands.voice_level_admin',
+            'commands.voice_level_user'
         ]
 
         for command_module in commands_to_load:
@@ -335,6 +343,34 @@ class RallyUpBot(commands.Bot):
         """새 길드 참여 시"""
         logger.info(f"🆕 새 서버 참여: {guild.name}")
 
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """음성 채널 상태 변경 이벤트"""
+        try:
+            # 음성 레벨 트래커가 없으면 무시
+            if not self.voice_level_tracker:
+                return
+            
+            # Case 1: 음성 채널 입장 (before: None, after: 채널)
+            if before.channel is None and after.channel is not None:
+                await self.voice_level_tracker.handle_voice_join(member, after.channel)
+            
+            # Case 2: 음성 채널 퇴장 (before: 채널, after: None)
+            elif before.channel is not None and after.channel is None:
+                await self.voice_level_tracker.handle_voice_leave(member, before.channel)
+            
+            # Case 3: 채널 이동 (before: 채널A, after: 채널B)
+            elif before.channel != after.channel:
+                await self.voice_level_tracker.handle_voice_move(member, before.channel, after.channel)
+            
+            # Case 4: 음소거 상태 변경
+            elif before.self_mute != after.self_mute:
+                await self.voice_level_tracker.handle_mute_change(
+                    member, before.self_mute, after.self_mute
+                )
+        
+        except Exception as e:
+            logger.error(f"Error in on_voice_state_update: {e}", exc_info=True)
+
     async def close(self):
         """봇 종료 시 실행"""
         try:
@@ -357,6 +393,10 @@ class RallyUpBot(commands.Bot):
             if self.tier_change_scheduler:
                 await self.tier_change_scheduler.stop()
                 logger.info("티어 변동 감지 스케줄러 종료")
+
+            if self.voice_level_tracker:
+                self.voice_level_tracker.stop()
+                logger.info("음성 레벨 트래커 종료")
 
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")
