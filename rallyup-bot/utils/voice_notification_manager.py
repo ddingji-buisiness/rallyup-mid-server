@@ -150,6 +150,9 @@ class VoiceNotificationManager:
             channel_id: 음성 채널 ID (중복 방지용)
         """
         try:
+            logger.info(f"Milestone event skipped (disabled): {len(users)} users, {milestone}h")
+            return
+
             guild_id = str(guild.id)
             
             # 설정 확인
