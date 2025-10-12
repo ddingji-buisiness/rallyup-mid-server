@@ -21,7 +21,7 @@ class VoiceLevelUser(commands.Cog):
     
     @app_commands.command(name="내레벨", description="내 레벨과 통계를 확인합니다")
     async def my_level(self, interaction: discord.Interaction):
-        """내 레벨 및 통계 조회"""
+        """내 레벨 및 통계 조회 (Phase 2 완성)"""
         try:
             guild_id = str(interaction.guild.id)
             user_id = str(interaction.user.id)
@@ -46,11 +46,28 @@ class VoiceLevelUser(commands.Cog):
                 )
                 return
             
+            # ✅ 현재 온라인 유저 ID 수집 (Phase 2)
+            online_user_ids = []
+            for voice_channel in interaction.guild.voice_channels:
+                for member in voice_channel.members:
+                    if not member.bot:
+                        online_user_ids.append(str(member.id))
+            
             # 순위 조회
             rank_info = await self.db.get_user_rank(guild_id, user_id)
             
             # 관계 정보 조회
             relationships = await self.db.get_user_relationships(guild_id, user_id)
+            
+            # ✅ 함께 안 한 멤버 조회 (온라인 우선, Phase 2)
+            never_played = await self.db.get_members_never_played_with_priority(
+                guild_id, user_id, online_user_ids, limit=3
+            )
+            
+            # ✅ 오래 안 논 친구 조회 (Phase 2)
+            dormant_friends = await self.db.get_dormant_relationships(
+                guild_id, user_id, min_hours=1.0, days_threshold=7, limit=3
+            )
             
             # Embed 생성
             embed = discord.Embed(
@@ -58,7 +75,7 @@ class VoiceLevelUser(commands.Cog):
                 color=discord.Color.blue()
             )
             
-            # 레벨 및 EXP
+            # 레벨 & EXP
             current_level = user_level['current_level']
             current_exp = user_level['current_exp']
             required_exp = self.exp_calculator.get_required_exp(current_level + 1)
@@ -103,9 +120,11 @@ class VoiceLevelUser(commands.Cog):
             
             # 함께 플레이한 사람
             unique_partners = user_level['unique_partners_count']
+            total_members = rank_info['total_users']
+            
             embed.add_field(
                 name="🤝 함께 플레이한 사람",
-                value=f"**{unique_partners}명**",
+                value=f"**{unique_partners}명** / {total_members}명",
                 inline=True
             )
             
@@ -120,12 +139,12 @@ class VoiceLevelUser(commands.Cog):
                 inline=False
             )
             
-            # 가장 많이 함께한 파트너 (상위 3명)
+            # ✅ 단짝 TOP 3
             if relationships:
                 top_3 = sorted(relationships, key=lambda x: x['total_time_seconds'], reverse=True)[:3]
                 partner_list = []
                 
-                for rel in top_3:
+                for idx, rel in enumerate(top_3, start=1):
                     partner_member = interaction.guild.get_member(int(rel['partner_id']))
                     partner_name = partner_member.display_name if partner_member else f"User {rel['partner_id']}"
                     
@@ -133,15 +152,77 @@ class VoiceLevelUser(commands.Cog):
                     rel_hours = rel_seconds // 3600
                     rel_minutes = (rel_seconds % 3600) // 60
                     
-                    partner_list.append(f"• {partner_name}: {rel_hours}h {rel_minutes}m")
+                    # 이모지 추가
+                    emoji = "💎" if idx == 1 else "🔥" if idx == 2 else "⭐"
+                    partner_list.append(f"{emoji} **{partner_name}**: {rel_hours}h {rel_minutes}m")
                 
                 embed.add_field(
-                    name="💫 자주 함께하는 파트너",
-                    value="\n".join(partner_list) if partner_list else "없음",
+                    name="👥 단짝 TOP 3",
+                    value="\n".join(partner_list) if partner_list else "아직 없음",
                     inline=False
                 )
             
-            embed.set_footer(text=f"서버 ID: {guild_id}")
+            # ✅ 새로운 인연 (온라인 우선 표시, Phase 2)
+            if never_played:
+                never_played_list = []
+                for entry in never_played:
+                    member = interaction.guild.get_member(int(entry['user_id']))
+                    if member:
+                        # 온라인이면 🟢, 오프라인이면 이모지 없음
+                        status = "🟢 " if entry['is_online'] else ""
+                        never_played_list.append(f"{status}**{member.display_name}**")
+                
+                if never_played_list:
+                    embed.add_field(
+                        name="🌱 새로운 인연 (함께 안 한 멤버)",
+                        value="• " + "\n• ".join(never_played_list),
+                        inline=False
+                    )
+            
+            # ✅ 오래 안 논 친구 (Phase 2)
+            if dormant_friends:
+                dormant_list = []
+                for friend in dormant_friends:
+                    member = interaction.guild.get_member(int(friend['partner_id']))
+                    if member:
+                        total_h = int(friend['total_hours'])
+                        days = friend['days_ago']
+                        dormant_list.append(
+                            f"• **{member.display_name}**: "
+                            f"마지막 {days}일 전 (총 {total_h}h)"
+                        )
+                
+                if dormant_list:
+                    embed.add_field(
+                        name="🕐 오랜만이에요",
+                        value="\n".join(dormant_list),
+                        inline=False
+                    )
+            
+            # ✅ 동적 유도 메시지
+            diversity_ratio = unique_partners / max(total_members - 1, 1)
+            
+            if diversity_ratio < 0.3:
+                tip = "💡 **다양한 멤버와 놀면 레벨업이 빨라져요!**"
+            elif diversity_ratio < 0.6:
+                tip = "🎉 **이미 절반 이상의 멤버와 놀았어요!**"
+            elif diversity_ratio < 0.9:
+                tip = "🌟 **거의 다 왔어요! 조금만 더 다양하게 놀아보세요!**"
+            else:
+                tip = "👑 **거의 모든 멤버와 함께 플레이했네요!**"
+            
+            # 온라인 멤버가 있으면 추가 메시지
+            online_never = [e for e in never_played if e['is_online']]
+            if online_never:
+                tip += f"\n🟢 지금 음성 채널에 새로운 멤버가 있어요!"
+            
+            embed.add_field(
+                name="💬 TIP",
+                value=tip,
+                inline=False
+            )
+            
+            embed.set_footer(text=f"서버 ID: {guild_id} | 🟢 = 현재 온라인")
             embed.set_thumbnail(url=interaction.user.display_avatar.url)
             
             await interaction.response.send_message(embed=embed)

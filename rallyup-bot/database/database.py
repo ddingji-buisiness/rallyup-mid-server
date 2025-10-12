@@ -8492,3 +8492,239 @@ class DatabaseManager:
                 }
         
         return results
+
+    async def get_members_never_played_with(self, guild_id: str, user_id: str, limit: int = 3):
+        """
+        함께 한 번도 플레이하지 않은 멤버 조회
+        
+        Args:
+            guild_id: 서버 ID
+            user_id: 유저 ID
+            limit: 반환할 최대 인원
+            
+        Returns:
+            List[str]: 함께 안 한 유저 ID 리스트
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. 해당 유저와 관계가 있는 모든 유저 ID 조회
+            cursor = await db.execute('''
+                SELECT DISTINCT
+                    CASE 
+                        WHEN user1_id = ? THEN user2_id
+                        ELSE user1_id
+                    END as partner_id
+                FROM user_relationships
+                WHERE guild_id = ? 
+                AND (user1_id = ? OR user2_id = ?)
+            ''', (user_id, guild_id, user_id, user_id))
+            
+            played_with = [row[0] for row in await cursor.fetchall()]
+            
+            # 2. 해당 서버의 모든 레벨 유저 조회 (본인 제외)
+            cursor = await db.execute('''
+                SELECT user_id
+                FROM user_levels
+                WHERE guild_id = ? AND user_id != ?
+                ORDER BY RANDOM()
+                LIMIT ?
+            ''', (guild_id, user_id, limit * 3))  # 여유있게 조회
+            
+            all_users = [row[0] for row in await cursor.fetchall()]
+            
+            # 3. 함께 안 한 사람만 필터링
+            never_played = [uid for uid in all_users if uid not in played_with]
+            
+            return never_played[:limit]
+
+    async def get_user_rank(self, guild_id: str, user_id: str):
+        """
+        유저의 순위 정보 조회
+        
+        Returns:
+            {
+                'level_rank': int,
+                'diversity_rank': int,
+                'total_users': int  # ← 이 값 사용
+            }
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # 레벨 순위
+            cursor = await db.execute('''
+                SELECT COUNT(*) + 1
+                FROM user_levels
+                WHERE guild_id = ? 
+                AND (current_level > (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
+                    OR (current_level = (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
+                        AND total_exp > (SELECT total_exp FROM user_levels WHERE guild_id = ? AND user_id = ?)))
+            ''', (guild_id, guild_id, user_id, guild_id, user_id, guild_id, user_id))
+            level_rank = (await cursor.fetchone())[0]
+            
+            # 다양성 순위
+            cursor = await db.execute('''
+                SELECT COUNT(*) + 1
+                FROM user_levels
+                WHERE guild_id = ? 
+                AND unique_partners_count > (SELECT unique_partners_count FROM user_levels WHERE guild_id = ? AND user_id = ?)
+            ''', (guild_id, guild_id, user_id))
+            diversity_rank = (await cursor.fetchone())[0]
+            
+            # 전체 유저 수
+            cursor = await db.execute('''
+                SELECT COUNT(*)
+                FROM user_levels
+                WHERE guild_id = ?
+            ''', (guild_id,))
+            total_users = (await cursor.fetchone())[0]
+            
+            return {
+                'level_rank': level_rank,
+                'diversity_rank': diversity_rank,
+                'total_users': total_users
+            }
+
+    async def get_members_never_played_with_priority(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        online_user_ids: List[str] = None,
+        limit: int = 3
+    ):
+        """
+        함께 한 번도 플레이하지 않은 멤버 조회 (온라인 우선)
+        
+        Args:
+            guild_id: 서버 ID
+            user_id: 유저 ID
+            online_user_ids: 현재 온라인(음성 채널)에 있는 유저 ID 리스트
+            limit: 반환할 최대 인원
+            
+        Returns:
+            List[dict]: [{'user_id': str, 'is_online': bool}, ...]
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. 함께 플레이한 적 있는 유저들
+            cursor = await db.execute('''
+                SELECT DISTINCT
+                    CASE 
+                        WHEN user1_id = ? THEN user2_id
+                        ELSE user1_id
+                    END as partner_id
+                FROM user_relationships
+                WHERE guild_id = ? 
+                AND (user1_id = ? OR user2_id = ?)
+            ''', (user_id, guild_id, user_id, user_id))
+            
+            played_with = set(row[0] for row in await cursor.fetchall())
+            
+            # 2. 해당 서버의 모든 유저 조회 (본인 제외)
+            cursor = await db.execute('''
+                SELECT user_id
+                FROM user_levels
+                WHERE guild_id = ? AND user_id != ?
+            ''', (guild_id, user_id))
+            
+            all_users = [row[0] for row in await cursor.fetchall()]
+            
+            # 3. 함께 안 한 사람 필터링
+            never_played = [uid for uid in all_users if uid not in played_with]
+            
+            # 4. 온라인/오프라인 분류
+            online_set = set(online_user_ids) if online_user_ids else set()
+            
+            online_never = [uid for uid in never_played if uid in online_set]
+            offline_never = [uid for uid in never_played if uid not in online_set]
+            
+            # 5. 온라인 우선 + 랜덤 섞기
+            import random
+            random.shuffle(online_never)
+            random.shuffle(offline_never)
+            
+            # 6. 결과 조합 (온라인 우선)
+            result = []
+            for uid in online_never[:limit]:
+                result.append({'user_id': uid, 'is_online': True})
+            
+            remaining = limit - len(result)
+            for uid in offline_never[:remaining]:
+                result.append({'user_id': uid, 'is_online': False})
+            
+            return result
+
+
+    async def get_dormant_relationships(
+        self, 
+        guild_id: str, 
+        user_id: str,
+        min_hours: float = 1.0,
+        days_threshold: int = 7,
+        limit: int = 3
+    ):
+        """
+        오래 안 논 친구 조회
+        
+        Args:
+            guild_id: 서버 ID
+            user_id: 유저 ID
+            min_hours: 최소 함께 플레이한 시간 (시간)
+            days_threshold: 며칠 이상 안 놨는지 (일)
+            limit: 반환할 최대 인원
+            
+        Returns:
+            List[dict]: [{'partner_id': str, 'total_hours': float, 'days_ago': int}, ...]
+        """
+        from datetime import datetime, timedelta
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 기준 시간 (N일 전)
+            threshold_date = datetime.utcnow() - timedelta(days=days_threshold)
+            threshold_str = threshold_date.isoformat()
+            
+            min_seconds = int(min_hours * 3600)
+            
+            # 조건:
+            # 1. 최소 min_hours 이상 함께 플레이
+            # 2. 마지막 플레이가 days_threshold일 이전
+            cursor = await db.execute('''
+                SELECT 
+                    CASE 
+                        WHEN user1_id = ? THEN user2_id
+                        ELSE user1_id
+                    END as partner_id,
+                    total_time_seconds,
+                    last_played_together
+                FROM user_relationships
+                WHERE guild_id = ?
+                AND (user1_id = ? OR user2_id = ?)
+                AND total_time_seconds >= ?
+                AND last_played_together IS NOT NULL
+                AND last_played_together < ?
+                ORDER BY last_played_together ASC
+                LIMIT ?
+            ''', (user_id, guild_id, user_id, user_id, min_seconds, threshold_str, limit))
+            
+            rows = await cursor.fetchall()
+            
+            result = []
+            for row in rows:
+                partner_id = row[0]
+                total_seconds = row[1]
+                last_played = row[2]
+                
+                total_hours = total_seconds / 3600.0
+                
+                # 며칠 전인지 계산
+                if last_played:
+                    last_date = datetime.fromisoformat(last_played)
+                    days_ago = (datetime.utcnow() - last_date).days
+                else:
+                    days_ago = 999
+                
+                result.append({
+                    'partner_id': partner_id,
+                    'total_hours': total_hours,
+                    'total_seconds': total_seconds,
+                    'days_ago': days_ago,
+                    'last_played': last_played
+                })
+            
+            return result
