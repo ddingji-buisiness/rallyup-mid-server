@@ -7,7 +7,6 @@ import os
 from database.database import DatabaseManager
 from scheduler.bamboo_scheduler import BambooForestScheduler
 from scheduler.recruitment_scheduler import RecruitmentScheduler
-from scheduler.wordle_scheduler import WordleScheduler
 from scheduler.scrim_scheduler import ScrimScheduler
 from commands.scrim_recruitment import RecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
@@ -61,10 +60,6 @@ class RallyUpBot(commands.Bot):
 
             await self.load_commands()
 
-            # logger.info("🔄 배틀태그 마이그레이션 시작...")
-            # migration_result = await self.db_manager.migrate_battle_tags_to_new_table()
-            # logger.info(f"✅ 마이그레이션 결과: {migration_result}")
-
             from utils.battle_tag_logger import BattleTagLogger
             self.battle_tag_logger = BattleTagLogger(self)
             logger.info("배틀태그 로거 초기화 완료")
@@ -85,11 +80,6 @@ class RallyUpBot(commands.Bot):
                 self.scrim_scheduler = ScrimScheduler(self)
                 await self.scrim_scheduler.start()
                 logger.info("스크림 스케줄러 시작")
-
-            if not self.wordle_scheduler:
-                self.wordle_scheduler = WordleScheduler(self)
-                await self.wordle_scheduler.start()
-                logger.info("띵지워들 스케줄러 시작")
 
             # 티어 변동 스케줄러 시작
             if not self.tier_change_scheduler:
@@ -122,7 +112,6 @@ class RallyUpBot(commands.Bot):
             'commands.scrim_recruitment',
             'commands.scrim_result_recording',
             'commands.simple_user_management',
-            'commands.wordle_game',
             'commands.inter_guild_scrim',
             'commands.team_balancing',
             'commands.nickname_format_admin',
@@ -393,10 +382,6 @@ class RallyUpBot(commands.Bot):
             if self.scrim_scheduler:
                 await self.scrim_scheduler.stop()
                 logger.info("스크림 스케줄러 종료")
-
-            if self.wordle_scheduler:
-                await self.wordle_scheduler.stop()
-                logger.info("띵지워들 스케줄러 종료")
 
             if self.tier_change_scheduler:
                 await self.tier_change_scheduler.stop()
