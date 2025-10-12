@@ -8402,7 +8402,7 @@ class DatabaseManager:
         """세션의 경과 시간 계산 (초)"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
-                SELECT started_at, total_muted_seconds
+                SELECT join_time, muted_seconds
                 FROM voice_sessions
                 WHERE session_uuid = ? AND is_active = TRUE
             ''', (session_uuid,))
@@ -8411,12 +8411,16 @@ class DatabaseManager:
             if not row:
                 return 0
             
-            started_at = datetime.fromisoformat(row[0])
-            total_muted_seconds = row[1] or 0
+            join_time_str = row[0]
+            muted_seconds = row[1] or 0
+            
+            # join_time을 datetime으로 변환
+            from datetime import datetime
+            join_time = datetime.fromisoformat(join_time_str)
             
             # 총 경과 시간 - 음소거 시간
-            total_elapsed = (datetime.utcnow() - started_at).total_seconds()
-            active_seconds = total_elapsed - total_muted_seconds
+            total_elapsed = (datetime.now() - join_time).total_seconds()
+            active_seconds = total_elapsed - muted_seconds
             
             return int(max(0, active_seconds))
 
