@@ -8536,52 +8536,6 @@ class DatabaseManager:
             
             return never_played[:limit]
 
-    async def get_user_rank(self, guild_id: str, user_id: str):
-        """
-        유저의 순위 정보 조회
-        
-        Returns:
-            {
-                'level_rank': int,
-                'diversity_rank': int,
-                'total_users': int  # ← 이 값 사용
-            }
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            # 레벨 순위
-            cursor = await db.execute('''
-                SELECT COUNT(*) + 1
-                FROM user_levels
-                WHERE guild_id = ? 
-                AND (current_level > (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
-                    OR (current_level = (SELECT current_level FROM user_levels WHERE guild_id = ? AND user_id = ?)
-                        AND total_exp > (SELECT total_exp FROM user_levels WHERE guild_id = ? AND user_id = ?)))
-            ''', (guild_id, guild_id, user_id, guild_id, user_id, guild_id, user_id))
-            level_rank = (await cursor.fetchone())[0]
-            
-            # 다양성 순위
-            cursor = await db.execute('''
-                SELECT COUNT(*) + 1
-                FROM user_levels
-                WHERE guild_id = ? 
-                AND unique_partners_count > (SELECT unique_partners_count FROM user_levels WHERE guild_id = ? AND user_id = ?)
-            ''', (guild_id, guild_id, user_id))
-            diversity_rank = (await cursor.fetchone())[0]
-            
-            # 전체 유저 수
-            cursor = await db.execute('''
-                SELECT COUNT(*)
-                FROM user_levels
-                WHERE guild_id = ?
-            ''', (guild_id,))
-            total_users = (await cursor.fetchone())[0]
-            
-            return {
-                'level_rank': level_rank,
-                'diversity_rank': diversity_rank,
-                'total_users': total_users
-            }
-
     async def get_members_never_played_with_priority(
         self, 
         guild_id: str, 
@@ -8589,18 +8543,6 @@ class DatabaseManager:
         online_user_ids: List[str] = None,
         limit: int = 3
     ):
-        """
-        함께 한 번도 플레이하지 않은 멤버 조회 (온라인 우선)
-        
-        Args:
-            guild_id: 서버 ID
-            user_id: 유저 ID
-            online_user_ids: 현재 온라인(음성 채널)에 있는 유저 ID 리스트
-            limit: 반환할 최대 인원
-            
-        Returns:
-            List[dict]: [{'user_id': str, 'is_online': bool}, ...]
-        """
         async with aiosqlite.connect(self.db_path) as db:
             # 1. 함께 플레이한 적 있는 유저들
             cursor = await db.execute('''
@@ -8659,19 +8601,6 @@ class DatabaseManager:
         days_threshold: int = 7,
         limit: int = 3
     ):
-        """
-        오래 안 논 친구 조회
-        
-        Args:
-            guild_id: 서버 ID
-            user_id: 유저 ID
-            min_hours: 최소 함께 플레이한 시간 (시간)
-            days_threshold: 며칠 이상 안 놨는지 (일)
-            limit: 반환할 최대 인원
-            
-        Returns:
-            List[dict]: [{'partner_id': str, 'total_hours': float, 'days_ago': int}, ...]
-        """
         from datetime import datetime, timedelta
         
         async with aiosqlite.connect(self.db_path) as db:

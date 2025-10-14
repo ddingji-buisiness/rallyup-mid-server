@@ -144,13 +144,13 @@ class TeamInfoCommands(commands.Cog):
         
         # before 채널 업데이트
         if before.channel:
-            await self._schedule_update(before.channel)
+            await self._schedule_update(before.channel, allow_resend=False)
         
         # after 채널 업데이트
         if after.channel:
-            await self._schedule_update(after.channel)
+            await self._schedule_update(after.channel, allow_resend=True)
     
-    async def _schedule_update(self, voice_channel: discord.VoiceChannel, delay: float = 2.0):
+    async def _schedule_update(self, voice_channel: discord.VoiceChannel, delay: float = 2.0, allow_resend: bool = True):
         """업데이트 예약 (Debouncing)"""
         guild_id = str(voice_channel.guild.id)
         channel_id = str(voice_channel.id)
@@ -164,20 +164,20 @@ class TeamInfoCommands(commands.Cog):
             self.update_tasks[guild_id] = {}
         
         self.update_tasks[guild_id][channel_id] = asyncio.create_task(
-            self._delayed_update(voice_channel, delay)
+            self._delayed_update(voice_channel, delay, allow_resend)  # ← 전달!
         )
-    
-    async def _delayed_update(self, voice_channel: discord.VoiceChannel, delay: float):
+
+    async def _delayed_update(self, voice_channel: discord.VoiceChannel, delay: float, allow_resend: bool):
         """지연된 업데이트 실행"""
         try:
             await asyncio.sleep(delay)
-            await self._auto_update_team_info(voice_channel)
+            await self._auto_update_team_info(voice_channel, allow_resend)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             print(f"❌ 자동 팀정보 업데이트 오류: {e}")
     
-    async def _auto_update_team_info(self, voice_channel: discord.VoiceChannel):
+    async def _auto_update_team_info(self, voice_channel: discord.VoiceChannel, allow_resend: bool = True):
         """팀정보 자동 업데이트 (음성 모니터링용) - 스마트 하이브리드 방식"""
         try:
             guild_id = str(voice_channel.guild.id)
@@ -216,7 +216,7 @@ class TeamInfoCommands(commands.Cog):
                     # 🎯 스마트 결정: 마지막 팀정보 이후 메시지 개수 체크
                     should_resend = await self._should_resend_message(text_channel, old_message)
                     
-                    if should_resend:
+                    if should_resend and allow_resend:
                         # 재발송: 삭제 후 새로 발송 (채팅 많을 때)
                         await old_message.delete()
                         view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
