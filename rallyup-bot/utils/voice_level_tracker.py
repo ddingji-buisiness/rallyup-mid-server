@@ -43,24 +43,95 @@ class VoiceLevelTracker:
             if not settings['enabled']:
                 return
             
-            is_muted = member.voice.self_mute if member.voice else False
+            user_level = await self.db.get_user_level(guild_id, user_id)
+            if not user_level:
+                await self.db.create_user_level(guild_id, user_id)
+                logger.info(f"✅ Created user_level for {member.display_name}")
             
+            is_muted = member.voice.self_mute if member.voice else False
+            is_screen_sharing = member.voice.self_stream if member.voice else False
+
             session_uuid = await self.db.create_voice_session(
-                guild_id, user_id, channel_id, is_muted
+                guild_id, user_id, channel_id, is_muted, is_screen_sharing 
             )
             
             self.active_sessions[(guild_id, user_id)] = session_uuid
-            
-            logger.info(f"🎤 {member.display_name} joined voice channel {channel.name} (Session: {session_uuid[:8]})")
-            
+
+            users_in_channel = await self.db.get_users_in_channel(guild_id, channel_id)
+            partner_ids = [u['user_id'] for u in users_in_channel if u['user_id'] != user_id]
+
+            if partner_ids:
+                # 내 세션에 파트너들 추가
+                await self.db.add_session_partners(session_uuid, partner_ids)
+                
+                # 기존 세션들에도 나를 파트너로 추가
+                for partner_id in partner_ids:
+                    partner_session = await self.db.get_active_session(guild_id, partner_id)
+                    if partner_session:
+                        await self.db.add_session_partner(
+                            partner_session['session_uuid'], 
+                            user_id
+                        )
+
+            status = []
+            if is_muted:
+                status.append("음소거")
+            if is_screen_sharing:
+                status.append("화면공유")
+
+            status_text = f" ({', '.join(status)})" if status else ""
+            logger.info(f"🎤 {member.display_name} joined voice channel{status_text}")
+                        
         except Exception as e:
             logger.error(f"Error in handle_voice_join: {e}", exc_info=True)
+
+    async def handle_screen_share_change(
+        self, 
+        member: discord.Member, 
+        was_screen_sharing: bool, 
+        is_screen_sharing: bool
+    ):
+        """
+        화면 공유 상태 변경 처리
+        
+        ✅ 음소거와 동일한 패턴으로 상태만 기록
+        """
+        try:
+            if member.bot:
+                return
+            
+            guild_id = str(member.guild.id)
+            user_id = str(member.id)
+            
+            settings = await self.db.get_voice_level_settings(guild_id)
+            if not settings['enabled'] or not settings.get('screen_share_bonus_enabled', True):
+                return
+            
+            session_key = (guild_id, user_id)
+            session_uuid = self.active_sessions.get(session_key)
+            
+            if not session_uuid:
+                session_data = await self.db.get_active_session(guild_id, user_id)
+                if session_data:
+                    session_uuid = session_data['session_uuid']
+            
+            if not session_uuid:
+                return
+            
+            # ✅ 화면 공유 상태 업데이트 (음소거와 동일한 패턴)
+            await self.db.update_session_screen_share_status(session_uuid, is_screen_sharing)
+            
+            status_text = "화면 공유 시작" if is_screen_sharing else "화면 공유 종료"
+            logger.info(f"🖥️ {member.display_name} {status_text}")
+        
+        except Exception as e:
+            logger.error(f"Error in handle_screen_share_change: {e}", exc_info=True)
     
     async def handle_voice_leave(self, member: discord.Member, channel: discord.VoiceChannel):
         """
-        음성 채널 퇴장 처리
+        음성 채널 퇴장 처리 (화면 공유 시간 포함)
         
-        ✅ 여기서만 플레이 시간과 EXP를 지급합니다!
+        ✅ 핵심: 세션 종료 전에 파트너를 먼저 조회!
         """
         try:
             if member.bot:
@@ -81,31 +152,29 @@ class VoiceLevelTracker:
                 if session_data:
                     session_uuid = session_data['session_uuid']
             
-            if session_uuid:
-                # ✅ 세션 종료 및 시간 계산 (음소거 시간 자동 반영)
-                total_duration, active_duration = await self.db.end_voice_session_with_mute(session_uuid)
-                
-                # 메모리 캐시에서 제거
-                self.active_sessions.pop(session_key, None)
-                
-                # 파트너 조회
-                users_in_channel = await self.db.get_users_in_channel(guild_id, str(channel.id))
-                partner_ids = [u['user_id'] for u in users_in_channel if u['user_id'] != user_id]
-                
-                # ✅ 관계 시간 업데이트 (활성 시간만)
-                await self._update_relationships_for_session(
-                    guild_id, user_id, str(channel.id), active_duration
-                )
-                
-                # ✅ EXP + 플레이 시간 지급 (활성 시간만, 단 한 번!)
-                await self._award_exp_for_session(
-                    guild_id, user_id, active_duration, partner_ids, settings
-                )
-                
-                logger.info(
-                    f"✅ {member.display_name} left voice channel "
-                    f"(Total: {total_duration//60}m, Active: {active_duration//60}m)"
-                )
+            if not session_uuid:
+                return
+
+            partner_ids = await self.db.get_session_partners(session_uuid)
+            
+            # 세션 종료 및 시간 계산
+            total_duration, active_duration, screen_share_duration = \
+                await self.db.end_voice_session_with_screen_share(session_uuid)
+            
+            # 메모리 캐시에서 제거
+            self.active_sessions.pop(session_key, None)
+            
+            # EXP + 플레이 시간 + 화면 공유 시간 지급
+            await self._award_exp_for_session(
+                guild_id, user_id, active_duration, screen_share_duration,
+                partner_ids, settings
+            )
+            
+            logger.info(
+                f"✅ {member.display_name} left voice channel "
+                f"(Total: {total_duration//60}m, Active: {active_duration//60}m, "
+                f"ScreenShare: {screen_share_duration//60}m)"
+            )
         
         except Exception as e:
             logger.error(f"Error in handle_voice_leave: {e}", exc_info=True)
@@ -325,11 +394,12 @@ class VoiceLevelTracker:
         guild_id: str,
         user_id: str,
         duration_seconds: int,
+        screen_share_seconds: int,
         partner_ids: List[str],
         settings: Dict
     ):
         """
-        세션에 대한 EXP 계산 및 지급
+        세션에 대한 EXP 계산 및 지급 (화면 공유 보너스 포함)
         
         ✅ 중요: 이 함수는 handle_voice_leave에서만 호출됩니다!
         """
@@ -339,28 +409,63 @@ class VoiceLevelTracker:
                 return
             
             base_exp_per_minute = settings.get('base_exp_per_minute', 10.0)
+            screen_share_bonus = settings.get('screen_share_bonus_enabled', True)
+            screen_share_multiplier = settings.get('screen_share_multiplier', 1.5)
+
+            if screen_share_seconds > duration_seconds:
+                logger.warning(
+                    f"⚠️ {user_id}: Screen share time ({screen_share_seconds}s) exceeds "
+                    f"active time ({duration_seconds}s). User was likely muted while sharing screen. "
+                    f"Capping screen share time to active time."
+                )
+                screen_share_seconds = duration_seconds
             
-            exp_gained, exp_details = await self.exp_calculator.calculate_exp_for_session(
+            # 일반 시간과 화면 공유 시간 분리 계산
+            normal_seconds = duration_seconds - screen_share_seconds
+
+            normal_seconds = max(0, normal_seconds)
+            
+            # 일반 시간 EXP
+            normal_exp, normal_details = await self.exp_calculator.calculate_exp_for_session(
                 guild_id=guild_id,
                 user_id=user_id,
-                duration_seconds=duration_seconds,
+                duration_seconds=normal_seconds,
                 partner_ids=partner_ids,
                 base_exp_per_minute=base_exp_per_minute
             )
             
-            if exp_gained <= 0:
-                logger.debug(f"No exp gained for {user_id}: {exp_details.get('reason', 'calculated 0')}")
+            # 화면 공유 시간 EXP (보너스 적용)
+            screen_share_exp = 0
+            if screen_share_bonus and screen_share_seconds > 0:
+                ss_exp, ss_details = await self.exp_calculator.calculate_exp_for_session(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    duration_seconds=screen_share_seconds,
+                    partner_ids=partner_ids,
+                    base_exp_per_minute=base_exp_per_minute * screen_share_multiplier
+                )
+                screen_share_exp = ss_exp
+            
+            # 총 EXP
+            total_exp = normal_exp + screen_share_exp
+            
+            if total_exp <= 0:
+                logger.debug(f"No exp gained for {user_id}")
                 return
             
-            # ✅ EXP 추가 및 레벨업 체크
+            # EXP 추가 및 레벨업 체크
             levelup_result = await self.exp_calculator.add_exp_and_check_levelup(
-                guild_id, user_id, exp_gained
+                guild_id, user_id, total_exp
             )
             
-            # ✅ 플레이 시간 업데이트 (단 한 번만!)
+            # 플레이 시간 업데이트
             await self.db.update_user_play_time(guild_id, user_id, duration_seconds)
             
-            # ✅ 고유 파트너 수 업데이트
+            # 화면 공유 시간 업데이트
+            if screen_share_seconds > 0:
+                await self.db.update_user_screen_share_time(guild_id, user_id, screen_share_seconds)
+            
+            # 고유 파트너 수 업데이트
             await self.db.update_unique_partners_count(guild_id, user_id)
             
             # 레벨업 알림
@@ -386,12 +491,12 @@ class VoiceLevelTracker:
                 logger.info(
                     f"🎉 {user_id} leveled up! "
                     f"Lv {levelup_result['old_level']} → Lv {levelup_result['new_level']} "
-                    f"(+{exp_gained} exp)"
+                    f"(+{total_exp} exp, {screen_share_exp} from screen share)"
                 )
             else:
                 logger.info(
-                    f"💎 {user_id} gained {exp_gained} exp "
-                    f"(Lv {levelup_result['new_level']}: {levelup_result['current_exp']} exp)"
+                    f"💎 {user_id} gained {total_exp} exp "
+                    f"(Normal: {normal_exp}, ScreenShare: {screen_share_exp})"
                 )
                         
         except Exception as e:
@@ -417,48 +522,57 @@ class VoiceLevelTracker:
             restored_count = 0
             
             for guild in self.bot.guilds:
-                guild_id = str(guild.id)
-                
-                settings = await self.db.get_voice_level_settings(guild_id)
+                settings = await self.db.get_voice_level_settings(str(guild.id))
                 if not settings['enabled']:
-                    logger.debug(f"Voice level disabled for guild {guild.name}, skipping restore")
                     continue
                 
                 for voice_channel in guild.voice_channels:
-                    channel_id = str(voice_channel.id)
+                    # 채널에 있는 모든 멤버 ID 수집 (봇 제외)
+                    members_in_channel = [m for m in voice_channel.members if not m.bot]
                     
-                    for member in voice_channel.members:
-                        if member.bot:
-                            continue
-                        
+                    for member in members_in_channel:
+                        guild_id = str(guild.id)
                         user_id = str(member.id)
-                        session_key = (guild_id, user_id)
                         
-                        if session_key in self.active_sessions:
+                        # 기존 세션 확인
+                        existing_session = await self.db.get_active_session(guild_id, user_id)
+                        if existing_session:
                             continue
                         
-                        existing_session = await self.db.get_active_session(guild_id, user_id)
+                        # 유저 레벨 확인/생성
+                        user_level = await self.db.get_user_level(guild_id, user_id)
+                        if not user_level:
+                            await self.db.create_user_level(guild_id, user_id)
                         
-                        if existing_session:
-                            session_uuid = existing_session['session_uuid']
-                            self.active_sessions[session_key] = session_uuid
-                            logger.info(f"🔄 Restored existing session: {member.display_name} (Session: {session_uuid[:8]})")
-                            restored_count += 1
-                        else:
-                            is_muted = member.voice.self_mute if member.voice else False
+                        is_muted = member.voice.self_mute if member.voice else False
+                        is_screen_sharing = member.voice.self_stream if member.voice else False
+                        
+                        # 세션 생성
+                        session_uuid = await self.db.create_voice_session(
+                            guild_id, user_id, str(voice_channel.id), 
+                            is_muted, is_screen_sharing
+                        )
+                        
+                        self.active_sessions[(guild_id, user_id)] = session_uuid
+                        restored_count += 1
+                    
+                    # 같은 채널 멤버들을 서로 파트너로 등록
+                    for i, member in enumerate(members_in_channel):
+                        user_id = str(member.id)
+                        session_uuid = self.active_sessions.get((str(guild.id), user_id))
+                        
+                        if session_uuid:
+                            # 자신을 제외한 다른 멤버들
+                            partner_ids = [
+                                str(other.id) for other in members_in_channel 
+                                if other.id != member.id
+                            ]
                             
-                            session_uuid = await self.db.create_voice_session(
-                                guild_id, user_id, channel_id, is_muted
-                            )
-                            
-                            self.active_sessions[session_key] = session_uuid
-                            logger.info(f"🔄 Created new session: {member.display_name} (Session: {session_uuid[:8]})")
-                            restored_count += 1
+                            if partner_ids:
+                                await self.db.add_session_partners(session_uuid, partner_ids)
             
             if restored_count > 0:
-                logger.info(f"✅ Restored {restored_count} voice session(s) after bot restart")
-            else:
-                logger.info("ℹ️ No active voice sessions to restore")
+                logger.info(f"🎤 Restored {restored_count} voice sessions")
         
         except Exception as e:
             logger.error(f"Error restoring voice sessions: {e}", exc_info=True)

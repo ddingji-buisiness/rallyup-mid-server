@@ -364,6 +364,11 @@ class RallyUpBot(commands.Bot):
                 await self.voice_level_tracker.handle_mute_change(
                     member, before.self_mute, after.self_mute
                 )
+            # Case 5: 화면 공유 상태 변경
+            elif before.self_stream != after.self_stream:
+                await self.voice_level_tracker.handle_screen_share_change(
+                    member, before.self_stream, after.self_stream
+                )
         
         except Exception as e:
             logger.error(f"Error in on_voice_state_update: {e}", exc_info=True)

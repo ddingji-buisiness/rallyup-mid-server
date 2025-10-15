@@ -59,12 +59,12 @@ class VoiceLevelUser(commands.Cog):
             # 관계 정보 조회
             relationships = await self.db.get_user_relationships(guild_id, user_id)
             
-            # ✅ 함께 안 한 멤버 조회 (온라인 우선, Phase 2)
+            # 함께 안 한 멤버 조회
             never_played = await self.db.get_members_never_played_with_priority(
                 guild_id, user_id, online_user_ids, limit=3
             )
             
-            # ✅ 오래 안 논 친구 조회 (Phase 2)
+            # 오래 안 논 친구 조회
             dormant_friends = await self.db.get_dormant_relationships(
                 guild_id, user_id, min_hours=1.0, days_threshold=7, limit=3
             )
@@ -117,14 +117,32 @@ class VoiceLevelUser(commands.Cog):
                 value=f"총 **{hours}시간 {minutes}분**",
                 inline=True
             )
-            
+
+            # 화면 공유 시간 표시
+            screen_share_seconds = user_level.get('total_screen_share_seconds', 0)
+            if screen_share_seconds > 0:
+                ss_hours = screen_share_seconds // 3600
+                ss_minutes = (screen_share_seconds % 3600) // 60
+                ss_percentage = min(100, (screen_share_seconds / max(total_seconds, 1)) * 100)
+                
+                embed.add_field(
+                    name="🖥️ 화면 공유",
+                    value=f"**{ss_hours}h {ss_minutes}m** ({ss_percentage:.0f}%)",
+                    inline=True
+                )
+
             # 함께 플레이한 사람
             unique_partners = user_level['unique_partners_count']
             total_members = rank_info['total_users']
+
+            if unique_partners > total_members:
+                display_text = f"**{unique_partners}명** (역대 {total_members}명)"
+            else:
+                display_text = f"**{unique_partners}명** / {total_members}명"
             
             embed.add_field(
                 name="🤝 함께 플레이한 사람",
-                value=f"**{unique_partners}명** / {total_members}명",
+                value=display_text,
                 inline=True
             )
             
@@ -139,7 +157,7 @@ class VoiceLevelUser(commands.Cog):
                 inline=False
             )
             
-            # ✅ 단짝 TOP 3
+            # 단짝 TOP 3
             if relationships:
                 top_3 = sorted(relationships, key=lambda x: x['total_time_seconds'], reverse=True)[:3]
                 partner_list = []
@@ -162,7 +180,7 @@ class VoiceLevelUser(commands.Cog):
                     inline=False
                 )
             
-            # ✅ 새로운 인연 (온라인 우선 표시, Phase 2)
+            # 새로운 인연
             if never_played:
                 never_played_list = []
                 for entry in never_played:
@@ -179,7 +197,7 @@ class VoiceLevelUser(commands.Cog):
                         inline=False
                     )
             
-            # ✅ 오래 안 논 친구 (Phase 2)
+            # 오래 안 논 친구
             if dormant_friends:
                 dormant_list = []
                 for friend in dormant_friends:
@@ -199,7 +217,7 @@ class VoiceLevelUser(commands.Cog):
                         inline=False
                     )
             
-            # ✅ 동적 유도 메시지
+            # 동적 유도 메시지
             diversity_ratio = unique_partners / max(total_members - 1, 1)
             
             if diversity_ratio < 0.3:

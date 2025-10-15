@@ -378,7 +378,7 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('PRAGMA journal_mode=WAL')
             
-            # 1. 음성 세션 테이블
+            # 음성 세션 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS voice_sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,15 +390,18 @@ class DatabaseManager:
                     leave_time TIMESTAMP,
                     is_active BOOLEAN DEFAULT TRUE,
                     is_muted BOOLEAN DEFAULT FALSE,
+                    is_screen_sharing BOOLEAN DEFAULT FALSE,
                     duration_seconds INTEGER DEFAULT 0,
+                    muted_seconds INTEGER DEFAULT 0,
+                    screen_share_seconds INTEGER DEFAULT 0,
                     is_solo BOOLEAN DEFAULT FALSE,
                     last_solo_marked_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # 2. 유저 간 관계 테이블 (핵심!)
+            # 유저 간 관계 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS user_relationships (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -415,7 +418,7 @@ class DatabaseManager:
                 )
             ''')
             
-            # 3. 유저 레벨 테이블
+            # 유저 레벨 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS user_levels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -425,6 +428,7 @@ class DatabaseManager:
                     current_exp INTEGER DEFAULT 0,
                     total_exp INTEGER DEFAULT 0,
                     total_play_time_seconds INTEGER DEFAULT 0,
+                    total_screen_share_seconds INTEGER DEFAULT 0,
                     unique_partners_count INTEGER DEFAULT 0,
                     last_exp_gain TIMESTAMP,
                     daily_exp_gained INTEGER DEFAULT 0,
@@ -434,8 +438,20 @@ class DatabaseManager:
                     UNIQUE(guild_id, user_id)
                 )
             ''')
+
+            # 음성 세션 파트너 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS session_partners (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_uuid TEXT NOT NULL,
+                    partner_id TEXT NOT NULL,
+                    joined_together_at TIMESTAMP NOT NULL,
+                    FOREIGN KEY (session_uuid) REFERENCES voice_sessions(session_uuid),
+                    UNIQUE(session_uuid, partner_id)
+                )
+            ''')
             
-            # 4. 서버별 설정 테이블
+            # 서버별 설정 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS voice_level_settings (
                     guild_id TEXT PRIMARY KEY,
@@ -445,6 +461,8 @@ class DatabaseManager:
                     daily_exp_limit INTEGER DEFAULT 5000,
                     min_session_minutes INTEGER DEFAULT 30,
                     check_mute_status BOOLEAN DEFAULT TRUE,
+                    screen_share_bonus_enabled BOOLEAN DEFAULT TRUE,
+                    screen_share_multiplier REAL DEFAULT 1.5,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -457,7 +475,9 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_relationships_users ON user_relationships(user1_id, user2_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_levels_guild ON user_levels(guild_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_levels_user ON user_levels(guild_id, user_id)')
-            
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_session_partners_session ON session_partners(session_uuid)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_session_partners_partner ON session_partners(partner_id)')
+
             await db.commit()
             print("✅ Voice level system tables initialized")
 
@@ -7780,18 +7800,138 @@ class DatabaseManager:
             print(f"❌ 음성 모니터링 설정 조회 실패: {e}")
             return False
 
-    async def create_voice_session(self, guild_id: str, user_id: str, channel_id: str, is_muted: bool = False):
-        """새로운 음성 세션 생성"""
+    async def update_session_screen_share_status(self, session_uuid: str, is_screen_sharing: bool):
+        """
+        세션 화면 공유 상태 업데이트 (음소거와 동일한 패턴)
+        
+        Args:
+            session_uuid: 세션 UUID
+            is_screen_sharing: 새로운 화면 공유 상태
+        """
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 현재 세션 정보 조회
+            cursor = await db.execute('''
+                SELECT is_screen_sharing, updated_at, screen_share_seconds 
+                FROM voice_sessions 
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            row = await cursor.fetchone()
+            
+            if not row:
+                return
+            
+            old_screen_sharing = bool(row[0])
+            last_update = datetime.fromisoformat(row[1])
+            current_screen_share_seconds = row[2] if row[2] else 0
+            
+            now = datetime.utcnow()
+            elapsed = (now - last_update).total_seconds()
+            
+            # 화면 공유 시간 계산
+            new_screen_share_seconds = current_screen_share_seconds
+            if old_screen_sharing:
+                # 이전에 화면 공유 중이었으면 경과 시간을 추가
+                new_screen_share_seconds += elapsed
+            
+            # 업데이트
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_screen_sharing = ?, updated_at = ?, screen_share_seconds = ?
+                WHERE session_uuid = ?
+            ''', (is_screen_sharing, now.isoformat(), new_screen_share_seconds, session_uuid))
+            await db.commit()
+
+    async def end_voice_session_with_screen_share(self, session_uuid: str):
+        """
+        음성 세션 종료 (음소거 + 화면 공유 시간 반영)
+        
+        Returns:
+            (total_duration, active_duration, screen_share_duration): 전체, 활성, 화면공유 시간 (초)
+        """
+        from datetime import datetime
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 세션 정보 조회
+            cursor = await db.execute('''
+                SELECT join_time, is_muted, is_screen_sharing, updated_at, 
+                    muted_seconds, screen_share_seconds 
+                FROM voice_sessions 
+                WHERE session_uuid = ? AND is_active = TRUE
+            ''', (session_uuid,))
+            row = await cursor.fetchone()
+            
+            if not row:
+                return 0, 0, 0
+            
+            join_time = datetime.fromisoformat(row[0])
+            is_muted = bool(row[1])
+            is_screen_sharing = bool(row[2])
+            last_update = datetime.fromisoformat(row[3])
+            muted_seconds = row[4] if row[4] else 0
+            screen_share_seconds = row[5] if row[5] else 0
+            
+            leave_time = datetime.utcnow()
+            
+            # 전체 체류 시간
+            total_duration = int((leave_time - join_time).total_seconds())
+            
+            # 마지막 구간 처리
+            last_elapsed = (leave_time - last_update).total_seconds()
+            if is_muted:
+                muted_seconds += last_elapsed
+            if is_screen_sharing:
+                screen_share_seconds += last_elapsed
+            
+            # 활성 시간 = 전체 시간 - 음소거 시간
+            active_duration = int(total_duration - muted_seconds)
+            active_duration = max(0, active_duration)  # 음수 방지
+            
+            # 화면 공유 시간
+            screen_share_duration = int(screen_share_seconds)
+            
+            # 세션 종료
+            await db.execute('''
+                UPDATE voice_sessions 
+                SET is_active = FALSE, 
+                    leave_time = ?, 
+                    duration_seconds = ?,
+                    muted_seconds = ?,
+                    screen_share_seconds = ?,
+                    updated_at = ?
+                WHERE session_uuid = ?
+            ''', (leave_time.isoformat(), total_duration, int(muted_seconds), 
+                screen_share_duration, leave_time.isoformat(), session_uuid))
+            await db.commit()
+            
+            return total_duration, active_duration, screen_share_duration
+
+    async def create_voice_session(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        channel_id: str, 
+        is_muted: bool = False,
+        is_screen_sharing: bool = False
+    ):
+        """새 음성 세션 생성"""
         import uuid
         from datetime import datetime
         
         session_uuid = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
         
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO voice_sessions (session_uuid, guild_id, user_id, channel_id, join_time, is_muted)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (session_uuid, guild_id, user_id, channel_id, datetime.utcnow().isoformat(), is_muted))
+                INSERT INTO voice_sessions (
+                    session_uuid, guild_id, user_id, channel_id, 
+                    join_time, is_muted, is_screen_sharing, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (session_uuid, guild_id, user_id, channel_id, 
+                now, is_muted, is_screen_sharing, now))
+            
             await db.commit()
         
         return session_uuid
@@ -7823,6 +7963,45 @@ class DatabaseManager:
                 return duration
         
         return 0
+
+    async def update_user_screen_share_time(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        screen_share_seconds: int
+    ):
+        """유저의 총 화면 공유 시간 업데이트"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE user_levels
+                SET total_screen_share_seconds = total_screen_share_seconds + ?,
+                    updated_at = datetime('now')
+                WHERE guild_id = ? AND user_id = ?
+            ''', (screen_share_seconds, guild_id, user_id))
+            
+            await db.commit()
+
+
+    async def set_screen_share_bonus_settings(
+        self,
+        guild_id: str,
+        enabled: bool,
+        multiplier: float
+    ):
+        """화면 공유 보너스 설정"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO voice_level_settings (
+                    guild_id, screen_share_bonus_enabled, screen_share_multiplier, updated_at
+                )
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    screen_share_bonus_enabled = ?,
+                    screen_share_multiplier = ?,
+                    updated_at = datetime('now')
+            ''', (guild_id, enabled, multiplier, enabled, multiplier))
+            
+            await db.commit()
 
 
     async def get_active_session(self, guild_id: str, user_id: str):
@@ -7875,6 +8054,17 @@ class DatabaseManager:
     async def update_relationship_time(self, guild_id: str, user1_id: str, user2_id: str, seconds: int):
         """두 유저 간 함께한 시간 업데이트"""
         from datetime import datetime
+
+        cursor = await db.execute('''
+            SELECT COUNT(*) FROM user_levels 
+            WHERE guild_id = ? AND user_id IN (?, ?)
+        ''', (guild_id, user1_id, user2_id))
+        
+        count = (await cursor.fetchone())[0]
+        
+        if count != 2:
+            # 한쪽이라도 user_levels에 없으면 관계 업데이트 안 함
+            return
         
         # user1_id가 항상 작도록 정렬 (UNIQUE 제약 조건)
         if user1_id > user2_id:
@@ -7952,7 +8142,8 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT enabled, notification_channel_id, base_exp_per_minute, 
-                    daily_exp_limit, min_session_minutes, check_mute_status
+                    daily_exp_limit, min_session_minutes, check_mute_status,
+                    screen_share_bonus_enabled, screen_share_multiplier
                 FROM voice_level_settings
                 WHERE guild_id = ?
             ''', (guild_id,))
@@ -7965,17 +8156,20 @@ class DatabaseManager:
                     'base_exp_per_minute': row[2],
                     'daily_exp_limit': row[3],
                     'min_session_minutes': row[4],
-                    'check_mute_status': bool(row[5])
+                    'check_mute_status': bool(row[5]),
+                    'screen_share_bonus_enabled': bool(row[6]) if row[6] is not None else True,
+                    'screen_share_multiplier': row[7] if row[7] is not None else 1.5
                 }
             else:
-                # 기본값 반환
                 return {
                     'enabled': False,
                     'notification_channel_id': None,
                     'base_exp_per_minute': 10.0,
                     'daily_exp_limit': 5000,
                     'min_session_minutes': 30,
-                    'check_mute_status': True
+                    'check_mute_status': True,
+                    'screen_share_bonus_enabled': True,
+                    'screen_share_multiplier': 1.5
                 }
 
     async def set_voice_level_enabled(self, guild_id: str, enabled: bool):
@@ -7991,12 +8185,12 @@ class DatabaseManager:
             await db.commit()
 
     async def get_user_level(self, guild_id: str, user_id: str):
-        """유저 레벨 정보 조회"""
+        """유저 레벨 정보 조회 (화면 공유 시간 포함)"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT id, guild_id, user_id, current_level, current_exp, total_exp,
-                    total_play_time_seconds, unique_partners_count, last_exp_gain,
-                    daily_exp_gained, last_daily_reset, created_at, updated_at
+                    total_play_time_seconds, total_screen_share_seconds, unique_partners_count, 
+                    last_exp_gain, daily_exp_gained, last_daily_reset, created_at, updated_at
                 FROM user_levels
                 WHERE guild_id = ? AND user_id = ?
             ''', (guild_id, user_id))
@@ -8011,12 +8205,13 @@ class DatabaseManager:
                     'current_exp': row[4],
                     'total_exp': row[5],
                     'total_play_time_seconds': row[6],
-                    'unique_partners_count': row[7],
-                    'last_exp_gain': row[8],
-                    'daily_exp_gained': row[9],
-                    'last_daily_reset': row[10],
-                    'created_at': row[11],
-                    'updated_at': row[12]
+                    'total_screen_share_seconds': row[7] if row[7] is not None else 0,
+                    'unique_partners_count': row[8],
+                    'last_exp_gain': row[9],
+                    'daily_exp_gained': row[10],
+                    'last_daily_reset': row[11],
+                    'created_at': row[12],
+                    'updated_at': row[13]
                 }
         return None
 
@@ -8657,3 +8852,66 @@ class DatabaseManager:
                 })
             
             return result
+
+    async def add_session_partners(self, session_uuid: str, partner_ids: List[str]):
+        """
+        세션에 여러 파트너 추가 (입장 시점에 이미 채널에 있던 사람들)
+        
+        Args:
+            session_uuid: 세션 UUID
+            partner_ids: 파트너 ID 리스트
+        """
+        if not partner_ids:
+            return
+        
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            for partner_id in partner_ids:
+                await db.execute('''
+                    INSERT OR IGNORE INTO session_partners 
+                    (session_uuid, partner_id, joined_together_at)
+                    VALUES (?, ?, ?)
+                ''', (session_uuid, partner_id, now))
+            await db.commit()
+
+
+    async def add_session_partner(self, session_uuid: str, partner_id: str):
+        """
+        세션에 파트너 1명 추가 (중간에 입장한 사람)
+        
+        Args:
+            session_uuid: 세션 UUID
+            partner_id: 파트너 ID
+        """
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT OR IGNORE INTO session_partners 
+                (session_uuid, partner_id, joined_together_at)
+                VALUES (?, ?, ?)
+            ''', (session_uuid, partner_id, now))
+            await db.commit()
+
+
+    async def get_session_partners(self, session_uuid: str) -> List[str]:
+        """
+        세션의 모든 파트너 조회 (함께 있었던 모든 사람)
+        
+        Args:
+            session_uuid: 세션 UUID
+            
+        Returns:
+            파트너 ID 리스트
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                SELECT DISTINCT partner_id 
+                FROM session_partners
+                WHERE session_uuid = ?
+            ''', (session_uuid,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
