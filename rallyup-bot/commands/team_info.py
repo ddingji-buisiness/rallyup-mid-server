@@ -715,11 +715,7 @@ class TeamInfoCommands(commands.Cog):
                 
                 for tag_info in displayed_tags:
                     battle_tag = tag_info['battle_tag']
-                    is_primary = tag_info['is_primary']
-                    
-                    # 주계정/부계정 표시
-                    tag_icon = "⭐ 주계정" if is_primary else "💫 부계정"
-                    member_lines.append(f"```{battle_tag}```   {tag_icon}")
+                    member_lines.append(f"```{battle_tag}```")
         
         embed.add_field(
             name="\u200b",
