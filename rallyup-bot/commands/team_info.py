@@ -16,6 +16,14 @@ class TeamInfoCommands(commands.Cog):
         self.update_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  
         self.active_guilds: set = set()
         self.resend_threshold = 10
+        self.channel_locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_channel_lock(self, guild_id: str, channel_id: str) -> asyncio.Lock:
+        """채널별 고유 Lock 반환"""
+        lock_key = f"{guild_id}:{channel_id}"
+        if lock_key not in self.channel_locks:
+            self.channel_locks[lock_key] = asyncio.Lock()
+        return self.channel_locks[lock_key]
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -126,41 +134,21 @@ class TeamInfoCommands(commands.Cog):
         except Exception as e:
             print(f"❌ 채널 자동완성 오류: {e}")
             return []
-        
-    @commands.Cog.listener()
-    async def on_voice_state_update(
-        self, 
-        member: discord.Member, 
-        before: discord.VoiceState, 
-        after: discord.VoiceState
-    ):
-        """음성 채널 입장/퇴장 자동 감지"""
-        
-        if member.bot:
-            return
-        
-        guild_id = str(member.guild.id)
-        
-        # 모니터링 활성화 확인
-        if guild_id not in self.active_guilds:
-            return
-        
-        # before 채널 업데이트
-        if before.channel:
-            await self._schedule_update(before.channel, allow_resend=False)
-        
-        # after 채널 업데이트
-        if after.channel:
-            await self._schedule_update(after.channel, allow_resend=True)
     
     async def _schedule_update(self, voice_channel: discord.VoiceChannel, delay: float = 2.0, allow_resend: bool = True):
         """업데이트 예약 (Debouncing)"""
         guild_id = str(voice_channel.guild.id)
         channel_id = str(voice_channel.id)
-        
-        # 기존 태스크 취소
-        if guild_id in self.update_tasks and channel_id in self.update_tasks[guild_id]:
-            self.update_tasks[guild_id][channel_id].cancel()
+
+        if guild_id in self.update_tasks:
+            if channel_id in self.update_tasks[guild_id]:
+                old_task = self.update_tasks[guild_id][channel_id]
+                if not old_task.done():
+                    old_task.cancel()
+                    try:
+                        await old_task  # 취소 완료까지 대기
+                    except asyncio.CancelledError:
+                        pass
         
         # 새 태스크 생성
         if guild_id not in self.update_tasks:
@@ -181,85 +169,87 @@ class TeamInfoCommands(commands.Cog):
             print(f"❌ 자동 팀정보 업데이트 오류: {e}")
     
     async def _auto_update_team_info(self, voice_channel: discord.VoiceChannel, allow_resend: bool = True):
-        """팀정보 자동 업데이트 (음성 모니터링용) - 스마트 하이브리드 방식"""
-        try:
-            guild_id = str(voice_channel.guild.id)
-            channel_id = str(voice_channel.id)
-            
-            # 1. 멤버 확인
-            members = [m for m in voice_channel.members if not m.bot]
-            
-            # 2. 텍스트 채널 찾기 (같은 이름 + 권한 체크)
-            text_channel = await self._find_text_channel(voice_channel)
-            if not text_channel:
-                print(f"ℹ️ 팀정보 발송 불가: {voice_channel.name} (권한 부족 또는 채널 접근 불가)")
-                return
-            
-            # 3. 멤버 정보 수집
-            members_info = await self._collect_members_info(guild_id, members)
-            avg_tier = self._calculate_average_tier(members_info)
-            
-            # 4. 임베드 생성 (기본: compact 모드)
-            embed = self._create_team_embed(
-                voice_channel, members_info, avg_tier, 
-                page=0, mode='compact', is_manual=False
-            )
-            
-            # 5. 스마트 하이브리드: Edit vs Delete+Resend 결정
-            if guild_id in self.channel_messages and channel_id in self.channel_messages[guild_id]:
-                # 기존 메시지 존재
-                message_id = self.channel_messages[guild_id][channel_id]
+        """팀정보 자동 업데이트"""
+        guild_id = str(voice_channel.guild.id)
+        channel_id = str(voice_channel.id)
+        
+        lock = self._get_channel_lock(guild_id, channel_id)
+        async with lock:
+            try:
+                # 1. 멤버 확인
+                members = [m for m in voice_channel.members if not m.bot]
                 
-                try:
-                    old_message = await text_channel.fetch_message(message_id)
+                # 2. 텍스트 채널 찾기 (같은 이름 + 권한 체크)
+                text_channel = await self._find_text_channel(voice_channel)
+                if not text_channel:
+                    print(f"ℹ️ 팀정보 발송 불가: {voice_channel.name} (권한 부족 또는 채널 접근 불가)")
+                    return
+                
+                # 3. 멤버 정보 수집
+                members_info = await self._collect_members_info(guild_id, members)
+                avg_tier = self._calculate_average_tier(members_info)
+                
+                # 4. 임베드 생성 (기본: compact 모드)
+                embed = self._create_team_embed(
+                    voice_channel, members_info, avg_tier, 
+                    page=0, mode='compact', is_manual=False
+                )
+                
+                # 5. 스마트 하이브리드: Edit vs Delete+Resend 결정
+                if guild_id in self.channel_messages and channel_id in self.channel_messages[guild_id]:
+                    # 기존 메시지 존재
+                    message_id = self.channel_messages[guild_id][channel_id]
                     
-                    # 멤버 없으면 삭제
-                    if not members:
-                        await old_message.delete()
-                        del self.channel_messages[guild_id][channel_id]
-                        return
-                    
-                    # 🎯 스마트 결정: 마지막 팀정보 이후 메시지 개수 체크
-                    should_resend = await self._should_resend_message(text_channel, old_message)
-                    
-                    if should_resend and allow_resend:
-                        # 재발송: 삭제 후 새로 발송 (채팅 많을 때)
-                        await old_message.delete()
-                        view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
-                        new_message = await text_channel.send(embed=embed, view=view)
-                        self.channel_messages[guild_id][channel_id] = new_message.id
-                        print(f"🔄 팀정보 재발송: {voice_channel.name} (채팅 {self.resend_threshold}개 이상)")
-                    else:
-                        # Edit: 조용히 수정 (채팅 적을 때)
-                        view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
-                        await old_message.edit(embed=embed, view=view)
-                        print(f"✏️ 팀정보 수정: {voice_channel.name}")
-                    
-                except discord.NotFound:
-                    # 메시지가 삭제됨 - 새로 생성
+                    try:
+                        old_message = await text_channel.fetch_message(message_id)
+                        
+                        # 멤버 없으면 삭제
+                        if not members:
+                            await old_message.delete()
+                            del self.channel_messages[guild_id][channel_id]
+                            return
+                        
+                        # 🎯 스마트 결정: 마지막 팀정보 이후 메시지 개수 체크
+                        should_resend = await self._should_resend_message(text_channel, old_message)
+                        
+                        if should_resend and allow_resend:
+                            # 재발송: 삭제 후 새로 발송 (채팅 많을 때)
+                            await old_message.delete()
+                            view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
+                            new_message = await text_channel.send(embed=embed, view=view)
+                            self.channel_messages[guild_id][channel_id] = new_message.id
+                            print(f"🔄 팀정보 재발송: {voice_channel.name} (채팅 {self.resend_threshold}개 이상)")
+                        else:
+                            # Edit: 조용히 수정 (채팅 적을 때)
+                            view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
+                            await old_message.edit(embed=embed, view=view)
+                            print(f"✏️ 팀정보 수정: {voice_channel.name}")
+                        
+                    except discord.NotFound:
+                        # 메시지가 삭제됨 - 새로 생성
+                        if members:
+                            view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
+                            new_message = await text_channel.send(embed=embed, view=view)
+                            self.channel_messages[guild_id][channel_id] = new_message.id
+                        else:
+                            del self.channel_messages[guild_id][channel_id]
+                else:
+                    # 새 메시지 생성
                     if members:
                         view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
                         new_message = await text_channel.send(embed=embed, view=view)
+                        
+                        if guild_id not in self.channel_messages:
+                            self.channel_messages[guild_id] = {}
                         self.channel_messages[guild_id][channel_id] = new_message.id
-                    else:
-                        del self.channel_messages[guild_id][channel_id]
-            else:
-                # 새 메시지 생성
-                if members:
-                    view = AutoTeamInfoView(voice_channel, members_info, avg_tier, self.bot, self)
-                    new_message = await text_channel.send(embed=embed, view=view)
-                    
-                    if guild_id not in self.channel_messages:
-                        self.channel_messages[guild_id] = {}
-                    self.channel_messages[guild_id][channel_id] = new_message.id
-                    print(f"📨 팀정보 신규 발송: {voice_channel.name}")
-        
-        except discord.Forbidden:
-            print(f"❌ 예상치 못한 권한 오류: {voice_channel.name}")
-        except Exception as e:
-            print(f"❌ 자동 팀정보 업데이트 실패: {voice_channel.name} - {e}")
-            import traceback
-            traceback.print_exc()
+                        print(f"📨 팀정보 신규 발송: {voice_channel.name}")
+            
+            except discord.Forbidden:
+                print(f"❌ 예상치 못한 권한 오류: {voice_channel.name}")
+            except Exception as e:
+                print(f"❌ 자동 팀정보 업데이트 실패: {voice_channel.name} - {e}")
+                import traceback
+                traceback.print_exc()
 
     async def _should_resend_message(
         self, 
@@ -540,6 +530,11 @@ class TeamInfoCommands(commands.Cog):
         guild = voice_channel.guild
         bot_member = guild.get_member(self.bot.user.id)
         
+        # 🛡️ 봇 멤버 안전성 체크
+        if not bot_member:
+            print(f"⚠️ 봇이 서버에서 찾을 수 없음: {guild.name}")
+            return None
+        
         # 1. 음성 채널 자체가 텍스트 메시지를 받을 수 있는지 확인
         try:
             voice_perms = voice_channel.permissions_for(bot_member)
@@ -551,12 +546,15 @@ class TeamInfoCommands(commands.Cog):
         # 2. 같은 이름의 독립 텍스트 채널 찾기
         for channel in guild.text_channels:
             if channel.name.lower() == voice_channel.name.lower():
-                text_perms = channel.permissions_for(bot_member)
-                if text_perms.send_messages and text_perms.embed_links:
-                    return channel
-                else:
-                    print(f"⚠️ 텍스트 채널 권한 없음: {channel.name}")
-                    return None
+                try:
+                    text_perms = channel.permissions_for(bot_member)
+                    if text_perms.send_messages and text_perms.embed_links:
+                        return channel
+                    else:
+                        print(f"⚠️ 텍스트 채널 권한 없음: {channel.name}")
+                        return None
+                except Exception as e:
+                    print(f"⚠️ 텍스트 채널 권한 확인 실패: {channel.name} - {e}")
         
         return None
     
@@ -664,7 +662,7 @@ class TeamInfoCommands(commands.Cog):
         if is_manual:
             embed.set_footer(text="💡 전체보기 버튼으로 모든 배틀태그를 확인할 수 있습니다")
         else:
-            embed.set_footer(text="💡 위 코드블록을 드래그하여 복사하세요")
+            embed.set_footer(text="💡 위 코드블록 복사 버튼을 눌러주세요")
         
         return embed
     
@@ -727,7 +725,7 @@ class TeamInfoCommands(commands.Cog):
         if is_manual:
             embed.set_footer(text="💡 간단히 버튼으로 축약 뷰로 전환할 수 있습니다")
         else:
-            embed.set_footer(text="💡 위 코드블록을 드래그하여 복사하세요")
+            embed.set_footer(text="💡 위 코드블록 복사 버튼을 눌러주세요")
         
         return embed
     

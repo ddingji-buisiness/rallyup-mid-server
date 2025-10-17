@@ -343,33 +343,38 @@ class RallyUpBot(commands.Bot):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         """음성 채널 상태 변경 이벤트"""
         try:
-            # 음성 레벨 트래커가 없으면 무시
-            if not self.voice_level_tracker:
-                return
+            # 1. 기존 voice_level_tracker 처리
+            if self.voice_level_tracker:
+                if before.channel is None and after.channel is not None:
+                    await self.voice_level_tracker.handle_voice_join(member, after.channel)
+                elif before.channel is not None and after.channel is None:
+                    await self.voice_level_tracker.handle_voice_leave(member, before.channel)
+                elif before.channel != after.channel:
+                    await self.voice_level_tracker.handle_voice_move(member, before.channel, after.channel)
+                elif before.self_mute != after.self_mute:
+                    await self.voice_level_tracker.handle_mute_change(
+                        member, before.self_mute, after.self_mute
+                    )
+                elif before.self_stream != after.self_stream:
+                    await self.voice_level_tracker.handle_screen_share_change(
+                        member, before.self_stream, after.self_stream
+                    )
             
-            # Case 1: 음성 채널 입장 (before: None, after: 채널)
-            if before.channel is None and after.channel is not None:
-                await self.voice_level_tracker.handle_voice_join(member, after.channel)
+            # 2. 팀정보 업데이트 처리 추가
+            team_info_cog = self.get_cog('TeamInfoCommands')
+            if team_info_cog and not member.bot:
+                guild_id = str(member.guild.id)
+                
+                # 모니터링 활성화 확인
+                if guild_id in team_info_cog.active_guilds:
+                    # before 채널 업데이트
+                    if before.channel:
+                        await team_info_cog._schedule_update(before.channel, allow_resend=False)
+                    
+                    # after 채널 업데이트  
+                    if after.channel:
+                        await team_info_cog._schedule_update(after.channel, allow_resend=True)
             
-            # Case 2: 음성 채널 퇴장 (before: 채널, after: None)
-            elif before.channel is not None and after.channel is None:
-                await self.voice_level_tracker.handle_voice_leave(member, before.channel)
-            
-            # Case 3: 채널 이동 (before: 채널A, after: 채널B)
-            elif before.channel != after.channel:
-                await self.voice_level_tracker.handle_voice_move(member, before.channel, after.channel)
-            
-            # Case 4: 음소거 상태 변경
-            elif before.self_mute != after.self_mute:
-                await self.voice_level_tracker.handle_mute_change(
-                    member, before.self_mute, after.self_mute
-                )
-            # Case 5: 화면 공유 상태 변경
-            elif before.self_stream != after.self_stream:
-                await self.voice_level_tracker.handle_screen_share_change(
-                    member, before.self_stream, after.self_stream
-                )
-        
         except Exception as e:
             logger.error(f"Error in on_voice_state_update: {e}", exc_info=True)
 
