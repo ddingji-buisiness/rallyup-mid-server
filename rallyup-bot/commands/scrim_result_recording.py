@@ -634,6 +634,109 @@ class ConfirmCancelView(discord.ui.View):
             view=None
         )
 
+class RecruitmentOrNewView(discord.ui.View):
+    """기존 모집 선택 또는 새 내전 생성 View"""
+    
+    def __init__(self, bot, completed_recruitments: List[Dict], guild_id: str):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.completed_recruitments = completed_recruitments
+        
+        self.setup_buttons()
+    
+    def setup_buttons(self):
+        """버튼 설정"""
+        # 기존 모집이 있으면 선택 옵션 추가
+        if self.completed_recruitments:
+            existing_button = discord.ui.Button(
+                label=f"기존 내전 선택 ({len(self.completed_recruitments)}개)",
+                style=discord.ButtonStyle.primary,
+                emoji="📋"
+            )
+            existing_button.callback = self.select_existing_recruitment
+            self.add_item(existing_button)
+        
+        # 새 내전 생성 버튼 (항상 표시)
+        new_button = discord.ui.Button(
+            label="새 내전 생성",
+            style=discord.ButtonStyle.success,
+            emoji="➕"
+        )
+        new_button.callback = self.create_new_scrim
+        self.add_item(new_button)
+    
+    async def select_existing_recruitment(self, interaction: discord.Interaction):
+        """기존 모집 선택"""
+        view = RecruitmentSelectView(self.bot, self.completed_recruitments, self.guild_id)
+        embed = discord.Embed(
+            title="📋 기존 내전 선택",
+            description="결과를 기록할 내전을 선택해주세요.",
+            color=0x0099ff
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+    
+    async def create_new_scrim(self, interaction: discord.Interaction):
+        """새 내전 생성"""
+        modal = NewScrimModal(self.bot, self.guild_id)
+        await interaction.response.send_modal(modal)
+
+class NewScrimModal(discord.ui.Modal):
+    """새 내전 생성 모달"""
+    
+    def __init__(self, bot, guild_id: str):
+        super().__init__(title="새 내전 생성")
+        self.bot = bot
+        self.guild_id = guild_id
+        
+        self.scrim_title = discord.ui.TextInput(
+            label="내전 제목",
+            placeholder="예: 금요일 저녁 내전",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.scrim_title)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        try:
+            # 등록된 사용자 목록 가져오기
+            all_users = await self.bot.db_manager.get_registered_users_list(self.guild_id, limit=100)
+            
+            if len(all_users) < 10:
+                await interaction.followup.send(
+                    f"⚠ 등록된 사용자가 {len(all_users)}명으로 부족합니다. (최소 10명 필요)\n"
+                    f"`/가입` 명령어로 더 많은 사용자가 등록해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 가짜 recruitment_info 생성 (기존 코드와 호환성 유지)
+            recruitment_info = {
+                'id': f"temp_{int(datetime.now().timestamp())}",
+                'title': self.scrim_title.value,
+                'scrim_date': datetime.now().isoformat(),
+                'participant_count': len(all_users)
+            }
+            
+            # 참가자 관리 화면으로 이동
+            participant_view = ParticipantManagementView(
+                bot=self.bot,
+                guild_id=self.guild_id,
+                recruitment_id=recruitment_info['id'],
+                recruitment_info=recruitment_info,
+                base_participants=all_users,  # 모든 등록 사용자를 기본 참가자로
+                max_match_number=0  # 새 내전이므로 0
+            )
+            
+            await participant_view.show_management_screen(interaction)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"⚠ 새 내전 생성 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+            )
+
 class RecruitmentSelectView(discord.ui.View):
     """마감된 내전 모집 선택 View"""
     
@@ -1562,6 +1665,11 @@ class PositionSelectionView(discord.ui.View):
         for i, player in enumerate(self.team_data):
             position = self.position_selections[i]
             self.session.matches[self.match_number][position_key][player['user_id']] = position
+
+            # 사용자의 주 포지션이 비어있으면 자동 저장
+            await self.update_user_main_position_if_empty(
+                interaction.guild.id, player['user_id'], position
+            )
         
         if self.team == "team_a":
             # A팀 완료 -> B팀으로 이동
@@ -1572,6 +1680,21 @@ class PositionSelectionView(discord.ui.View):
             # B팀 완료 -> 최종 검토 단계로
             final_review = FinalReviewView(self.bot, self.session, self.match_number, self.dashboard)
             await final_review.show_final_review(interaction)
+
+    async def update_user_main_position_if_empty(self, guild_id: int, user_id: str, position: str):
+        """사용자의 주 포지션이 비어있을 때만 자동 업데이트"""
+        try:
+            guild_id_str = str(guild_id)
+            user_info = await self.bot.db_manager.get_registered_user_info(guild_id_str, user_id)
+            
+            if user_info and not user_info.get('main_position'):
+                await self.bot.db_manager.update_user_main_position(
+                    guild_id_str, user_id, position
+                )
+                print(f"📝 {user_info['username']}의 주 포지션을 '{position}'으로 자동 설정")
+                
+        except Exception as e:
+            print(f"포지션 자동 업데이트 실패: {e}")
 
     async def retry_team_positions(self, interaction: discord.Interaction):
         """팀 포지션 다시 선택"""
@@ -2013,17 +2136,9 @@ class ScrimResultCommands(commands.Cog):
                 return
             
             completed_recruitments = await self.bot.db_manager.get_completed_recruitments(guild_id)
-            
-            if not completed_recruitments:
-                await interaction.followup.send(
-                    "❌ 마감된 내전 모집이 없습니다.\n"
-                    "먼저 `/내전공지등록`으로 내전을 모집하고 마감시간이 지난 후 사용해주세요.",
-                    ephemeral=True
-                )
-                return
-            
+                       
             # 내전 선택 View 표시
-            view = RecruitmentSelectView(self.bot, completed_recruitments, guild_id)
+            view = RecruitmentOrNewView(self.bot, completed_recruitments, guild_id)
             embed = discord.Embed(
                 title="📋 내전 결과 기록 시작",
                 description="결과를 기록할 내전을 선택해주세요.",
