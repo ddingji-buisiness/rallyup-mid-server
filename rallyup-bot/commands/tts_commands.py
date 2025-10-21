@@ -109,7 +109,6 @@ class TTSCommands(commands.Cog):
     @app_commands.command(name="입장", description="TTS 봇을 음성 채널에 입장시킵니다")
     async def tts_join(self, interaction: discord.Interaction):
         """TTS 봇 음성 채널 입장"""
-        # 사용자 음성 채널 확인
         if not interaction.user.voice:
             embed = discord.Embed(
                 title="❌ 음성 채널 필요",
@@ -135,7 +134,6 @@ class TTSCommands(commands.Cog):
                     await interaction.response.send_message(embed=embed, ephemeral=True)
                     return
                 else:
-                    # 다른 채널로 이동
                     await self.voice_clients[guild_id].move_to(channel)
                     embed = discord.Embed(
                         title="🔄 채널 이동",
@@ -145,30 +143,35 @@ class TTSCommands(commands.Cog):
                     await interaction.response.send_message(embed=embed)
                     return
             
-            # 새로운 연결
             await interaction.response.defer()
             
             # 음성 채널 연결
             voice_client = await channel.connect(timeout=10.0, reconnect=True)
             self.voice_clients[guild_id] = voice_client
             
-            # 서버별 TTS 설정 초기화
-            self.tts_settings[guild_id] = {
-                'volume_boost': 5.0,
-                'use_optimization': True,
-                'last_used': time.time()
-            }
+            if guild_id not in self.tts_settings:
+                # 처음 입장하는 경우에만 기본값 설정
+                self.tts_settings[guild_id] = {
+                    'volume_boost': 5.0,  # 기본 볼륨
+                    'use_optimization': True,
+                    'last_used': time.time()
+                }
+                logger.info(f"🆕 새 서버 TTS 설정 초기화: {interaction.guild.name} (볼륨: 5.0)")
+            else:
+                # 재입장 시 기존 설정 유지
+                self.tts_settings[guild_id]['last_used'] = time.time()
+                logger.info(f"♻️ 기존 TTS 설정 유지: {interaction.guild.name} (볼륨: {self.tts_settings[guild_id]['volume_boost']})")
             
             # 연결 안정화 대기
             await asyncio.sleep(0.5)
             
-            # 연결 상태 검증
             if not voice_client.is_connected():
                 await interaction.followup.send("❌ 음성 연결에 실패했습니다.")
                 return
             
             # 성공 메시지
             opus_loaded = discord.opus.is_loaded()
+            current_volume = self.tts_settings[guild_id]['volume_boost']
             
             embed = discord.Embed(
                 title="🎤 TTS 봇 입장 완료",
@@ -179,38 +182,31 @@ class TTSCommands(commands.Cog):
             embed.add_field(
                 name="🔧 시스템 상태",
                 value=f"🎵 Opus: {'✅ 정상' if opus_loaded else '⚠️ 제한모드'}\n"
-                      f"⚙️ FFmpeg: 최적화됨\n"
-                      f"📶 지연시간: {voice_client.latency*1000:.1f}ms\n"
-                      f"🔊 볼륨 부스트: 활성화",
+                    f"⚙️ FFmpeg: 최적화됨\n"
+                    f"🔶 지연시간: {voice_client.latency*1000:.1f}ms\n"
+                    f"🔊 현재 볼륨: 레벨 {current_volume:.1f}",  # 현재 볼륨 표시
                 inline=False
             )
             
             embed.add_field(
                 name="📝 사용법",
                 value="`/말하기 <내용>` - 텍스트를 음성으로 변환\n"
-                      "`/테스트` - 음성 연결 테스트\n"
-                      "`/퇴장` - 음성 채널에서 퇴장",
+                    "`/볼륨설정 <1-10>` - 볼륨 조절\n"
+                    "`/현재볼륨` - 현재 볼륨 확인\n"
+                    "`/퇴장` - 음성 채널에서 퇴장",
                 inline=False
             )
             
-            embed.set_footer(text="💡 팁: 긴 텍스트일수록 더 자연스럽게 들립니다!")
+            embed.set_footer(text="💡 팁: 볼륨이 이상하면 /현재볼륨으로 확인하세요!")
             
             await interaction.followup.send(embed=embed)
             
-            # 서버 로그
-            logger.info(f"🎤 TTS 봇 입장: {interaction.guild.name} > {channel.name} (사용자: {interaction.user.display_name})")
+            logger.info(f"🎤 TTS 봇 입장: {interaction.guild.name} > {channel.name} (사용자: {interaction.user.display_name}, 볼륨: {current_volume})")
             
         except asyncio.TimeoutError:
             embed = discord.Embed(
                 title="❌ 연결 실패",
                 description="음성 채널 연결 시간이 초과되었습니다. 다시 시도해주세요.",
-                color=0xff0000
-            )
-            await interaction.followup.send(embed=embed)
-        except discord.ClientException as e:
-            embed = discord.Embed(
-                title="❌ Discord 연결 오류",
-                description=f"Discord 연결 중 오류가 발생했습니다: {str(e)}",
                 color=0xff0000
             )
             await interaction.followup.send(embed=embed)
