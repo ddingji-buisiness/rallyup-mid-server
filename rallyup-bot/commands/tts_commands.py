@@ -321,8 +321,6 @@ class TTSCommands(commands.Cog):
             
             # 정리
             del self.voice_clients[guild_id]
-            if guild_id in self.tts_settings:
-                del self.tts_settings[guild_id]
             
             # 성공 메시지
             embed = discord.Embed(
@@ -593,7 +591,7 @@ class TTSCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     async def _create_optimized_tts_file(self, text: str, interaction) -> Optional[str]:
-        """최적화된 TTS 파일 생성 - 볼륨 일관성 최고"""
+        """TTS 파일 생성"""
         try:
             optimized_text = f"{text}."
             
@@ -615,16 +613,14 @@ class TTSCommands(commands.Cog):
                 logger.error(f"❌ gTTS 파일 생성 실패")
                 return None
             
-            # 🔥 핵심: 다이나믹 압축 + 라우드니스 정규화
+            # 🔥 핵심: 훨씬 더 강력한 볼륨 정규화
             cmd = [
                 self.ffmpeg_executable,
                 '-i', mp3_file,
                 '-af', (
-                    # 1. 다이나믹 압축 (작은소리 키우고 큰소리 줄임)
-                    'acompressor=threshold=-20dB:ratio=4:attack=5:release=50,'
-                    # 2. 라우드니스 정규화 (모든 단어 일관된 볼륨)
-                    'loudnorm=I=-16:TP=-1.5:LRA=7:linear=true,'
-                    # 3. 최종 볼륨
+                    'acompressor=threshold=-25dB:ratio=8:attack=1:release=100,'
+                    'loudnorm=I=-16:TP=-1.5:LRA=3:linear=true,'  
+                    'dynaudnorm=p=0.9:s=5,'
                     f'volume={volume_boost}'
                 ),
                 '-ar', '48000',
@@ -641,11 +637,11 @@ class TTSCommands(commands.Cog):
                 pass
             
             if result.returncode != 0:
-                logger.error(f"❌ FFmpeg 실패")
+                logger.error(f"❌ FFmpeg 실패: {result.stderr}")
                 return None
             
             if os.path.exists(wav_file) and os.path.getsize(wav_file) > 10000:
-                logger.info(f"✅ TTS 생성 완료")
+                logger.info(f"✅ TTS 생성 완료 (강력한 정규화 적용)")
                 return wav_file
             else:
                 return None
