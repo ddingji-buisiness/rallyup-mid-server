@@ -593,71 +593,65 @@ class TTSCommands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     async def _create_optimized_tts_file(self, text: str, interaction) -> Optional[str]:
-        """최적화된 TTS 파일 생성 (성공한 로직 적용)"""
+        """최적화된 TTS 파일 생성 - 볼륨 일관성 최고"""
         try:
-            # 텍스트 최적화
             optimized_text = f"{text}."
             
             temp_dir = tempfile.gettempdir()
-            timestamp = int(time.time() * 1000000)  # 마이크로초까지 포함
+            timestamp = int(time.time() * 1000000)
             guild_id = interaction.guild.id
             volume_boost = self.tts_settings.get(guild_id, {}).get('volume_boost', 5.0)
 
             mp3_file = os.path.join(temp_dir, f"tts_{guild_id}_{timestamp}.mp3")
             wav_file = os.path.join(temp_dir, f"tts_{guild_id}_{timestamp}_optimized.wav")
             
-            logger.info(f"🎵 TTS 생성 시작: '{text}' -> {mp3_file}")
+            logger.info(f"🎵 TTS 생성 시작: '{text}'")
             
-            # 1단계: gTTS로 기본 MP3 생성
+            # gTTS 생성
             tts = gTTS(text=optimized_text, lang='ko', slow=False)
             tts.save(mp3_file)
             
             if not os.path.exists(mp3_file) or os.path.getsize(mp3_file) < 1000:
-                logger.error(f"❌ gTTS 파일 생성 실패: {mp3_file}")
+                logger.error(f"❌ gTTS 파일 생성 실패")
                 return None
             
-            # 2단계: FFmpeg로 볼륨 부스트 및 Discord 최적화
+            # 🔥 핵심: 다이나믹 압축 + 라우드니스 정규화
             cmd = [
                 self.ffmpeg_executable,
                 '-i', mp3_file,
-                '-af', f'volume={volume_boost},loudnorm=I=-16:TP=-1.5:LRA=11',
-                '-ar', '48000',  # Discord 최적 샘플레이트
-                '-ac', '2',      # 스테레오
-                '-b:a', '128k',  # 높은 비트레이트
+                '-af', (
+                    # 1. 다이나믹 압축 (작은소리 키우고 큰소리 줄임)
+                    'acompressor=threshold=-20dB:ratio=4:attack=5:release=50,'
+                    # 2. 라우드니스 정규화 (모든 단어 일관된 볼륨)
+                    'loudnorm=I=-16:TP=-1.5:LRA=7:linear=true,'
+                    # 3. 최종 볼륨
+                    f'volume={volume_boost}'
+                ),
+                '-ar', '48000',
+                '-ac', '2',
+                '-b:a', '128k',
                 '-y', wav_file
             ]
             
-            logger.info(f"🔧 볼륨 최적화 실행: {' '.join(cmd[:3])}...")
             result = subprocess.run(cmd, capture_output=True, timeout=15, text=True)
             
-            # 기본 MP3 파일 정리
             try:
                 os.remove(mp3_file)
             except:
                 pass
             
             if result.returncode != 0:
-                logger.error(f"❌ FFmpeg 최적화 실패: {result.stderr}")
+                logger.error(f"❌ FFmpeg 실패")
                 return None
             
-            # 3단계: 최종 파일 검증
-            if os.path.exists(wav_file) and os.path.getsize(wav_file) > 10000:  # 10KB 이상
-                file_size = os.path.getsize(wav_file)
-                logger.info(f"✅ 최적화 TTS 생성 완료: {wav_file} ({file_size} bytes)")
+            if os.path.exists(wav_file) and os.path.getsize(wav_file) > 10000:
+                logger.info(f"✅ TTS 생성 완료")
                 return wav_file
             else:
-                logger.error("❌ 최적화된 파일이 너무 작거나 생성되지 않음")
                 return None
                     
         except Exception as e:
             logger.error(f"❌ TTS 파일 생성 실패: {e}", exc_info=True)
-            # 임시 파일들 정리
-            for temp_file in [mp3_file, wav_file]:
-                try:
-                    if 'temp_file' in locals() and os.path.exists(temp_file):
-                        os.remove(temp_file)
-                except:
-                    pass
             return None
 
     async def _play_optimized_audio(self, voice_client: discord.VoiceClient, audio_file: str, text: str, interaction) -> bool:
