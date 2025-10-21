@@ -1,7 +1,3 @@
-"""
-완성된 TTS 명령어 시스템
-- 입장, 말하기(목소리 선택), 볼륨설정, 현재볼륨, 퇴장
-"""
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -12,12 +8,13 @@ import tempfile
 import time
 import logging
 import glob
+import platform
 from typing import Optional, Dict, Any, Literal
 
 logger = logging.getLogger(__name__)
 
 class TTSCommands(commands.Cog):
-    """RallyUp 봇 완성된 TTS 명령어 시스템"""
+    """Linux 서버용 TTS Commands (Opus 경로 수정)"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -61,15 +58,15 @@ class TTSCommands(commands.Cog):
         # FFmpeg 경로 설정
         self.ffmpeg_executable = self._find_ffmpeg()
         
-        # Opus 로딩 확인
-        self._force_load_opus()
+        # 서버 환경용 Opus 로딩
+        self._force_load_opus_linux()
 
     def _find_ffmpeg(self):
-        """FFmpeg 경로 찾기"""
+        """FFmpeg 경로 찾기 (Linux 서버용)"""
         paths = [
-            '/opt/homebrew/bin/ffmpeg',
-            '/usr/local/bin/ffmpeg', 
             '/usr/bin/ffmpeg',
+            '/usr/local/bin/ffmpeg',
+            '/opt/homebrew/bin/ffmpeg',  # macOS 호환
             'ffmpeg'
         ]
         
@@ -81,8 +78,8 @@ class TTSCommands(commands.Cog):
         logger.warning("⚠️ FFmpeg를 찾을 수 없음")
         return 'ffmpeg'
 
-    def _force_load_opus(self):
-        """Opus 강제 로딩"""
+    def _force_load_opus_linux(self):
+        """Linux 서버용 Opus 강제 로딩"""
         try:
             import discord.opus
             
@@ -90,51 +87,101 @@ class TTSCommands(commands.Cog):
                 logger.info("✅ Opus가 이미 로드되어 있음")
                 return True
             
-            logger.info("🔊 Opus 라이브러리 로딩 중...")
+            logger.info("🔊 Linux 서버용 Opus 라이브러리 로딩 중...")
             
-            # 동적으로 Opus 파일 찾기
-            opus_search_patterns = [
-                '/opt/homebrew/Cellar/opus/*/lib/libopus.*.dylib',
-                '/opt/homebrew/lib/libopus.*.dylib',
-                '/opt/homebrew/lib/libopus.dylib',
-                '/usr/local/lib/libopus.*.dylib',
-                '/usr/local/lib/libopus.dylib',
-            ]
+            # 운영체제별 경로 설정
+            system = platform.system().lower()
             
+            if system == 'linux':
+                # Linux 서버용 Opus 경로들
+                opus_search_patterns = [
+                    '/usr/lib/x86_64-linux-gnu/libopus.so*',
+                    '/usr/lib/aarch64-linux-gnu/libopus.so*',
+                    '/usr/lib/arm-linux-gnueabihf/libopus.so*',
+                    '/usr/lib64/libopus.so*',
+                    '/usr/lib/libopus.so*',
+                    '/usr/local/lib/libopus.so*',
+                    '/lib/x86_64-linux-gnu/libopus.so*',
+                ]
+                
+                # 간단한 이름들 (Linux)
+                simple_names = ['opus', 'libopus.so.0', 'libopus.so', 'libopus']
+                
+            elif system == 'darwin':
+                # macOS용 경로들 (호환성)
+                opus_search_patterns = [
+                    '/opt/homebrew/Cellar/opus/*/lib/libopus.*.dylib',
+                    '/opt/homebrew/lib/libopus.*.dylib',
+                    '/usr/local/lib/libopus.*.dylib',
+                ]
+                
+                simple_names = ['opus', 'libopus.dylib', 'libopus.0.dylib']
+                
+            else:
+                # Windows나 기타 시스템
+                opus_search_patterns = []
+                simple_names = ['opus', 'libopus']
+            
+            # glob으로 실제 파일 찾기
             found_opus_files = []
             for pattern in opus_search_patterns:
                 matches = glob.glob(pattern)
                 found_opus_files.extend(matches)
             
+            # 중복 제거 및 정렬 (최신 버전 우선)
             found_opus_files = sorted(list(set(found_opus_files)), reverse=True)
             
-            # 각 파일 시도
+            logger.info(f"🔍 발견된 Opus 파일들: {found_opus_files}")
+            
+            # 각 파일에 대해 로딩 시도
             for opus_file in found_opus_files:
                 if os.path.exists(opus_file) and os.access(opus_file, os.R_OK):
                     try:
+                        logger.info(f"🔊 Opus 로딩 시도: {opus_file}")
                         discord.opus.load_opus(opus_file)
+                        
                         if discord.opus.is_loaded():
                             logger.info(f"✅ Opus 로딩 성공: {opus_file}")
                             return True
-                    except Exception:
+                        else:
+                            logger.debug(f"⚠️ 로딩했지만 확인 실패: {opus_file}")
+                            
+                    except Exception as e:
+                        logger.debug(f"❌ Opus 로딩 실패 ({opus_file}): {e}")
                         continue
+                else:
+                    logger.debug(f"⚠️ 접근 불가: {opus_file}")
             
             # 간단한 이름으로 시도
-            simple_names = ['opus', 'libopus', 'libopus.0', 'libopus.dylib']
+            logger.info("🔊 간단한 이름으로 Opus 로딩 시도...")
             for name in simple_names:
                 try:
+                    logger.info(f"🔊 시도: {name}")
                     discord.opus.load_opus(name)
+                    
                     if discord.opus.is_loaded():
-                        logger.info(f"✅ Opus 로딩 성공: {name}")
+                        logger.info(f"✅ Opus 로딩 성공 (간단한 이름): {name}")
                         return True
-                except Exception:
+                        
+                except Exception as e:
+                    logger.debug(f"❌ 간단한 이름 로딩 실패 ({name}): {e}")
                     continue
             
-            logger.error("❌ Opus 로딩 실패")
+            # 모든 시도 실패
+            logger.error("❌ 모든 Opus 로딩 시도 실패!")
+            logger.error("💡 해결 방법:")
+            logger.error("1. sudo apt install libopus-dev")
+            logger.error("2. pip install 'discord.py[voice]' --force-reinstall")
+            logger.error("3. pip install PyNaCl --force-reinstall")
+            
             return False
             
+        except ImportError as e:
+            logger.error(f"❌ discord.opus 모듈 임포트 실패: {e}")
+            logger.error("💡 해결: pip install 'discord.py[voice]'")
+            return False
         except Exception as e:
-            logger.error(f"❌ Opus 로딩 오류: {e}")
+            logger.error(f"❌ Opus 로딩 중 예상치 못한 오류: {e}", exc_info=True)
             return False
 
     @app_commands.command(name="입장", description="TTS 봇을 음성 채널에 입장시킵니다")
@@ -145,21 +192,37 @@ class TTSCommands(commands.Cog):
         try:
             import discord.opus
             if not discord.opus.is_loaded():
-                self._force_load_opus()
+                # 다시 한번 로딩 시도
+                self._force_load_opus_linux()
                 
                 if not discord.opus.is_loaded():
                     embed = discord.Embed(
-                        title="❌ 시스템 오류",
-                        description="음성 라이브러리를 로드할 수 없습니다.",
+                        title="❌ 음성 라이브러리 오류",
+                        description="Opus 라이브러리를 로드할 수 없습니다.",
                         color=0xff0000
+                    )
+                    embed.add_field(
+                        name="🔧 서버 관리자 해결 방법",
+                        value="```bash\n"
+                              "# 1. Opus 개발 라이브러리 설치\n"
+                              "sudo apt install libopus-dev\n\n"
+                              "# 2. Discord.py 재설치\n"
+                              "pip install 'discord.py[voice]' --force-reinstall\n"
+                              "```",
+                        inline=False
                     )
                     await interaction.response.send_message(embed=embed, ephemeral=True)
                     return
         except ImportError:
             embed = discord.Embed(
-                title="❌ 음성 모듈 오류",
-                description="Discord.py 음성 지원이 설치되지 않았습니다.",
+                title="❌ Discord.py 음성 모듈 오류",
+                description="Discord.py가 음성 지원 없이 설치되었습니다.",
                 color=0xff0000
+            )
+            embed.add_field(
+                name="🔧 해결 방법",
+                value="`pip install 'discord.py[voice]'`를 실행해주세요",
+                inline=False
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
@@ -237,7 +300,8 @@ class TTSCommands(commands.Cog):
             embed.add_field(
                 name="🔧 시스템 상태",
                 value=f"🎵 Edge TTS: ✅ 정상\n"
-                      f"⚙️ 음성 엔진: 로드됨\n"
+                      f"⚙️ Opus: ✅ 로드됨\n"
+                      f"🖥️ 서버: Linux\n"
                       f"📶 지연시간: {voice_client.latency*1000:.1f}ms\n"
                       f"🎭 현재 목소리: {voice_info['name']}",
                 inline=False
@@ -581,12 +645,12 @@ class TTSCommands(commands.Cog):
             return None
 
     async def _play_audio_fixed(self, voice_client: discord.VoiceClient, audio_file: str, text: str) -> bool:
-        """수정된 오디오 재생"""
+        """Linux 서버용 오디오 재생"""
         try:
-            logger.info(f"🔊 오디오 재생 시작: {os.path.basename(audio_file)}")
+            logger.info(f"🔊 Linux 서버 오디오 재생 시작: {os.path.basename(audio_file)}")
             
-            # 안전한 FFmpeg 옵션
-            ffmpeg_options = '-vn -filter:a "volume=1.5"'  # 적절한 볼륨 증폭
+            # Linux 서버용 FFmpeg 옵션
+            ffmpeg_options = '-vn -filter:a "volume=1.5"'
             
             # Discord PCM 오디오 소스 생성
             audio_source = discord.FFmpegPCMAudio(
@@ -707,6 +771,6 @@ class TTSCommands(commands.Cog):
                         logger.error(f"⌛ 자동 퇴장 오류: {e}")
 
 async def setup(bot):
-    """완성된 TTS Commands Cog를 봇에 추가"""
+    """Linux 서버용 TTS Commands Cog를 봇에 추가"""
     await bot.add_cog(TTSCommands(bot))
-    logger.info("🎤 완성된 TTS Commands 시스템이 로드되었습니다!")
+    logger.info("🎤 Linux 서버용 TTS Commands 시스템이 로드되었습니다!")
