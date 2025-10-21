@@ -1,8 +1,3 @@
-# ====================================
-# 프로덕션 레벨 TTS 명령어 시스템 - 완성판
-# RallyUp 디스코드 봇 TTS 기능
-# ====================================
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -61,8 +56,26 @@ class TTSCommands(commands.Cog):
         """오디오 시스템 초기화"""
         try:
             if not discord.opus.is_loaded():
-                # macOS Opus 라이브러리 로드
-                if sys.platform == 'darwin':
+                # Ubuntu/Linux - 서버 환경에 맞게 수정
+                if sys.platform == 'linux':
+                    opus_paths = [
+                        'libopus.so.0',  # ldconfig가 자동으로 /lib/x86_64-linux-gnu/libopus.so.0 찾음
+                        '/lib/x86_64-linux-gnu/libopus.so.0',  # 직접 경로
+                        '/usr/lib/x86_64-linux-gnu/libopus.so.0',  # 대체 경로
+                    ]
+                    
+                    for opus_path in opus_paths:
+                        try:
+                            discord.opus.load_opus(opus_path)  # ⭐ 인자 전달!
+                            if discord.opus.is_loaded():
+                                logger.info(f"✅ Opus 로드 성공: {opus_path}")
+                                break
+                        except Exception as e:
+                            logger.debug(f"Opus 로드 시도 {opus_path}: {e}")
+                            continue
+                
+                # macOS
+                elif sys.platform == 'darwin':
                     opus_paths = [
                         '/opt/homebrew/lib/libopus.dylib',
                         '/usr/local/lib/libopus.dylib',
@@ -71,21 +84,13 @@ class TTSCommands(commands.Cog):
                     for opus_path in opus_paths:
                         if os.path.exists(opus_path):
                             try:
-                                discord.opus.load_opus(opus_path)
+                                discord.opus.load_opus(opus_path)  # ⭐ 인자 전달!
                                 if discord.opus.is_loaded():
                                     logger.info(f"✅ Opus 로드 성공: {opus_path}")
                                     break
                             except Exception as e:
-                                logger.warning(f"⚠️ Opus 로드 실패 {opus_path}: {e}")
-                
-                # 자동 감지 시도
-                if not discord.opus.is_loaded():
-                    try:
-                        discord.opus.load_opus()
-                        if discord.opus.is_loaded():
-                            logger.info("✅ Opus 자동 로드 성공")
-                    except Exception as e:
-                        logger.error(f"❌ Opus 자동 로드 실패: {e}")
+                                logger.debug(f"Opus 로드 시도 {opus_path}: {e}")
+                                continue
             
             # 최종 상태 확인
             if discord.opus.is_loaded():
@@ -95,14 +100,11 @@ class TTSCommands(commands.Cog):
                 except:
                     logger.info("🎵 Opus 시스템 준비 완료")
             else:
-                logger.error("❌ Opus 로드 실패 - TTS 품질이 제한될 수 있습니다")
+                logger.warning("⚠️ Opus 로드 실패 - 기본 코덱 사용")
+                logger.info("💡 TTS는 정상 작동하지만 음질이 약간 제한될 수 있습니다")
                 
         except Exception as e:
             logger.error(f"❌ 오디오 시스템 초기화 오류: {e}")
-
-    # ============================================
-    # 기본 TTS 명령어들
-    # ============================================
 
     @app_commands.command(name="입장", description="TTS 봇을 음성 채널에 입장시킵니다")
     async def tts_join(self, interaction: discord.Interaction):
@@ -395,10 +397,6 @@ class TTSCommands(commands.Cog):
             await interaction.response.send_message(embed=embed)
             logger.error(f"❌ TTS 퇴장 오류: {e}", exc_info=True)
 
-    # ============================================
-    # 테스트 및 진단 명령어들
-    # ============================================
-
     @app_commands.command(name="테스트", description="TTS 시스템 연결 및 음성 출력을 테스트합니다")
     async def tts_test(self, interaction: discord.Interaction):
         """TTS 시스템 테스트"""
@@ -605,10 +603,6 @@ class TTSCommands(commands.Cog):
         embed.set_footer(text="💡 문제가 있다면 /테스트 명령어를 사용해보세요!")
         
         await interaction.response.send_message(embed=embed)
-
-    # ============================================
-    # 내부 유틸리티 메서드들
-    # ============================================
 
     async def _create_optimized_tts_file(self, text: str, interaction) -> Optional[str]:
         """최적화된 TTS 파일 생성 (성공한 로직 적용)"""
@@ -852,10 +846,6 @@ class TTSCommands(commands.Cog):
         
         return pcm_data
 
-    # ============================================
-    # Cog 생명주기 관리
-    # ============================================
-
     async def cog_unload(self):
         """Cog 언로드 시 정리"""
         logger.info("🔄 TTS Commands Cog 언로드 중...")
@@ -918,54 +908,7 @@ class TTSCommands(commands.Cog):
                     except Exception as e:
                         logger.error(f"❌ 자동 퇴장 오류: {e}")
 
-# ============================================
-# Cog 등록 함수
-# ============================================
-
 async def setup(bot):
     """TTS Commands Cog를 봇에 추가"""
     await bot.add_cog(TTSCommands(bot))
     logger.info("🎤 TTS Commands 시스템이 로드되었습니다!")
-
-# ============================================
-# 프로덕션 배포 가이드
-# ============================================
-"""
-🚀 프로덕션 배포 가이드
-
-1. 필수 시스템 요구사항:
-   - Python 3.8+
-   - FFmpeg 설치됨
-   - Opus 라이브러리 설치됨
-
-2. 필수 Python 패키지:
-   pip install "discord.py[voice]" gtts
-
-3. macOS 추가 설치:
-   brew install opus ffmpeg
-
-4. 봇 권한 설정:
-   - Connect (음성 채널 연결)
-   - Speak (음성 말하기)
-   - Use Voice Activity (음성 활동 사용)
-
-5. 기본 사용법:
-   /입장  - TTS 봇 음성 채널 입장
-   /말하기 <내용>  - 텍스트를 음성으로 변환
-   /테스트  - 시스템 테스트
-   /상태  - 현재 상태 확인
-   /퇴장  - 음성 채널에서 퇴장
-
-6. 성능 최적화:
-   - 볼륨 10배 증폭으로 Discord VAD 우회
-   - FFmpeg 라우드니스 정규화 적용
-   - 자동 파일 정리 시스템
-   - 비동기 처리로 논블로킹 동작
-
-7. 자동 관리 기능:
-   - 채널에 혼자 남으면 5초 후 자동 퇴장
-   - 임시 파일 자동 정리
-   - 에러 복구 및 로깅
-
-이 시스템은 프로덕션 환경에서 안정적으로 작동하도록 설계되었습니다.
-"""
