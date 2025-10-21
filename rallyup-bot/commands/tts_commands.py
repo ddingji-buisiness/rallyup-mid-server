@@ -154,7 +154,7 @@ class TTSCommands(commands.Cog):
             
             # 서버별 TTS 설정 초기화
             self.tts_settings[guild_id] = {
-                'volume_boost': 10.0,
+                'volume_boost': 5.0,
                 'use_optimization': True,
                 'last_used': time.time()
             }
@@ -231,118 +231,71 @@ class TTSCommands(commands.Cog):
         
         # 입력 검증
         if not 내용 or len(내용.strip()) == 0:
-            embed = discord.Embed(
-                title="❌ 텍스트 필요",
-                description="변환할 텍스트를 입력해주세요!",
-                color=0xff0000
+            await interaction.response.send_message(
+                "❌ 텍스트를 입력해주세요!",
+                ephemeral=True,  # 나만 보임
+                delete_after=3   # 3초 후 삭제
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
             
         if len(내용) > 500:
-            embed = discord.Embed(
-                title="❌ 텍스트 길이 초과",
-                description="텍스트는 500자 이하로 입력해주세요!",
-                color=0xff0000
+            await interaction.response.send_message(
+                "❌ 텍스트는 500자 이하로 입력해주세요!",
+                ephemeral=True,
+                delete_after=3
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # 봇 연결 확인
         if guild_id not in self.voice_clients:
-            embed = discord.Embed(
-                title="❌ 봇이 연결되지 않음",
-                description="먼저 `/입장` 명령어로 봇을 음성 채널에 입장시켜주세요!",
-                color=0xff0000
+            await interaction.response.send_message(
+                "❌ 먼저 `/입장` 명령어를 사용해주세요!",
+                ephemeral=True,
+                delete_after=5
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
             
         voice_client = self.voice_clients[guild_id]
         if not voice_client.is_connected():
-            embed = discord.Embed(
-                title="❌ 음성 연결 끊어짐",
-                description="봇이 음성 채널에 연결되어 있지 않습니다!\n다시 `/입장` 명령어를 사용해주세요.",
-                color=0xff0000
+            await interaction.response.send_message(
+                "❌ 음성 연결이 끊어졌습니다. `/입장`을 다시 해주세요!",
+                ephemeral=True,
+                delete_after=5
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        await interaction.response.defer()
+        # 🔥 핵심: 흔적 안남김
+        await interaction.response.send_message(
+            f"🔊 재생 중...",
+            ephemeral=True,  # 나만 보임
+            delete_after=2   # 2초 후 삭제
+        )
         
         try:
             # 기존 재생 중지
             if voice_client.is_playing():
                 voice_client.stop()
-                await asyncio.sleep(0.3)  # 안전한 중지 대기
+                await asyncio.sleep(0.3)
             
             # TTS 파일 생성
-            start_time = time.time()
             audio_file = await self._create_optimized_tts_file(내용, interaction)
             
             if not audio_file:
-                embed = discord.Embed(
-                    title="❌ TTS 생성 실패",
-                    description="음성 파일 생성에 실패했습니다. 다시 시도해주세요.",
-                    color=0xff0000
-                )
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send("❌ TTS 생성 실패", ephemeral=True)
                 return
-            
-            generation_time = time.time() - start_time
             
             # 오디오 재생
             success = await self._play_optimized_audio(voice_client, audio_file, 내용, interaction)
             
+            # 로그만 기록 (채팅에는 아무것도 안남김)
             if success:
-                # 성공 메시지
-                embed = discord.Embed(
-                    title="🔊 음성 재생 완료",
-                    description=f"**{interaction.user.display_name}**",
-                    color=0x00ff00
-                )
-                
-                # 내용 표시 (길면 자르기)
-                display_content = 내용[:100] + "..." if len(내용) > 100 else 내용
-                embed.add_field(
-                    name="💬 재생 내용",
-                    value=f"`{display_content}`",
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="⏱️ 처리 시간",
-                    value=f"{generation_time:.1f}초",
-                    inline=True
-                )
-                
-                embed.add_field(
-                    name="👥 채널",
-                    value=voice_client.channel.name,
-                    inline=True
-                )
-                
-                await interaction.followup.send(embed=embed)
-                
-                # 서버 로그
-                logger.info(f"🔊 TTS 재생 성공: {interaction.user.display_name} > '{내용[:50]}...' ({generation_time:.1f}s)")
-                
+                logger.info(f"🔊 TTS: {interaction.user.display_name} > '{내용[:50]}'")
             else:
-                embed = discord.Embed(
-                    title="❌ 음성 재생 실패",
-                    description="음성 재생에 실패했습니다.\n`/테스트` 명령어로 연결 상태를 확인해주세요.",
-                    color=0xff0000
-                )
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send("❌ 재생 실패", ephemeral=True)
             
         except Exception as e:
-            embed = discord.Embed(
-                title="❌ TTS 처리 오류",
-                description=f"음성 처리 중 오류가 발생했습니다: {str(e)}",
-                color=0xff0000
-            )
-            await interaction.followup.send(embed=embed)
-            logger.error(f"❌ TTS 처리 오류: {e}", exc_info=True)
+            logger.error(f"❌ TTS 오류: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ 오류: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="퇴장", description="TTS 봇을 음성 채널에서 퇴장시킵니다")
     async def tts_leave(self, interaction: discord.Interaction):
@@ -396,6 +349,45 @@ class TTSCommands(commands.Cog):
             )
             await interaction.response.send_message(embed=embed)
             logger.error(f"❌ TTS 퇴장 오류: {e}", exc_info=True)
+
+    @app_commands.command(name="볼륨설정", description="TTS 볼륨을 설정합니다 (1-10)")
+    @app_commands.describe(레벨="볼륨 레벨 (1=조용, 5=보통, 10=큼)")
+    async def tts_volume(self, interaction: discord.Interaction, 레벨: int):
+        """TTS 볼륨 설정"""
+        guild_id = str(interaction.guild.id)
+        
+        if not 1 <= 레벨 <= 10:
+            embed = discord.Embed(
+                title="❌ 잘못된 볼륨 레벨",
+                description="볼륨은 1에서 10 사이로 설정해주세요!",
+                color=0xff0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # 서버별 볼륨 설정 저장
+        if guild_id not in self.tts_settings:
+            self.tts_settings[guild_id] = {}
+        
+        self.tts_settings[guild_id]['volume_boost'] = float(레벨)
+        
+        # 볼륨 레벨 표시
+        volume_emoji = "🔈" if 레벨 <= 3 else "🔉" if 레벨 <= 6 else "🔊"
+        
+        embed = discord.Embed(
+            title=f"{volume_emoji} TTS 볼륨 설정 완료",
+            description=f"볼륨이 **레벨 {레벨}**로 설정되었습니다!",
+            color=0x00ff00
+        )
+        
+        embed.add_field(
+            name="📊 볼륨 가이드",
+            value=f"1-3: 🔈 조용\n4-6: 🔉 보통\n7-10: 🔊 큼\n\n현재: **레벨 {레벨}**",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"🔊 볼륨 설정: {interaction.guild.name} -> 레벨 {레벨}")
 
     @app_commands.command(name="테스트", description="TTS 시스템 연결 및 음성 출력을 테스트합니다")
     async def tts_test(self, interaction: discord.Interaction):
@@ -613,7 +605,8 @@ class TTSCommands(commands.Cog):
             temp_dir = tempfile.gettempdir()
             timestamp = int(time.time() * 1000000)  # 마이크로초까지 포함
             guild_id = interaction.guild.id
-            
+            volume_boost = self.tts_settings.get(guild_id, {}).get('volume_boost', 5.0)
+
             mp3_file = os.path.join(temp_dir, f"tts_{guild_id}_{timestamp}.mp3")
             wav_file = os.path.join(temp_dir, f"tts_{guild_id}_{timestamp}_optimized.wav")
             
@@ -631,8 +624,7 @@ class TTSCommands(commands.Cog):
             cmd = [
                 self.ffmpeg_executable,
                 '-i', mp3_file,
-                # 볼륨 10배 증폭 + 라우드니스 정규화 (성공한 핵심 로직!)
-                '-af', 'volume=10.0,loudnorm=I=-16:TP=-1.5:LRA=11',  
+                '-af', f'volume={volume_boost},loudnorm=I=-16:TP=-1.5:LRA=11',
                 '-ar', '48000',  # Discord 최적 샘플레이트
                 '-ac', '2',      # 스테레오
                 '-b:a', '128k',  # 높은 비트레이트
