@@ -119,7 +119,8 @@ class RallyUpBot(commands.Bot):
             'commands.battle_tag_log_admin',
             'commands.team_info',
             'commands.voice_level_admin',
-            'commands.voice_level_user'
+            'commands.voice_level_user',
+            'commands.tts_commands'
         ]
 
         for command_module in commands_to_load:
