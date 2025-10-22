@@ -21,7 +21,7 @@ class VoiceLevelUser(commands.Cog):
     
     @app_commands.command(name="내레벨", description="내 레벨과 통계를 확인합니다")
     async def my_level(self, interaction: discord.Interaction):
-        """내 레벨 및 통계 조회 (Phase 2 완성)"""
+        """내 레벨 및 통계 조회"""
         try:
             guild_id = str(interaction.guild.id)
             user_id = str(interaction.user.id)
@@ -46,7 +46,7 @@ class VoiceLevelUser(commands.Cog):
                 )
                 return
             
-            # ✅ 현재 온라인 유저 ID 수집 (Phase 2)
+            # 현재 온라인 유저 ID 수집
             online_user_ids = []
             for voice_channel in interaction.guild.voice_channels:
                 for member in voice_channel.members:

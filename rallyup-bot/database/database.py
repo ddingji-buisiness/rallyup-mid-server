@@ -348,6 +348,31 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # TTS 로그 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS tts_log_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    log_channel_id TEXT,
+                    enabled BOOLEAN DEFAULT TRUE,
+                    auto_create_thread BOOLEAN DEFAULT TRUE,
+                    thread_auto_archive_duration INTEGER DEFAULT 1440,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # TTS 일일 스레드 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS tts_daily_threads (
+                    guild_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    message_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, date)
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -370,6 +395,8 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_user ON user_battle_tags(guild_id, user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_battle_tags_tag ON user_battle_tags(battle_tag)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_monitor_guild ON voice_monitor_settings(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_log_guild ON tts_log_settings(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_daily_threads_guild_date ON tts_daily_threads(guild_id, date)')
 
             await db.commit()
 
@@ -1648,27 +1675,33 @@ class DatabaseManager:
                     print(f"❌ birth_year 검증 실패: '{birth_year}'")
                     return False
 
-                await db.execute('''
-                    INSERT INTO user_applications 
-                    (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 
-                    previous_season_tier, current_season_tier, highest_tier, status, applied_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                        username = excluded.username,
-                        entry_method = excluded.entry_method,
-                        battle_tag = excluded.battle_tag,
-                        birth_year = excluded.birth_year,
-                        main_position = excluded.main_position,
-                        previous_season_tier = excluded.previous_season_tier,
-                        current_season_tier = excluded.current_season_tier,
-                        highest_tier = excluded.highest_tier,
-                        status = 'pending',
-                        applied_at = CURRENT_TIMESTAMP,
-                        reviewed_at = NULL,
-                        reviewed_by = NULL,
-                        admin_note = NULL
-                ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position,
-                    previous_season_tier, current_season_tier, highest_tier))
+                existing_user = await self.get_registered_user_info(guild_id, user_id)
+
+                if existing_user:
+                    # 기존 사용자 업데이트 (자동 등록된 사용자의 정보 완성)
+                    await db.execute('''
+                        UPDATE registered_users 
+                        SET username = ?, entry_method = ?, battle_tag = ?, birth_year = ?,
+                            main_position = ?, previous_season_tier = ?, current_season_tier = ?,
+                            highest_tier = ?, profile_completed = TRUE, 
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND user_id = ?
+                    ''', (username, entry_method, battle_tag, birth_year, main_position,
+                        previous_season_tier, current_season_tier, highest_tier, guild_id, user_id))
+                    
+                    print(f"✅ 기존 사용자 정보 업데이트: {username}")
+                else:
+                    # 새 사용자 등록 (자동 등록 실패한 경우의 폴백)
+                    await db.execute('''
+                        INSERT INTO registered_users 
+                        (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 
+                        previous_season_tier, current_season_tier, highest_tier, approved_by, 
+                        auto_registered, profile_completed, is_active, registered_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '수동신청', FALSE, TRUE, TRUE, CURRENT_TIMESTAMP)
+                    ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position,
+                        previous_season_tier, current_season_tier, highest_tier))
+                    
+                    print(f"✅ 새 사용자 등록: {username}")
                 
                 await db.commit()
                 return True
@@ -8898,15 +8931,6 @@ class DatabaseManager:
 
 
     async def get_session_partners(self, session_uuid: str) -> List[str]:
-        """
-        세션의 모든 파트너 조회 (함께 있었던 모든 사람)
-        
-        Args:
-            session_uuid: 세션 UUID
-            
-        Returns:
-            파트너 ID 리스트
-        """
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT DISTINCT partner_id 
@@ -8915,3 +8939,49 @@ class DatabaseManager:
             ''', (session_uuid,))
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+    async def update_user_main_position(self, guild_id: str, user_id: str, main_position: str) -> bool:
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            try:
+                await db.execute('''
+                    UPDATE registered_users 
+                    SET main_position = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND user_id = ? AND (main_position IS NULL OR main_position = '')
+                ''', (main_position, guild_id, user_id))
+                
+                await db.commit()
+                return True
+            except Exception as e:
+                print(f"주 포지션 업데이트 오류: {e}")
+                return False
+
+    async def update_user_profile_selective(self, guild_id: str, user_id: str, update_data: Dict) -> bool:
+        """선택적 사용자 프로필 업데이트"""
+        if not update_data:
+            return True
+        
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            try:
+                # 동적으로 UPDATE 쿼리 생성
+                set_clauses = []
+                values = []
+                
+                for field, value in update_data.items():
+                    set_clauses.append(f"{field} = ?")
+                    values.append(value)
+                
+                set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+                values.extend([guild_id, user_id])
+                
+                query = f'''
+                    UPDATE registered_users 
+                    SET {', '.join(set_clauses)}
+                    WHERE guild_id = ? AND user_id = ?
+                '''
+                
+                await db.execute(query, values)
+                await db.commit()
+                return True
+            except Exception as e:
+                print(f"선택적 프로필 업데이트 오류: {e}")
+                return False
