@@ -290,7 +290,7 @@ class TTSCommands(commands.Cog):
 
     @tts_setup.command(name="로그채널", description="TTS 대화 기록을 저장할 채널을 설정합니다")
     @app_commands.describe(채널="TTS 로그를 기록할 텍스트 채널")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.default_permissions(manage_guild=True)
     async def set_log_channel(self, interaction: discord.Interaction, 채널: discord.TextChannel):
         """TTS 로그 채널 설정"""
         guild_id = str(interaction.guild.id)
