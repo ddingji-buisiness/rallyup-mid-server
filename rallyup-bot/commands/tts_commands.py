@@ -143,13 +143,6 @@ class TTSCommands(commands.Cog):
                 'style': '뉴스 스타일',
                 'language': 'en-US'
             },
-            'Ryan': {
-                'voice': 'en-GB-RyanNeural',
-                'name': 'Ryan (영국 남성)',
-                'gender': '남성',
-                'style': '영국식',
-                'language': 'en-GB'
-            },
             'William': {
                 'voice': 'en-AU-WilliamNeural',
                 'name': 'William (호주 남성)',
@@ -159,7 +152,103 @@ class TTSCommands(commands.Cog):
             }
         }
 
-        self.all_voices = {**self.korean_voices, **self.english_voices}
+        self.spanish_voices = {
+            'Alvaro': {
+                'voice': 'es-ES-AlvaroNeural',
+                'name': 'Álvaro (스페인 남성)',
+                'gender': '남성',
+                'style': '표준',
+                'language': 'es-ES'
+            },
+            'Elvira': {
+                'voice': 'es-ES-ElviraNeural',
+                'name': 'Elvira (스페인 여성)',
+                'gender': '여성',
+                'style': '부드러운',
+                'language': 'es-ES'
+            },
+            'Jorge': {
+                'voice': 'es-MX-JorgeNeural',
+                'name': 'Jorge (멕시코 남성)',
+                'gender': '남성',
+                'style': '친근한',
+                'language': 'es-MX'
+            },
+            'Dalia': {
+                'voice': 'es-MX-DaliaNeural',
+                'name': 'Dalia (멕시코 여성)',
+                'gender': '여성',
+                'style': '명랑한',
+                'language': 'es-MX'
+            }
+        }
+
+        self.chinese_voices = {
+            'Yunxi': {
+                'voice': 'zh-CN-YunxiNeural',
+                'name': '云希 Yunxi (중국 남성)',
+                'gender': '남성',
+                'style': '친근한',
+                'language': 'zh-CN'
+            },
+            'Xiaoxiao': {
+                'voice': 'zh-CN-XiaoxiaoNeural',
+                'name': '晓晓 Xiaoxiao (중국 여성)',
+                'gender': '여성',
+                'style': '밝은',
+                'language': 'zh-CN'
+            },
+            'Yunyang': {
+                'voice': 'zh-CN-YunyangNeural',
+                'name': '云扬 Yunyang (중국 남성, 뉴스)',
+                'gender': '남성',
+                'style': '뉴스 스타일',
+                'language': 'zh-CN'
+            },
+            'Xiaoyi': {
+                'voice': 'zh-CN-XiaoyiNeural',
+                'name': '晓伊 Xiaoyi (중국 여성)',
+                'gender': '여성',
+                'style': '차분한',
+                'language': 'zh-CN'
+            },
+            'YunJhe': {
+                'voice': 'zh-TW-YunJheNeural',
+                'name': '雲哲 YunJhe (대만 남성)',
+                'gender': '남성',
+                'style': '표준',
+                'language': 'zh-TW'
+            },
+            'HsiaoChen': {
+                'voice': 'zh-TW-HsiaoChenNeural',
+                'name': '曉臻 HsiaoChen (대만 여성)',
+                'gender': '여성',
+                'style': '부드러운',
+                'language': 'zh-TW'
+            },
+            'WanLung': {
+                'voice': 'zh-HK-WanLungNeural',
+                'name': '雲龍 WanLung (홍콩 남성)',
+                'gender': '남성',
+                'style': '친근한',
+                'language': 'zh-HK'
+            },
+            'HiuMaan': {
+                'voice': 'zh-HK-HiuMaanNeural',
+                'name': '曉曼 HiuMaan (홍콩 여성)',
+                'gender': '여성',
+                'style': '밝은',
+                'language': 'zh-HK'
+            }
+        }
+
+        self.all_voices = {
+            **self.korean_voices, 
+            **self.english_voices,
+            **self.spanish_voices,
+            **self.chinese_voices
+        }
+
         self.ffmpeg_executable = self._find_ffmpeg()
         self._force_load_opus_linux()
 
@@ -427,8 +516,6 @@ class TTSCommands(commands.Cog):
     @app_commands.command(name="입장", description="TTS 봇을 음성 채널에 입장시킵니다")
     async def tts_join(self, interaction: discord.Interaction):
         """TTS 봇 음성 채널 입장"""
-        
-        # Opus 확인
         try:
             import discord.opus
             if not discord.opus.is_loaded():
@@ -492,6 +579,7 @@ class TTSCommands(commands.Cog):
                 return
             
             existing_channel_id = None
+            existing_channel_name = None
             for ch_id, vc in self.voice_clients.items():
                 if vc.is_connected() and str(vc.guild.id) == guild_id:
                     existing_channel_id = ch_id
@@ -619,7 +707,10 @@ class TTSCommands(commands.Cog):
         내용: str,
         목소리: Optional[Literal[
             '인준', '선희', '현수', '국민', '봉진', '지민', '서현', '순복', '유진',
-            'Guy', 'Jenny', 'Aria', 'Ryan', 'William'
+            'Guy', 'Jenny', 'Aria', 'William',
+            'Alvaro', 'Elvira', 'Jorge', 'Dalia',
+            'Yunxi', 'Xiaoxiao', 'Yunyang', 'Xiaoyi', 
+            'YunJhe', 'HsiaoChen', 'WanLung', 'HiuMaan'
         ]] = None
     ):
         guild_id = str(interaction.guild.id)
@@ -680,11 +771,15 @@ class TTSCommands(commands.Cog):
         await self.tts_queues[channel_id].put(tts_request)
         queue_size = self.tts_queues[channel_id].qsize()
 
+        lang = voice_info.get('language', 'ko-KR')
         language_emoji = (
-            "🇰🇷" if voice_info['language'] == 'ko' 
-            else "🇺🇸" if 'US' in voice_info['language'] 
-            else "🇬🇧" if 'GB' in voice_info['language'] 
-            else "🇦🇺"
+            "🇰🇷" if 'ko' in lang.lower()
+            else "🇪🇸" if 'es' in lang.lower()
+            else "🇨🇳" if 'zh' in lang.lower()
+            else "🇺🇸" if 'US' in lang 
+            else "🇬🇧" if 'GB' in lang 
+            else "🇦🇺" if 'AU' in lang
+            else "🌍"
         )
         
         if queue_size == 1:
@@ -1458,11 +1553,15 @@ class TTSCommands(commands.Cog):
                 return  # 로그 채널 미설정 시 조용히 스킵
             
             voice_info = self.all_voices.get(voice, {})
+            lang = voice_info.get('language', 'ko-KR')
             language_emoji = (
-                "🇰🇷" if voice_info.get('language') == 'ko' 
-                else "🇺🇸" if 'US' in voice_info.get('language', '') 
-                else "🇬🇧" if 'GB' in voice_info.get('language', '') 
-                else "🇦🇺"
+                "🇰🇷" if 'ko' in lang.lower()
+                else "🇪🇸" if 'es' in lang.lower()
+                else "🇨🇳" if 'zh' in lang.lower()
+                else "🇺🇸" if 'US' in lang 
+                else "🇬🇧" if 'GB' in lang 
+                else "🇦🇺" if 'AU' in lang
+                else "🌍"
             )
             
             if success:
