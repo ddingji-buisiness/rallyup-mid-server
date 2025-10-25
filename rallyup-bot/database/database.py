@@ -1790,15 +1790,26 @@ class DatabaseManager:
                 row = await cursor.fetchone()
                 return row[0] if row else None
             
-    async def create_user_application(self, guild_id: str, user_id: str, username: str, 
-                                        entry_method: str, battle_tag: str, birth_year: str, main_position: str,
-                                        previous_season_tier: str, current_season_tier: str, highest_tier: str) -> bool:
-        """사용자 신청 생성 - 재신청 허용 (UPSERT 방식)"""
-        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
-            await db.execute('PRAGMA journal_mode=WAL')
-            
-            try:
-                print(f"[DEBUG] 신청 데이터:")
+    async def create_user_application(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        username: str,
+        entry_method: str, 
+        battle_tag: str, 
+        birth_year: str, 
+        main_position: str,
+        previous_season_tier: str, 
+        current_season_tier: str, 
+        highest_tier: str
+    ) -> bool:
+        """사용자 신청 생성"""
+        
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                print(f"[DEBUG] 신청 데이터 검증 시작:")
                 print(f"  - guild_id: {guild_id}")
                 print(f"  - user_id: {user_id}")
                 print(f"  - username: {username}")
@@ -1807,46 +1818,87 @@ class DatabaseManager:
                 print(f"  - birth_year: '{birth_year}' (type: {type(birth_year)}, length: {len(birth_year) if birth_year else 0})")
                 print(f"  - main_position: {main_position}")
                 
-                # birth_year 검증 추가
+                # birth_year 검증
                 if not birth_year or len(birth_year) != 2 or not birth_year.isdigit():
                     print(f"❌ birth_year 검증 실패: '{birth_year}'")
                     return False
-
-                existing_user = await self.get_registered_user_info(guild_id, user_id)
-
-                if existing_user:
-                    # 기존 사용자 업데이트 (자동 등록된 사용자의 정보 완성)
+                
+                print(f"[CHECK] ✅ birth_year 검증 통과")
+                
+                # 기존 신청이 있는지 확인
+                async with db.execute('''
+                    SELECT status FROM user_applications 
+                    WHERE guild_id = ? AND user_id = ?
+                ''', (guild_id, user_id)) as cursor:
+                    existing = await cursor.fetchone()
+                
+                if existing:
+                    print(f"[INFO] 기존 신청 발견 - 상태: {existing[0]}")
+                    
+                    # 기존 신청 업데이트 (재신청 허용)
                     await db.execute('''
-                        UPDATE registered_users 
-                        SET username = ?, entry_method = ?, battle_tag = ?, birth_year = ?,
-                            main_position = ?, previous_season_tier = ?, current_season_tier = ?,
-                            highest_tier = ?
+                        UPDATE user_applications 
+                        SET username = ?, 
+                            entry_method = ?, 
+                            battle_tag = ?, 
+                            birth_year = ?,
+                            main_position = ?, 
+                            previous_season_tier = ?, 
+                            current_season_tier = ?,
+                            highest_tier = ?, 
+                            status = 'pending',
+                            applied_at = CURRENT_TIMESTAMP,
+                            reviewed_at = NULL,
+                            reviewed_by = NULL,
+                            admin_note = NULL
                         WHERE guild_id = ? AND user_id = ?
-                    ''', (username, entry_method, battle_tag, birth_year, main_position,
-                        previous_season_tier, current_season_tier, highest_tier, guild_id, user_id))
+                    ''', (
+                        username, entry_method, battle_tag, birth_year, 
+                        main_position, previous_season_tier, current_season_tier, 
+                        highest_tier, guild_id, user_id
+                    ))
                     
-                    print(f"✅ 기존 사용자 정보 업데이트: {username}")
+                    print(f"✅ 기존 신청 업데이트 완료: {username}")
+                    
                 else:
-                    await db.execute('''
-                        INSERT INTO registered_users 
-                        (guild_id, user_id, username, entry_method, battle_tag, birth_year, 
-                        main_position, previous_season_tier, current_season_tier, highest_tier, 
-                        approved_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, 
-                        main_position, previous_season_tier, current_season_tier, highest_tier,
-                        '수동신청'))
+                    print(f"[INFO] 신규 신청 생성 중...")
                     
-                    print(f"✅ 새 사용자 등록: {username}")
+                    # 새 신청 생성
+                    await db.execute('''
+                        INSERT INTO user_applications 
+                        (guild_id, user_id, username, birth_year, entry_method, battle_tag, 
+                        main_position, previous_season_tier, current_season_tier, highest_tier,
+                        status, applied_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    ''', (
+                        guild_id, user_id, username, birth_year, entry_method, battle_tag,
+                        main_position, previous_season_tier, current_season_tier, highest_tier
+                    ))
+                    
+                    print(f"✅ 신규 신청 생성 완료: {username}")
                 
                 await db.commit()
+                print(f"[SUCCESS] 데이터베이스 커밋 완료")
                 return True
                 
-            except Exception as e:
-                print(f"❌ 신청 생성/업데이트 오류: {e}")
-                import traceback
-                print(f"❌ 스택트레이스:\n{traceback.format_exc()}")
-                return False
+        except aiosqlite.IntegrityError as e:
+            print(f"❌ [DB INTEGRITY ERROR] 데이터 무결성 오류: {e}")
+            import traceback
+            print(f"   스택트레이스:\n{traceback.format_exc()}")
+            return False
+            
+        except aiosqlite.OperationalError as e:
+            print(f"❌ [DB OPERATIONAL ERROR] SQL 실행 오류: {e}")
+            import traceback
+            print(f"   스택트레이스:\n{traceback.format_exc()}")
+            return False
+            
+        except Exception as e:
+            print(f"❌ [FATAL ERROR] 신청 생성/업데이트 예상치 못한 오류: {e}")
+            print(f"   오류 타입: {type(e).__name__}")
+            import traceback
+            print(f"   스택트레이스:\n{traceback.format_exc()}")
+            return False
 
     async def get_user_application(self, guild_id: str, user_id: str) -> Optional[dict]:
         """특정 유저의 신청 정보 조회"""
