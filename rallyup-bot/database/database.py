@@ -1791,8 +1791,8 @@ class DatabaseManager:
                 return row[0] if row else None
             
     async def create_user_application(self, guild_id: str, user_id: str, username: str, 
-                                    entry_method: str, battle_tag: str, birth_year: str, main_position: str,
-                                    previous_season_tier: str, current_season_tier: str, highest_tier: str) -> bool:
+                                        entry_method: str, battle_tag: str, birth_year: str, main_position: str,
+                                        previous_season_tier: str, current_season_tier: str, highest_tier: str) -> bool:
         """사용자 신청 생성 - 재신청 허용 (UPSERT 방식)"""
         async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
             await db.execute('PRAGMA journal_mode=WAL')
@@ -1827,15 +1827,15 @@ class DatabaseManager:
                     
                     print(f"✅ 기존 사용자 정보 업데이트: {username}")
                 else:
-                    # 새 사용자 등록 (자동 등록 실패한 경우의 폴백)
                     await db.execute('''
                         INSERT INTO registered_users 
-                        (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 
-                        previous_season_tier, current_season_tier, highest_tier, approved_by, 
-                        is_active, registered_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '수동신청', TRUE, CURRENT_TIMESTAMP)
-                    ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position,
-                        previous_season_tier, current_season_tier, highest_tier))
+                        (guild_id, user_id, username, entry_method, battle_tag, birth_year, 
+                        main_position, previous_season_tier, current_season_tier, highest_tier, 
+                        approved_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, 
+                        main_position, previous_season_tier, current_season_tier, highest_tier,
+                        '수동신청'))
                     
                     print(f"✅ 새 사용자 등록: {username}")
                 
@@ -1843,7 +1843,9 @@ class DatabaseManager:
                 return True
                 
             except Exception as e:
-                print(f"신청 생성/업데이트 오류: {e}")
+                print(f"❌ 신청 생성/업데이트 오류: {e}")
+                import traceback
+                print(f"❌ 스택트레이스:\n{traceback.format_exc()}")
                 return False
 
     async def get_user_application(self, guild_id: str, user_id: str) -> Optional[dict]:
