@@ -179,6 +179,22 @@ class OnePageApplicationView(discord.ui.View):
             user_id = str(interaction.user.id)
             username = interaction.user.display_name
 
+            print(f"\n{'='*50}")
+            print(f"[SUBMIT] 신청 제출 시작")
+            print(f"  - User: {username} (ID: {user_id})")
+            print(f"  - Guild: {guild_id}")
+            print(f"{'='*50}\n")
+
+            # ✅ 입력값 검증 추가
+            print(f"[CHECK] 입력값 검증 중...")
+            print(f"  - entry_method: {self.entry_method}")
+            print(f"  - battle_tag: {self.battle_tag}")
+            print(f"  - birth_year: {self.birth_year}")
+            print(f"  - main_position: {self.main_position}")
+            print(f"  - previous_tier: {self.previous_tier}")
+            print(f"  - current_tier: {self.current_tier}")
+            print(f"  - highest_tier: {self.highest_tier}")
+
             # ✅ 입력값 검증 추가
             if not all([self.entry_method, self.battle_tag, self.birth_year, self.main_position,
                         self.previous_tier, self.current_tier, self.highest_tier]):
@@ -188,6 +204,8 @@ class OnePageApplicationView(discord.ui.View):
                 )
                 return
             
+            print(f"[CHECK] ✅ 모든 입력값 존재")
+
             # birth_year 검증
             if not self.birth_year.isdigit() or len(self.birth_year) != 2:
                 await interaction.followup.send(
@@ -196,6 +214,8 @@ class OnePageApplicationView(discord.ui.View):
                 )
                 return
             
+            print(f"[CHECK] ✅ birth_year 검증 통과")
+
             # 이미 등록된 유저 체크
             if await self.bot.db_manager.is_user_registered(guild_id, user_id):
                 await interaction.followup.send(
@@ -274,6 +294,14 @@ class OnePageApplicationView(discord.ui.View):
                 )
                 
         except Exception as e:
+            print(f"\n{'='*50}")
+            print(f"[FATAL ERROR] submit_application 예외 발생!")
+            print(f"  - Error: {str(e)}")
+            print(f"  - Type: {type(e).__name__}")
+            import traceback
+            print(f"  - Traceback:\n{traceback.format_exc()}")
+            print(f"{'='*50}\n")
+
             await interaction.followup.send(f"❌ 오류: {str(e)}", ephemeral=True)
     
     async def _send_admin_notification(self, guild: discord.Guild, 
