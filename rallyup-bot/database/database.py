@@ -36,6 +36,8 @@ class DatabaseManager:
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
             await self.initialize_voice_level_tables()
+            await self.create_inquiry_tables()
+            await self.create_consultation_tables()
 
             # users 테이블
             await db.execute('''
@@ -399,6 +401,141 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_daily_threads_guild_date ON tts_daily_threads(guild_id, date)')
 
             await db.commit()
+
+    async def create_consultation_tables(self):
+        """1:1 상담 관련 테이블 생성"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 1:1 상담 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS consultations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_number TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    admin_id TEXT NOT NULL,
+                    admin_name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    is_urgent BOOLEAN DEFAULT FALSE,
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'completed')),
+                    request_message_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    accepted_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    completed_by TEXT
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_consultations_guild_user 
+                ON consultations(guild_id, user_id)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_consultations_status 
+                ON consultations(status, created_at)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_consultations_admin 
+                ON consultations(guild_id, admin_id, status)
+            ''')
+            
+            await db.commit()
+            print("✅ 1:1 상담 테이블이 생성되었습니다.")
+
+    async def create_inquiry_tables(self):
+        """문의 시스템 관련 테이블 생성"""
+        async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 문의/티켓 메인 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inquiries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_number TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    inquiry_type TEXT NOT NULL CHECK (inquiry_type IN ('team', 'private')),
+                    category TEXT NOT NULL,
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    is_anonymous BOOLEAN DEFAULT FALSE,
+                    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'closed')),
+                    assigned_to TEXT,
+                    channel_message_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TIMESTAMP,
+                    resolved_by TEXT
+                )
+            ''')
+            
+            # 문의 로그 테이블 (누가 언제 무엇을 했는지 기록)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inquiry_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    inquiry_id INTEGER NOT NULL,
+                    admin_id TEXT NOT NULL,
+                    admin_name TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                )
+            ''')
+            
+            # 익명 작성자 확인 로그 (프라이버시 보호)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inquiry_reveal_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    inquiry_id INTEGER NOT NULL,
+                    admin_id TEXT NOT NULL,
+                    admin_name TEXT NOT NULL,
+                    revealed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                )
+            ''')
+            
+            # 서버별 문의 시스템 설정
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inquiry_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    team_inquiry_channel_id TEXT,
+                    allowed_categories TEXT,
+                    daily_limit INTEGER DEFAULT 3,
+                    enable_anonymous BOOLEAN DEFAULT TRUE,
+                    enable_private_inquiry BOOLEAN DEFAULT TRUE,
+                    notification_role_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 인덱스 생성 (성능 최적화)
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_inquiries_guild_user 
+                ON inquiries(guild_id, user_id)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_inquiries_status 
+                ON inquiries(status, created_at)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_inquiries_ticket 
+                ON inquiries(guild_id, ticket_number)
+            ''')
+            
+            await db.commit()
+            print("✅ 문의 시스템 테이블이 생성되었습니다.")
 
     async def initialize_voice_level_tables(self):
         """음성 레벨 시스템 테이블 초기화"""
@@ -1683,8 +1820,7 @@ class DatabaseManager:
                         UPDATE registered_users 
                         SET username = ?, entry_method = ?, battle_tag = ?, birth_year = ?,
                             main_position = ?, previous_season_tier = ?, current_season_tier = ?,
-                            highest_tier = ?, profile_completed = TRUE, 
-                            updated_at = CURRENT_TIMESTAMP
+                            highest_tier = ?
                         WHERE guild_id = ? AND user_id = ?
                     ''', (username, entry_method, battle_tag, birth_year, main_position,
                         previous_season_tier, current_season_tier, highest_tier, guild_id, user_id))
@@ -1696,8 +1832,8 @@ class DatabaseManager:
                         INSERT INTO registered_users 
                         (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position, 
                         previous_season_tier, current_season_tier, highest_tier, approved_by, 
-                        auto_registered, profile_completed, is_active, registered_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '수동신청', FALSE, TRUE, TRUE, CURRENT_TIMESTAMP)
+                        is_active, registered_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '수동신청', TRUE, CURRENT_TIMESTAMP)
                     ''', (guild_id, user_id, username, entry_method, battle_tag, birth_year, main_position,
                         previous_season_tier, current_season_tier, highest_tier))
                     
@@ -8985,3 +9121,809 @@ class DatabaseManager:
             except Exception as e:
                 print(f"선택적 프로필 업데이트 오류: {e}")
                 return False
+
+    async def set_inquiry_channel(self, guild_id: str, channel_id: str) -> bool:
+        """관리팀 문의 채널 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기존 설정이 있는지 확인
+                async with db.execute('''
+                    SELECT guild_id FROM inquiry_settings WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    exists = await cursor.fetchone()
+                
+                if exists:
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE inquiry_settings 
+                        SET team_inquiry_channel_id = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                    ''', (channel_id, guild_id))
+                else:
+                    # 새로 생성
+                    await db.execute('''
+                        INSERT INTO inquiry_settings (guild_id, team_inquiry_channel_id)
+                        VALUES (?, ?)
+                    ''', (guild_id, channel_id))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 문의 채널 설정 실패: {e}")
+            return False
+
+    async def get_inquiry_channel(self, guild_id: str) -> Optional[str]:
+        """관리팀 문의 채널 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT team_inquiry_channel_id FROM inquiry_settings 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result and result[0]:
+                        return result[0]
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 문의 채널 조회 실패: {e}")
+            return None
+
+
+    async def get_inquiry_settings(self, guild_id: str) -> dict:
+        """서버의 문의 시스템 설정 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM inquiry_settings WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    else:
+                        # 기본값 반환
+                        return {
+                            'guild_id': guild_id,
+                            'team_inquiry_channel_id': None,
+                            'allowed_categories': '일반,건의,버그,계정,기타',
+                            'daily_limit': 3,
+                            'enable_anonymous': True,
+                            'enable_private_inquiry': True,
+                            'notification_role_id': None
+                        }
+                        
+        except Exception as e:
+            print(f"❌ 문의 설정 조회 실패: {e}")
+            return {}
+
+
+    async def get_next_ticket_number(self, guild_id: str) -> str:
+        """다음 티켓 번호 생성"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 해당 서버의 가장 최근 티켓 번호 조회
+                async with db.execute('''
+                    SELECT ticket_number FROM inquiries 
+                    WHERE guild_id = ? 
+                    ORDER BY id DESC LIMIT 1
+                ''', (guild_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result and result[0]:
+                        # 기존 번호에서 증가
+                        last_number = int(result[0].replace('#', ''))
+                        new_number = last_number + 1
+                    else:
+                        # 첫 티켓
+                        new_number = 1
+                    
+                    return f"#{new_number:04d}"  # #0001 형식
+                    
+        except Exception as e:
+            print(f"❌ 티켓 번호 생성 실패: {e}")
+            return "#0001"
+
+
+    async def get_inquiry_stats(self, guild_id: str) -> dict:
+        """서버의 문의 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                stats = {}
+                
+                # 전체 문의 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['total'] = row[0] if row else 0
+                
+                # 대기 중
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'pending'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['pending'] = row[0] if row else 0
+                
+                # 처리 중
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'processing'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['processing'] = row[0] if row else 0
+                
+                # 완료
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'completed'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['completed'] = row[0] if row else 0
+                
+                # 관리팀 문의
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND inquiry_type = 'team'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['team_inquiries'] = row[0] if row else 0
+                
+                # 1:1 상담
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND inquiry_type = 'private'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['private_inquiries'] = row[0] if row else 0
+                
+                return stats
+                
+        except Exception as e:
+            print(f"❌ 문의 통계 조회 실패: {e}")
+            return {}
+
+    async def save_inquiry(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        user_id: str,
+        username: str,
+        inquiry_type: str,
+        category: str,
+        title: str,
+        content: str,
+        is_anonymous: bool,
+        channel_message_id: str,
+        assigned_to: str = None
+    ) -> bool:
+        """문의/티켓 저장"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO inquiries (
+                        ticket_number, guild_id, user_id, username,
+                        inquiry_type, category, title, content,
+                        is_anonymous, status, assigned_to, channel_message_id,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ''', (
+                    ticket_number, guild_id, user_id, username,
+                    inquiry_type, category, title, content,
+                    is_anonymous, assigned_to, channel_message_id
+                ))
+                
+                await db.commit()
+                print(f"✅ 문의 저장 완료: {ticket_number}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 문의 저장 실패: {e}")
+            return False
+
+
+    async def update_inquiry_status(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        new_status: str,
+        admin_id: str = None
+    ) -> bool:
+        """문의 상태 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                if new_status == 'completed':
+                    # 완료 시간 기록
+                    await db.execute('''
+                        UPDATE inquiries
+                        SET status = ?, resolved_at = CURRENT_TIMESTAMP,
+                            resolved_by = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, admin_id, guild_id, ticket_number))
+                elif new_status == 'processing':
+                    # 담당자 배정
+                    await db.execute('''
+                        UPDATE inquiries
+                        SET status = ?, assigned_to = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, admin_id, guild_id, ticket_number))
+                else:
+                    # 일반 상태 업데이트
+                    await db.execute('''
+                        UPDATE inquiries
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, guild_id, ticket_number))
+                
+                await db.commit()
+                print(f"✅ 문의 상태 업데이트: {ticket_number} → {new_status}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 문의 상태 업데이트 실패: {e}")
+            return False
+
+
+    async def add_inquiry_log(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        admin_id: str,
+        admin_name: str,
+        action: str,
+        details: str = None
+    ) -> bool:
+        """문의 로그 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 문의 ID 조회
+                async with db.execute('''
+                    SELECT id FROM inquiries
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        print(f"❌ 문의를 찾을 수 없음: {ticket_number}")
+                        return False
+                    
+                    inquiry_id = row[0]
+                
+                # 로그 추가
+                await db.execute('''
+                    INSERT INTO inquiry_logs (
+                        inquiry_id, admin_id, admin_name, action, details, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (inquiry_id, admin_id, admin_name, action, details))
+                
+                await db.commit()
+                print(f"✅ 문의 로그 추가: {ticket_number} - {action}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 문의 로그 추가 실패: {e}")
+            return False
+
+
+    async def add_reveal_log(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        admin_id: str,
+        admin_name: str
+    ) -> bool:
+        """익명 작성자 확인 로그 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 문의 ID 조회
+                async with db.execute('''
+                    SELECT id FROM inquiries
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return False
+                    
+                    inquiry_id = row[0]
+                
+                # 확인 로그 추가
+                await db.execute('''
+                    INSERT INTO inquiry_reveal_logs (
+                        inquiry_id, admin_id, admin_name, revealed_at
+                    )
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (inquiry_id, admin_id, admin_name))
+                
+                await db.commit()
+                print(f"✅ 익명 작성자 확인 로그: {ticket_number} by {admin_name}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 익명 확인 로그 추가 실패: {e}")
+            return False
+
+
+    async def get_user_daily_inquiry_count(self, guild_id: str, user_id: str) -> int:
+        """사용자의 오늘 문의 횟수 조회"""
+        try:
+            from datetime import datetime, timedelta
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 오늘 00:00:00 UTC
+                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries
+                    WHERE guild_id = ? AND user_id = ?
+                    AND created_at >= ?
+                    AND inquiry_type = 'team'
+                ''', (guild_id, user_id, today_start.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else 0
+                    
+        except Exception as e:
+            print(f"❌ 일일 문의 횟수 조회 실패: {e}")
+            return 0
+
+
+    async def get_inquiry_by_ticket(self, guild_id: str, ticket_number: str) -> Optional[dict]:
+        """티켓 번호로 문의 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM inquiries
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 문의 조회 실패: {e}")
+            return None
+
+
+    async def get_user_inquiries(
+        self,
+        guild_id: str,
+        user_id: str,
+        limit: int = 10,
+        status: str = None
+    ) -> List[dict]:
+        """사용자의 문의 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                if status:
+                    query = '''
+                        SELECT * FROM inquiries
+                        WHERE guild_id = ? AND user_id = ? AND status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, user_id, status, limit)
+                else:
+                    query = '''
+                        SELECT * FROM inquiries
+                        WHERE guild_id = ? AND user_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, user_id, limit)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"❌ 사용자 문의 목록 조회 실패: {e}")
+            return []
+
+
+    async def get_inquiry_logs(self, guild_id: str, ticket_number: str) -> List[dict]:
+        """문의 로그 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 문의 ID 조회
+                async with db.execute('''
+                    SELECT id FROM inquiries
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return []
+                    
+                    inquiry_id = row[0]
+                
+                # 로그 조회
+                async with db.execute('''
+                    SELECT * FROM inquiry_logs
+                    WHERE inquiry_id = ?
+                    ORDER BY created_at DESC
+                ''', (inquiry_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"❌ 문의 로그 조회 실패: {e}")
+            return []
+
+
+    async def get_reveal_logs(self, guild_id: str, ticket_number: str) -> List[dict]:
+        """익명 작성자 확인 로그 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                # 문의 ID 조회
+                async with db.execute('''
+                    SELECT id FROM inquiries
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return []
+                    
+                    inquiry_id = row[0]
+                
+                # 확인 로그 조회
+                async with db.execute('''
+                    SELECT * FROM inquiry_reveal_logs
+                    WHERE inquiry_id = ?
+                    ORDER BY revealed_at DESC
+                ''', (inquiry_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"❌ 확인 로그 조회 실패: {e}")
+            return []
+
+    async def save_consultation(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        user_id: str,
+        username: str,
+        admin_id: str,
+        admin_name: str,
+        category: str,
+        content: str,
+        is_urgent: bool,
+        request_message_id: str
+    ) -> bool:
+        """상담 요청 저장"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                await db.execute('''
+                    INSERT INTO consultations (
+                        ticket_number, guild_id, user_id, username,
+                        admin_id, admin_name, category, content,
+                        is_urgent, status, request_message_id,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ''', (
+                    ticket_number, guild_id, user_id, username,
+                    admin_id, admin_name, category, content,
+                    is_urgent, request_message_id
+                ))
+                
+                await db.commit()
+                print(f"✅ 상담 요청 저장: {ticket_number}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 상담 요청 저장 실패: {e}")
+            return False
+
+
+    async def update_consultation_status(
+        self,
+        guild_id: str,
+        ticket_number: str,
+        new_status: str,
+        admin_id: str = None
+    ) -> bool:
+        """상담 상태 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                if new_status == 'accepted':
+                    await db.execute('''
+                        UPDATE consultations
+                        SET status = ?, accepted_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, guild_id, ticket_number))
+                elif new_status == 'completed':
+                    await db.execute('''
+                        UPDATE consultations
+                        SET status = ?, completed_at = CURRENT_TIMESTAMP,
+                            completed_by = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, admin_id, guild_id, ticket_number))
+                else:
+                    await db.execute('''
+                        UPDATE consultations
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND ticket_number = ?
+                    ''', (new_status, guild_id, ticket_number))
+                
+                await db.commit()
+                print(f"✅ 상담 상태 업데이트: {ticket_number} → {new_status}")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 상담 상태 업데이트 실패: {e}")
+            return False
+
+
+    async def get_consultation_by_ticket(self, guild_id: str, ticket_number: str) -> Optional[dict]:
+        """티켓 번호로 상담 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM consultations
+                    WHERE guild_id = ? AND ticket_number = ?
+                ''', (guild_id, ticket_number)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 상담 조회 실패: {e}")
+            return None
+
+
+    async def get_user_active_consultation(self, guild_id: str, user_id: str) -> Optional[dict]:
+        """사용자의 진행 중인 상담 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM consultations
+                    WHERE guild_id = ? AND user_id = ?
+                    AND status IN ('pending', 'accepted')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        columns = [desc[0] for desc in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 진행 중인 상담 조회 실패: {e}")
+            return None
+
+
+    async def get_available_admins(self, guild_id: str) -> List[dict]:
+        """상담 가능한 관리자 목록 조회
+        
+        현재는 서버의 관리자 권한을 가진 멤버들을 반환합니다.
+        추후 별도 설정으로 확장 가능
+        """
+        try:
+            from discord import Guild
+            
+            # bot 인스턴스에서 guild 가져오기
+            # 이 메서드는 bot.db_manager를 통해 호출되므로 bot 참조 필요
+            # 실제로는 Cog에서 guild를 전달받아 사용하는 것이 좋음
+            
+            # 간단한 구현: 빈 리스트 반환 (Cog에서 직접 처리)
+            return []
+            
+        except Exception as e:
+            print(f"❌ 관리자 목록 조회 실패: {e}")
+            return []
+
+
+    async def get_consultation_stats(self, guild_id: str) -> dict:
+        """서버의 상담 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                stats = {}
+                
+                # 전체 상담 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['total'] = row[0] if row else 0
+                
+                # 대기 중
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations 
+                    WHERE guild_id = ? AND status = 'pending'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['pending'] = row[0] if row else 0
+                
+                # 수락됨
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations 
+                    WHERE guild_id = ? AND status = 'accepted'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['accepted'] = row[0] if row else 0
+                
+                # 거절됨
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations 
+                    WHERE guild_id = ? AND status = 'rejected'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['rejected'] = row[0] if row else 0
+                
+                # 완료됨
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations 
+                    WHERE guild_id = ? AND status = 'completed'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['completed'] = row[0] if row else 0
+                
+                return stats
+                
+        except Exception as e:
+            print(f"❌ 상담 통계 조회 실패: {e}")
+            return {}
+
+
+    async def get_user_consultations(
+        self,
+        guild_id: str,
+        user_id: str,
+        limit: int = 10,
+        status: str = None
+    ) -> List[dict]:
+        """사용자의 상담 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                if status:
+                    query = '''
+                        SELECT * FROM consultations
+                        WHERE guild_id = ? AND user_id = ? AND status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, user_id, status, limit)
+                else:
+                    query = '''
+                        SELECT * FROM consultations
+                        WHERE guild_id = ? AND user_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, user_id, limit)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"❌ 사용자 상담 목록 조회 실패: {e}")
+            return []
+
+
+    async def get_admin_consultations(
+        self,
+        guild_id: str,
+        admin_id: str,
+        limit: int = 10,
+        status: str = None
+    ) -> List[dict]:
+        """관리자의 상담 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                if status:
+                    query = '''
+                        SELECT * FROM consultations
+                        WHERE guild_id = ? AND admin_id = ? AND status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, admin_id, status, limit)
+                else:
+                    query = '''
+                        SELECT * FROM consultations
+                        WHERE guild_id = ? AND admin_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    '''
+                    params = (guild_id, admin_id, limit)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                    
+        except Exception as e:
+            print(f"❌ 관리자 상담 목록 조회 실패: {e}")
+            return []
+
+
+    # 추가: inquiry_stats 업데이트 (1:1 상담 포함)
+    async def get_inquiry_stats(self, guild_id: str) -> dict:
+        """서버의 문의 통계 조회 (관리팀 문의 + 1:1 상담)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                stats = {}
+                
+                # 관리팀 문의 통계
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['total'] = row[0] if row else 0
+                
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'pending'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['pending'] = row[0] if row else 0
+                
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'processing'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['processing'] = row[0] if row else 0
+                
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND status = 'completed'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['completed'] = row[0] if row else 0
+                
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries 
+                    WHERE guild_id = ? AND inquiry_type = 'team'
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['team_inquiries'] = row[0] if row else 0
+                
+                # 1:1 상담 통계 추가
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations 
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats['private_inquiries'] = row[0] if row else 0
+                
+                return stats
+                
+        except Exception as e:
+            print(f"❌ 문의 통계 조회 실패: {e}")
+            return {}
