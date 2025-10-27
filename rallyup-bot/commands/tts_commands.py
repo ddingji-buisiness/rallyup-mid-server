@@ -717,11 +717,11 @@ class TTSCommands(commands.Cog):
         
         # 입력 검증
         if not 내용 or len(내용.strip()) == 0:
-            await interaction.response.send_message("⌛ 텍스트를 입력해주세요!", ephemeral=True)
+            await interaction.response.send_message("❌ 텍스트를 입력해주세요!", ephemeral=True)
             return
             
         if len(내용) > 1000:
-            await interaction.response.send_message("⌛ 텍스트는 1000자 이하로 입력해주세요!", ephemeral=True)
+            await interaction.response.send_message("❌ 텍스트는 1000자 이하로 입력해주세요!", ephemeral=True)
             return
         
         if not interaction.user.voice:
@@ -752,7 +752,17 @@ class TTSCommands(commands.Cog):
             )
             return
         
-        selected_voice = 목소리 if 목소리 else self.tts_settings.get(guild_id, {}).get('voice', '인준')
+        # 목소리 결정 (우선순위: 명령어 > 개인설정 > 서버기본)
+        selected_voice = 목소리
+        if not selected_voice:
+            # 개인 설정 조회
+            user_id = str(interaction.user.id)
+            preference = await self.bot.db_manager.get_user_tts_preference(guild_id, user_id)
+            if preference:
+                selected_voice = preference['voice']
+            else:
+                selected_voice = self.tts_settings.get(guild_id, {}).get('voice', '인준')
+        
         voice_info = self.all_voices.get(selected_voice)
         if not voice_info:
             await interaction.response.send_message("⛔ 올바르지 않은 목소리입니다!", ephemeral=True)
@@ -761,11 +771,13 @@ class TTSCommands(commands.Cog):
         # 큐에 추가
         tts_request = {
             'user': interaction.user,
+            'user_id': str(interaction.user.id),
             'text': 내용,
             'voice': selected_voice,
             'timestamp': time.time(),
             'channel_name': user_channel.name,
-            'channel_id': channel_id  # 쓰레드 기록용
+            'channel_id': channel_id,
+            'auto_tts': False  # 명령어 사용
         }
 
         await self.tts_queues[channel_id].put(tts_request)
@@ -779,25 +791,52 @@ class TTSCommands(commands.Cog):
             else "🇺🇸" if 'US' in lang 
             else "🇬🇧" if 'GB' in lang 
             else "🇦🇺" if 'AU' in lang
-            else "🌍"
+            else "🌐"
         )
         
+        # 1. 명령어 사용자에게는 간단한 확인 메시지 (ephemeral)
         if queue_size == 1:
             await interaction.response.send_message(
-                f"🎵 **{user_channel.name}**에서 재생 중...\n"
-                f"└ {language_emoji} {voice_info['name']}",
+                f"🎵 재생 중...",
                 ephemeral=True,
-                delete_after=3
+                delete_after=2
             )
         else:
             await interaction.response.send_message(
-                f"📋 **{user_channel.name}** 대기열에 추가되었습니다!\n"
-                f"**대기 순서**: {queue_size}번째\n"
-                f"└ {language_emoji} {voice_info['name']}",
+                f"📋 대기열 {queue_size}번째에 추가되었습니다!",
                 ephemeral=True
             )
+
+        if await self._can_send_in_channel(text_channel):
+            # 메시지 전송
+            pass
+        else:
+            logger.warning(f"⚠️ 채널 권한 부족: {text_channel.name}")
+
+        text_channel = interaction.channel
+
+        if isinstance(text_channel, discord.TextChannel):
+            try:
+                bot_permissions = text_channel.permissions_for(interaction.guild.me)
         
-        logger.info(f"📝 TTS 큐 추가: {interaction.user.display_name} > '{내용[:30]}...' (대기: {queue_size})")
+                if bot_permissions.send_messages:
+                    # 일반 채팅처럼 표시
+                    display_message = (
+                        f"🎤 **{interaction.user.display_name}**: {내용}\n"
+                        f"└ {language_emoji} {voice_info['name']}"
+                    )
+                    
+                    await text_channel.send(display_message)
+                    logger.info(f"📝 채널에 TTS 메시지 표시: {text_channel.name}")
+                else:
+                    logger.warning(f"⚠️ 채널에 메시지 전송 권한 없음: {text_channel.name}")
+
+            except discord.Forbidden:
+                logger.error(f"⚠️ 채널에 메시지 전송 권한 없음: {interaction.channel.name}")
+            except Exception as e:
+                logger.error(f"⚠️ 채널 메시지 표시 오류: {e}")
+        
+        logger.info(f"🎤 TTS 큐 추가: {interaction.user.display_name} > '{내용[:30]}...' (대기: {queue_size})")
 
     @app_commands.command(name="볼륨설정", description="TTS 음성의 속도와 피치를 조절합니다")
     @app_commands.describe(
@@ -961,88 +1000,88 @@ class TTSCommands(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="대기열", description="현재 음성 채널의 TTS 대기열을 확인합니다")
-    async def tts_queue(self, interaction: discord.Interaction):
-        """현재 채널의 TTS 대기열 확인"""
+    # @app_commands.command(name="대기열", description="현재 음성 채널의 TTS 대기열을 확인합니다")
+    # async def tts_queue(self, interaction: discord.Interaction):
+    #     """현재 채널의 TTS 대기열 확인"""
         
-        # 사용자가 음성 채널에 있는지 확인
-        if not interaction.user.voice:
-            embed = discord.Embed(
-                title="⏸️ 음성 채널 필요",
-                description="음성 채널에 입장한 후 명령어를 사용해주세요!",
-                color=0xff0000
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+    #     # 사용자가 음성 채널에 있는지 확인
+    #     if not interaction.user.voice:
+    #         embed = discord.Embed(
+    #             title="⏸️ 음성 채널 필요",
+    #             description="음성 채널에 입장한 후 명령어를 사용해주세요!",
+    #             color=0xff0000
+    #         )
+    #         await interaction.response.send_message(embed=embed, ephemeral=True)
+    #         return
         
-        user_channel = interaction.user.voice.channel
-        channel_id = str(user_channel.id)
+    #     user_channel = interaction.user.voice.channel
+    #     channel_id = str(user_channel.id)
         
-        if channel_id not in self.tts_queues:
-            embed = discord.Embed(
-                title="ℹ️ 큐 없음",
-                description=f"**{user_channel.name}**에서 먼저 `/입장` 명령어를 사용해주세요!",
-                color=0x0099ff
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+    #     if channel_id not in self.tts_queues:
+    #         embed = discord.Embed(
+    #             title="ℹ️ 큐 없음",
+    #             description=f"**{user_channel.name}**에서 먼저 `/입장` 명령어를 사용해주세요!",
+    #             color=0x0099ff
+    #         )
+    #         await interaction.response.send_message(embed=embed, ephemeral=True)
+    #         return
         
-        queue = self.tts_queues[channel_id]
-        queue_size = queue.qsize()
+    #     queue = self.tts_queues[channel_id]
+    #     queue_size = queue.qsize()
         
-        embed = discord.Embed(
-            title=f"📋 TTS 대기열 - {user_channel.name}",
-            color=0x0099ff
-        )
+    #     embed = discord.Embed(
+    #         title=f"📋 TTS 대기열 - {user_channel.name}",
+    #         color=0x0099ff
+    #     )
         
-        if queue_size == 0:
-            embed.description = "현재 대기 중인 TTS가 없습니다."
-        else:
-            embed.description = f"**{queue_size}개**의 TTS가 대기 중입니다."
+    #     if queue_size == 0:
+    #         embed.description = "현재 대기 중인 TTS가 없습니다."
+    #     else:
+    #         embed.description = f"**{queue_size}개**의 TTS가 대기 중입니다."
             
-            # 큐 내용 미리보기 (처음 5개만)
-            queue_items = []
-            temp_queue = list(queue._queue)[:5]
+    #         # 큐 내용 미리보기 (처음 5개만)
+    #         queue_items = []
+    #         temp_queue = list(queue._queue)[:5]
             
-            for idx, item in enumerate(temp_queue, 1):
-                user_name = item['user'].display_name
-                text_preview = item['text'][:30] + ('...' if len(item['text']) > 30 else '')
-                voice_name = self.korean_voices[item['voice']]['name']
-                queue_items.append(
-                    f"**{idx}.** {user_name}: {text_preview}\n"
-                    f"└ 목소리: {voice_name}"
-                )
+    #         for idx, item in enumerate(temp_queue, 1):
+    #             user_name = item['user'].display_name
+    #             text_preview = item['text'][:30] + ('...' if len(item['text']) > 30 else '')
+    #             voice_name = self.korean_voices[item['voice']]['name']
+    #             queue_items.append(
+    #                 f"**{idx}.** {user_name}: {text_preview}\n"
+    #                 f"└ 목소리: {voice_name}"
+    #             )
             
-            if queue_items:
-                embed.add_field(
-                    name="🎵 대기 중인 항목",
-                    value="\n\n".join(queue_items),
-                    inline=False
-                )
+    #         if queue_items:
+    #             embed.add_field(
+    #                 name="🎵 대기 중인 항목",
+    #                 value="\n\n".join(queue_items),
+    #                 inline=False
+    #             )
             
-            if queue_size > 5:
-                embed.set_footer(text=f"...외 {queue_size - 5}개 더")
+    #         if queue_size > 5:
+    #             embed.set_footer(text=f"...외 {queue_size - 5}개 더")
         
-        # 현재 재생 상태
-        if channel_id in self.voice_clients:
-            voice_client = self.voice_clients[channel_id]
-            if voice_client.is_playing():
-                embed.add_field(
-                    name="🔊 재생 상태",
-                    value="현재 TTS를 재생 중입니다.",
-                    inline=False
-                )
+    #     # 현재 재생 상태
+    #     if channel_id in self.voice_clients:
+    #         voice_client = self.voice_clients[channel_id]
+    #         if voice_client.is_playing():
+    #             embed.add_field(
+    #                 name="🔊 재생 상태",
+    #                 value="현재 TTS를 재생 중입니다.",
+    #                 inline=False
+    #             )
         
-        # 쓰레드 링크 추가
-        if channel_id in self.tts_threads:
-            thread = self.tts_threads[channel_id]
-            embed.add_field(
-                name="📝 대화 기록",
-                value=f"[쓰레드에서 전체 기록 보기]({thread.jump_url})",
-                inline=False
-            )
+    #     # 쓰레드 링크 추가
+    #     if channel_id in self.tts_threads:
+    #         thread = self.tts_threads[channel_id]
+    #         embed.add_field(
+    #             name="📝 대화 기록",
+    #             value=f"[쓰레드에서 전체 기록 보기]({thread.jump_url})",
+    #             inline=False
+    #         )
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    #     await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="퇴장", description="TTS 봇을 현재 음성 채널에서 퇴장시킵니다")
     async def tts_leave(self, interaction: discord.Interaction):
@@ -1112,6 +1151,469 @@ class TTSCommands(commands.Cog):
             await interaction.response.send_message(embed=embed)
             logger.error(f"⏸️ TTS 퇴장 오류: {e}", exc_info=True)
 
+    @tts_setup.command(name="전용채널", description="자동 TTS가 적용될 전용 채널을 설정합니다")
+    @app_commands.describe(채널="TTS 전용 채널 (없음 선택 시 해제)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def set_dedicated_channel(
+        self, 
+        interaction: discord.Interaction, 
+        채널: Optional[discord.TextChannel] = None
+    ):
+        """TTS 전용 채널 설정"""
+        guild_id = str(interaction.guild.id)
+        
+        if 채널 is None:
+            # 전용 채널 해제
+            success = await self.bot.db_manager.set_tts_dedicated_channel(guild_id, None)
+            
+            if success:
+                embed = discord.Embed(
+                    title="✅ TTS 전용 채널 해제",
+                    description="자동 TTS 기능이 비활성화되었습니다.",
+                    color=0x00ff00
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ 설정 실패",
+                    description="전용 채널 해제 중 오류가 발생했습니다.",
+                    color=0xff0000
+                )
+            
+            await interaction.response.send_message(embed=embed)
+            return
+        
+        # 권한 확인
+        bot_permissions = 채널.permissions_for(interaction.guild.me)
+        if not all([bot_permissions.read_messages, bot_permissions.send_messages]):
+            embed = discord.Embed(
+                title="⛔ 권한 부족",
+                description=f"{채널.mention}에 메시지 읽기/보내기 권한이 필요합니다.",
+                color=0xff0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # 설정 저장
+        channel_id = str(채널.id)
+        success = await self.bot.db_manager.set_tts_dedicated_channel(guild_id, channel_id)
+        
+        if success:
+            embed = discord.Embed(
+                title="✅ TTS 전용 채널 설정 완료",
+                description=f"{채널.mention}에서 자동 TTS가 활성화됩니다.",
+                color=0x00ff00
+            )
+            embed.add_field(
+                name="📌 사용 방법",
+                value="• 봇이 음성 채널에 `/입장` 상태일 때\n"
+                    "• 해당 채널에 일반 메시지 입력\n"
+                    "• 명령어 없이 자동으로 TTS 재생됩니다",
+                inline=False
+            )
+            embed.add_field(
+                name="⚙️ 필터링",
+                value="• 2글자 미만 메시지 무시\n"
+                    "• 이모지만 있는 메시지 무시\n"
+                    "• 봇 메시지 무시",
+                inline=False
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ 설정 실패",
+                description="전용 채널 설정 중 오류가 발생했습니다.",
+                color=0xff0000
+            )
+        
+        await interaction.response.send_message(embed=embed)
+        logger.info(f"✅ TTS 전용 채널 설정: {interaction.guild.name} -> #{채널.name}")
+
+
+    @app_commands.command(name="내목소리", description="나의 기본 TTS 목소리를 설정합니다")
+    @app_commands.describe(
+        목소리="사용할 기본 목소리"
+    )
+    async def set_my_voice(
+        self, 
+        interaction: discord.Interaction,
+        목소리: Literal[
+            '인준', '선희', '현수', '국민', '봉진', '지민', '서현', '순복', '유진',
+            'Guy', 'Jenny', 'Aria', 'William',
+            'Alvaro', 'Elvira', 'Jorge', 'Dalia',
+            'Yunxi', 'Xiaoxiao', 'Yunyang', 'Xiaoyi', 
+            'YunJhe', 'HsiaoChen', 'WanLung', 'HiuMaan'
+        ]
+    ):
+        """개인 기본 목소리 설정"""
+        guild_id = str(interaction.guild.id)
+        user_id = str(interaction.user.id)
+        
+        # 목소리 정보 확인
+        voice_info = self.all_voices.get(목소리)
+        if not voice_info:
+            await interaction.response.send_message(
+                "❌ 올바르지 않은 목소리입니다!",
+                ephemeral=True
+            )
+            return
+        
+        # DB에 저장
+        success = await self.bot.db_manager.set_user_tts_preference(
+            guild_id, user_id, 목소리
+        )
+        
+        if success:
+            lang = voice_info.get('language', 'ko-KR')
+            language_emoji = (
+                "🇰🇷" if 'ko' in lang.lower()
+                else "🇪🇸" if 'es' in lang.lower()
+                else "🇨🇳" if 'zh' in lang.lower()
+                else "🇺🇸" if 'US' in lang 
+                else "🇬🇧" if 'GB' in lang 
+                else "🇦🇺" if 'AU' in lang
+                else "🌐"
+            )
+            
+            embed = discord.Embed(
+                title="✅ 기본 목소리 설정 완료",
+                description=f"앞으로 **{interaction.guild.name}**에서는\n"
+                        f"자동으로 이 목소리가 사용됩니다!",
+                color=0x00ff00
+            )
+            embed.add_field(
+                name="🎭 선택한 목소리",
+                value=f"{language_emoji} **{voice_info['name']}**\n"
+                    f"성별: {voice_info['gender']}\n"
+                    f"스타일: {voice_info['style']}",
+                inline=False
+            )
+            embed.add_field(
+                name="💡 적용 범위",
+                value="• TTS 전용 채널에서 자동 TTS\n"
+                    "• `/말하기` 명령어 사용 시 (목소리 미지정 시)",
+                inline=False
+            )
+            embed.set_footer(text="테스트: /말하기 안녕하세요")
+            
+            await interaction.response.send_message(embed=embed)
+            logger.info(f"🎤 개인 목소리 설정: {interaction.user.display_name} -> {목소리}")
+        else:
+            await interaction.response.send_message(
+                "❌ 설정 저장 중 오류가 발생했습니다.",
+                ephemeral=True
+            )
+
+
+    @app_commands.command(name="내목소리확인", description="현재 설정된 나의 기본 목소리를 확인합니다")
+    async def check_my_voice(self, interaction: discord.Interaction):
+        """개인 목소리 설정 확인"""
+        guild_id = str(interaction.guild.id)
+        user_id = str(interaction.user.id)
+        
+        # DB에서 조회
+        preference = await self.bot.db_manager.get_user_tts_preference(guild_id, user_id)
+        
+        embed = discord.Embed(
+            title="🎤 나의 TTS 설정",
+            color=0x0099ff
+        )
+        
+        if preference:
+            voice_name = preference['voice']
+            voice_info = self.all_voices.get(voice_name, {})
+            
+            lang = voice_info.get('language', 'ko-KR')
+            language_emoji = (
+                "🇰🇷" if 'ko' in lang.lower()
+                else "🇪🇸" if 'es' in lang.lower()
+                else "🇨🇳" if 'zh' in lang.lower()
+                else "🇺🇸" if 'US' in lang 
+                else "🇬🇧" if 'GB' in lang 
+                else "🇦🇺" if 'AU' in lang
+                else "🌐"
+            )
+            
+            embed.add_field(
+                name="🎭 현재 목소리",
+                value=f"{language_emoji} **{voice_info.get('name', voice_name)}**\n"
+                    f"성별: {voice_info.get('gender', '?')}\n"
+                    f"스타일: {voice_info.get('style', '?')}",
+                inline=False
+            )
+            embed.add_field(
+                name="⚙️ 세부 설정",
+                value=f"속도: {preference['rate']}\n"
+                    f"피치: {preference['pitch']}\n"
+                    f"볼륨: {preference['volume']}",
+                inline=False
+            )
+        else:
+            embed.description = "아직 설정된 목소리가 없습니다.\n`/내목소리` 명령어로 설정해보세요!"
+            embed.add_field(
+                name="🎯 기본 목소리",
+                value="서버 기본 설정(인준)이 사용됩니다.",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="💡 변경 방법",
+            value="`/내목소리 [목소리명]`",
+            inline=False
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="tts상태확인", description="현재 TTS 자동 재생 상태를 확인합니다")
+    async def check_tts_status(self, interaction: discord.Interaction):
+        """[디버그] 현재 TTS 상태 종합 확인"""
+        
+        user = interaction.user
+        guild = interaction.guild
+        guild_id = str(guild.id)
+        
+        embed = discord.Embed(
+            title="🔍 TTS 자동 재생 상태 진단",
+            description="현재 TTS 자동 재생이 가능한 상태인지 확인합니다.",
+            color=0x0099ff,
+            timestamp=datetime.now()
+        )
+        
+        # 1. 음성 채널 입장 상태 확인
+        voice_status = "❌"
+        voice_detail = "음성 채널에 입장하지 않음"
+        user_channel_id = None
+        
+        if user.voice and user.voice.channel:
+            voice_status = "✅"
+            voice_detail = f"{user.voice.channel.name}에 입장 중"
+            user_channel_id = str(user.voice.channel.id)
+        
+        embed.add_field(
+            name=f"{voice_status} 1단계: 음성 채널 입장",
+            value=voice_detail,
+            inline=False
+        )
+        
+        # 2. TTS 전용 채널 설정 확인
+        settings = await self.bot.db_manager.get_tts_channel_settings(guild_id)
+        
+        tts_channel_status = "❌"
+        tts_channel_detail = "TTS 전용 채널이 설정되지 않음"
+        tts_channel_id = None
+        tts_channel = None
+        
+        if settings and settings.get('channel_id'):
+            tts_channel_id = settings['channel_id']
+            tts_channel = guild.get_channel(int(tts_channel_id))
+            if tts_channel:
+                tts_channel_status = "✅"
+                tts_channel_detail = f"#{tts_channel.name} (ID: {tts_channel_id})"
+        
+        embed.add_field(
+            name=f"{tts_channel_status} 2단계: TTS 전용 채널 설정",
+            value=tts_channel_detail,
+            inline=False
+        )
+        
+        # 3. 현재 채널이 TTS 전용 채널인지 확인
+        current_channel_status = "❌"
+        current_channel_detail = "TTS 전용 채널이 아님"
+        current_channel_id = str(interaction.channel.id)
+        
+        if tts_channel_id == current_channel_id:
+            current_channel_status = "✅"
+            current_channel_detail = f"현재 채널이 TTS 전용 채널입니다"
+        else:
+            current_channel_detail = f"현재: #{interaction.channel.name}\nTTS 채널로 이동하세요: {f'#{tts_channel.name}' if tts_channel else '없음'}"
+        
+        embed.add_field(
+            name=f"{current_channel_status} 3단계: TTS 전용 채널 위치",
+            value=current_channel_detail,
+            inline=False
+        )
+        
+        # 4. 봇 연결 상태 확인
+        bot_status = "❌"
+        bot_detail = "봇이 음성 채널에 연결되지 않음"
+        
+        if user_channel_id:
+            if user_channel_id in self.voice_clients:
+                voice_client = self.voice_clients[user_channel_id]
+                if voice_client.is_connected():
+                    bot_status = "✅"
+                    bot_detail = f"봇이 같은 채널({user.voice.channel.name})에 연결됨"
+                else:
+                    bot_detail = "봇 연결이 끊어짐 (재입장 필요)"
+            else:
+                # 다른 채널에 봇이 있는지 확인
+                if self.voice_clients:
+                    other_channels = []
+                    for ch_id, vc in self.voice_clients.items():
+                        if vc.is_connected():
+                            other_channels.append(vc.channel.name)
+                    if other_channels:
+                        bot_detail = f"봇이 다른 채널에 연결됨: {', '.join(other_channels)}\n→ 사용자가 있는 채널에서 `/입장` 실행 필요"
+                else:
+                    bot_detail = "봇이 어떤 음성 채널에도 연결되지 않음\n→ `/입장` 명령어로 봇을 입장시키세요"
+        
+        embed.add_field(
+            name=f"{bot_status} 4단계: 봇 연결 상태",
+            value=bot_detail,
+            inline=False
+        )
+        
+        # 5. TTS 큐 상태
+        queue_status = "❌"
+        queue_detail = "큐 없음"
+        
+        if user_channel_id and user_channel_id in self.tts_queues:
+            queue = self.tts_queues[user_channel_id]
+            queue_size = queue.qsize()
+            queue_status = "✅"
+            queue_detail = f"대기 중인 TTS: {queue_size}개"
+            
+            if user_channel_id in self.voice_clients:
+                voice_client = self.voice_clients[user_channel_id]
+                if voice_client.is_playing():
+                    queue_detail += "\n🔊 현재 재생 중"
+        
+        embed.add_field(
+            name=f"{queue_status} 5단계: TTS 큐 상태",
+            value=queue_detail,
+            inline=False
+        )
+        
+        # 종합 진단
+        all_ok = (
+            voice_status == "✅" and
+            tts_channel_status == "✅" and
+            current_channel_status == "✅" and
+            bot_status == "✅"
+        )
+        
+        if all_ok:
+            embed.add_field(
+                name="🎉 종합 진단 결과",
+                value="✅ **모든 조건이 충족되었습니다!**\n"
+                      "이제 메시지를 입력하면 자동으로 TTS가 재생됩니다.\n\n"
+                      "테스트: `안녕하세요` 라고 입력해보세요!",
+                inline=False
+            )
+            embed.color = 0x00ff00
+        else:
+            problems = []
+            if voice_status == "❌":
+                problems.append("❌ 음성 채널에 입장하세요")
+            if tts_channel_status == "❌":
+                problems.append("❌ `/tts설정전용채널` 명령어로 TTS 채널을 설정하세요")
+            if current_channel_status == "❌":
+                problems.append(f"❌ TTS 전용 채널({tts_channel.mention if tts_channel else '없음'})로 이동하세요")
+            if bot_status == "❌":
+                problems.append("❌ 음성 채널에서 `/입장` 명령어를 실행하세요")
+            
+            embed.add_field(
+                name="⚠️ 종합 진단 결과",
+                value="**자동 TTS가 작동하지 않습니다.**\n\n" + "\n".join(problems),
+                inline=False
+            )
+            embed.color = 0xff0000
+        
+        # 추가 정보
+        embed.set_footer(text=f"요청자: {user.display_name}")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="tts로그확인", description="[관리자] TTS 자동 재생 로그를 확인합니다")
+    @app_commands.default_permissions(administrator=True)
+    async def check_tts_logs(self, interaction: discord.Interaction):
+        """[관리자] TTS 로그 확인"""
+        
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.",
+                ephemeral=True
+            )
+            return
+        
+        guild_id = str(interaction.guild.id)
+        
+        embed = discord.Embed(
+            title="📋 TTS 시스템 로그",
+            color=0x0099ff,
+            timestamp=datetime.now()
+        )
+        
+        # 1. 연결된 채널 목록
+        if self.voice_clients:
+            channels = []
+            for ch_id, vc in self.voice_clients.items():
+                if vc.is_connected() and str(vc.guild.id) == guild_id:
+                    queue_size = self.tts_queues[ch_id].qsize() if ch_id in self.tts_queues else 0
+                    is_playing = "🔊 재생 중" if vc.is_playing() else "⏸️ 대기"
+                    channels.append(f"• {vc.channel.name} - {is_playing} (큐: {queue_size})")
+            
+            if channels:
+                embed.add_field(
+                    name="🎤 현재 연결된 음성 채널",
+                    value="\n".join(channels),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🎤 현재 연결된 음성 채널",
+                    value="없음",
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="🎤 현재 연결된 음성 채널",
+                value="없음",
+                inline=False
+            )
+        
+        # 2. TTS 전용 채널 설정
+        settings = await self.bot.db_manager.get_tts_channel_settings(guild_id)
+        if settings and settings.get('channel_id'):
+            channel = interaction.guild.get_channel(int(settings['channel_id']))
+            if channel:
+                filters = []
+                if settings.get('filter_bot', True):
+                    filters.append("✅ 봇 메시지 필터링")
+                if settings.get('filter_short', True):
+                    min_len = settings.get('min_length', 2)
+                    filters.append(f"✅ {min_len}글자 미만 필터링")
+                if settings.get('filter_emoji', True):
+                    filters.append("✅ 이모지 전용 메시지 필터링")
+                
+                embed.add_field(
+                    name="📝 TTS 전용 채널 설정",
+                    value=f"채널: {channel.mention}\n" + "\n".join(filters),
+                    inline=False
+                )
+        else:
+            embed.add_field(
+                name="📝 TTS 전용 채널 설정",
+                value="❌ 설정되지 않음",
+                inline=False
+            )
+        
+        # 3. 세션 정보
+        if self.session_message_counts:
+            session_info = []
+            for ch_id, count in self.session_message_counts.items():
+                if ch_id in self.voice_clients:
+                    vc = self.voice_clients[ch_id]
+                    if str(vc.guild.id) == guild_id:
+                        session_info.append(f"• {vc.channel.name}: {count}개 메시지")
+            
+            if session_info:
+                embed.add_field(
+                    name="📊 현재 세션 통계",
+                    value="\n".join(session_info),
+                    inline=False
+                )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     def _get_guild_connected_channels(self, guild_id: str) -> list:
         """특정 서버에서 봇이 연결된 채널 목록 반환"""
         connected = []
@@ -1141,15 +1643,17 @@ class TTSCommands(commands.Cog):
                 
                 try:
                     user = tts_request['user']
+                    user_id = tts_request.get('user_id')
                     text = tts_request['text']
                     voice = tts_request['voice']
                     channel_name = tts_request.get('channel_name', 'Unknown')
                     request_time = tts_request.get('timestamp', time.time())
+                    auto_tts = tts_request.get('auto_tts', False)
                     
                     voice_info = self.all_voices[voice]
                     logger.info(
                         f"🎵 TTS 처리 시작: {user.display_name} > "
-                        f"'{text[:30]}...' @ {channel_name}"
+                        f"'{text[:30]}...' @ {channel_name} {'(자동)' if auto_tts else ''}"
                     )
                     
                     if channel_id not in self.voice_clients:
@@ -1163,11 +1667,11 @@ class TTSCommands(commands.Cog):
                     
                     guild_id = str(voice_client.guild.id)
                     
-                    # TTS 파일 생성
-                    audio_file = await self._create_edge_tts_file(text, guild_id, voice)
+                    # TTS 파일 생성 (user_id 전달)
+                    audio_file = await self._create_edge_tts_file(text, guild_id, voice, user_id)
                     
                     if not audio_file:
-                        logger.error(f"⛔ TTS 파일 생성 실패: {text[:30]}")
+                        logger.error(f"❌ TTS 파일 생성 실패: {text[:30]}")
                         
                         # 실패도 로그에 기록
                         await self._log_to_thread(
@@ -1178,7 +1682,8 @@ class TTSCommands(commands.Cog):
                             text=text,
                             voice=voice,
                             request_time=request_time,
-                            success=False
+                            success=False,
+                            auto_tts=auto_tts
                         )
                         continue
                     
@@ -1194,19 +1699,20 @@ class TTSCommands(commands.Cog):
                         text=text,
                         voice=voice,
                         request_time=request_time,
-                        success=success
+                        success=success,
+                        auto_tts=auto_tts
                     )
                     
                     if success:
                         logger.info(f"✅ TTS 재생 완료: {user.display_name} @ {channel_name}")
                     else:
-                        logger.error(f"⛔ TTS 재생 실패: {user.display_name} @ {channel_name}")
+                        logger.error(f"❌ TTS 재생 실패: {user.display_name} @ {channel_name}")
                     
                     self.tts_queues[channel_id].task_done()
                     await asyncio.sleep(0.5)
                     
                 except Exception as e:
-                    logger.error(f"⛔ TTS 처리 중 오류: {e}", exc_info=True)
+                    logger.error(f"❌ TTS 처리 중 오류: {e}", exc_info=True)
                     self.tts_queues[channel_id].task_done()
                     continue
                     
@@ -1214,7 +1720,7 @@ class TTSCommands(commands.Cog):
             logger.info(f"🛑 큐 프로세서 중지: {channel_info}")
             raise
         except Exception as e:
-            logger.error(f"⛔ 큐 프로세서 오류: {e}", exc_info=True)
+            logger.error(f"❌ 큐 프로세서 오류: {e}", exc_info=True)
 
     async def _get_or_create_daily_log_thread(self, guild_id: str) -> Optional[discord.Thread]:
         try:
@@ -1543,14 +2049,15 @@ class TTSCommands(commands.Cog):
         text: str, 
         voice: str,
         request_time: float,
-        success: bool = True
+        success: bool = True,
+        auto_tts: bool = False  # 추가
     ):
         try:
             # 일별 쓰레드 가져오기
             thread = await self._get_or_create_daily_log_thread(guild_id)
             
             if not thread:
-                return  # 로그 채널 미설정 시 조용히 스킵
+                return
             
             voice_info = self.all_voices.get(voice, {})
             lang = voice_info.get('language', 'ko-KR')
@@ -1561,21 +2068,25 @@ class TTSCommands(commands.Cog):
                 else "🇺🇸" if 'US' in lang 
                 else "🇬🇧" if 'GB' in lang 
                 else "🇦🇺" if 'AU' in lang
-                else "🌍"
+                else "🌐"
             )
+            
+            # 자동 TTS 표시
+            prefix = "🤖" if auto_tts else "💬"
+            channel_prefix = f"**[{voice_channel_name}]**"
             
             if success:
                 # 성공 시 일반 메시지
                 log_message = (
-                    f"**[{voice_channel_name}]** {user.display_name}: {text}\n"
+                    f"{prefix} {channel_prefix} {user.display_name}: {text}\n"
                     f"└ {language_emoji} {voice_info.get('name', voice)} | "
                     f"<t:{int(request_time)}:T>"
                 )
             else:
                 # 실패 시 오류 표시
                 log_message = (
-                    f"~~**[{voice_channel_name}]** {user.display_name}: {text}~~\n"
-                    f"└ ⛔ 재생 실패 | {language_emoji} {voice_info.get('name', voice)} | "
+                    f"~~{prefix} {channel_prefix} {user.display_name}: {text}~~\n"
+                    f"└ ❌ 재생 실패 | {language_emoji} {voice_info.get('name', voice)} | "
                     f"<t:{int(request_time)}:T>"
                 )
             
@@ -1596,23 +2107,59 @@ class TTSCommands(commands.Cog):
         except Exception as e:
             logger.error(f"⚠️ 쓰레드 기록 오류: {e}", exc_info=True)
 
-    async def _create_edge_tts_file(self, text: str, guild_id: str, voice_override: str = None) -> Optional[str]:
-        """Edge TTS 파일 생성 (한국어 + 영어 지원)"""
+    async def _create_edge_tts_file(self, text: str, guild_id: str, voice_override: str = None, user_id: str = None) -> Optional[str]:
+        """Edge TTS 파일 생성 (개인 설정 우선 적용)"""
         try:
-            settings = self.tts_settings.get(guild_id, {
-                'voice': '인준',
-                'rate': '+0%',
-                'pitch': '+0Hz',
-                'volume': '+0%'
-            })
+            # 설정 우선순위:
+            # 1순위: voice_override (명령어에서 직접 지정)
+            # 2순위: 개인 설정 (user_id가 있을 때)
+            # 3순위: 서버 기본 설정
             
-            # 목소리 오버라이드가 있으면 사용, 없으면 서버 설정 사용
-            selected_voice = voice_override if voice_override else settings['voice']
+            selected_voice = None
+            rate = '+0%'
+            pitch = '+0Hz'
+            volume = '+0%'
+            
+            if voice_override:
+                # 명령어로 직접 지정한 경우
+                selected_voice = voice_override
+                # 서버 기본 속도/피치 사용
+                settings = self.tts_settings.get(guild_id, {
+                    'rate': '+0%',
+                    'pitch': '+0Hz',
+                    'volume': '+0%'
+                })
+                rate = settings.get('rate', '+0%')
+                pitch = settings.get('pitch', '+0Hz')
+                volume = '+50%'  # 고정값
+                
+            elif user_id:
+                # 개인 설정 조회
+                preference = await self.bot.db_manager.get_user_tts_preference(guild_id, user_id)
+                if preference:
+                    selected_voice = preference['voice']
+                    rate = preference.get('rate', '+0%')
+                    pitch = preference.get('pitch', '+0Hz')
+                    volume = '+50%'  # 고정값
+                    logger.info(f"👤 개인 설정 적용: {user_id} -> {selected_voice}")
+            
+            # 개인 설정이 없으면 서버 기본값
+            if not selected_voice:
+                settings = self.tts_settings.get(guild_id, {
+                    'voice': '인준',
+                    'rate': '+0%',
+                    'pitch': '+0Hz',
+                    'volume': '+0%'
+                })
+                selected_voice = settings['voice']
+                rate = settings['rate']
+                pitch = settings['pitch']
+                volume = '+50%'
             
             # 통합 딕셔너리에서 가져오기
             voice_config = self.all_voices.get(selected_voice)
             if not voice_config:
-                logger.error(f"⛔ 잘못된 목소리: {selected_voice}")
+                logger.error(f"❌ 잘못된 목소리: {selected_voice}")
                 return None
             
             # 임시 파일 생성
@@ -1629,9 +2176,9 @@ class TTSCommands(commands.Cog):
             communicate = edge_tts.Communicate(
                 text=text,
                 voice=voice_config['voice'],
-                rate=settings['rate'],
-                pitch=settings['pitch'],
-                volume='+50%'
+                rate=rate,
+                pitch=pitch,
+                volume=volume
             )
             
             await communicate.save(audio_file)
@@ -1640,11 +2187,11 @@ class TTSCommands(commands.Cog):
                 logger.info(f"✅ TTS 생성 완료 ({selected_voice}, {voice_config['language']})")
                 return audio_file
             else:
-                logger.error(f"⛔ TTS 파일 생성 실패")
+                logger.error(f"❌ TTS 파일 생성 실패")
                 return None
                 
         except Exception as e:
-            logger.error(f"⛔ TTS 파일 생성 실패: {e}", exc_info=True)
+            logger.error(f"❌ TTS 파일 생성 실패: {e}", exc_info=True)
             return None
 
     async def _play_audio_and_wait(self, voice_client: discord.VoiceClient, audio_file: str, text: str) -> bool:
@@ -1724,6 +2271,14 @@ class TTSCommands(commands.Cog):
             logger.error(f"⏸️ 오디오 재생 실패: {e}", exc_info=True)
             return False
 
+    async def _can_send_in_channel(self, channel: discord.TextChannel) -> bool:
+        """채널에 메시지를 보낼 수 있는지 확인"""
+        if not isinstance(channel, discord.TextChannel):
+            return False
+        
+        bot_permissions = channel.permissions_for(channel.guild.me)
+        return bot_permissions.send_messages and bot_permissions.embed_links
+
     async def _play_audio_fixed(self, voice_client: discord.VoiceClient, audio_file: str, text: str) -> bool:
         """Linux 서버용 오디오 재생"""
         try:
@@ -1801,6 +2356,59 @@ class TTSCommands(commands.Cog):
             logger.error(f"⌛ 오디오 재생 실패: {e}", exc_info=True)
             return False
 
+    def _is_emoji_only(self, text: str) -> bool:
+        """텍스트가 이모지만 포함하는지 확인"""
+        import re
+        # 한글, 영문, 숫자, 기본 특수문자 제거
+        clean_text = re.sub(r'[a-zA-Z0-9가-힣ㄱ-ㅎㅏ-ㅣ\s\.,!?]', '', text)
+        # 남은 게 있으면 이모지로 간주
+        return len(clean_text.strip()) > 0 and len(text.strip().replace(clean_text, '').strip()) == 0
+
+    def _should_process_auto_tts(
+        self, 
+        message: discord.Message, 
+        settings: Dict[str, Any]
+    ) -> tuple[bool, Optional[str]]:
+        """
+        자동 TTS 처리 여부 판단
+        
+        Returns:
+            (처리여부, 실패사유)
+        """
+        # 봇 메시지 필터링
+        if message.author.bot and settings.get('filter_bot', True):
+            return False, "봇 메시지"
+        
+        # 명령어는 처리하지 않음
+        if message.content.startswith('/') or message.content.startswith('!'):
+            return False, "명령어"
+        
+        text = message.content.strip()
+        
+        # 짧은 메시지 필터링
+        if settings.get('filter_short', True):
+            min_length = settings.get('min_length', 2)
+            if len(text) < min_length:
+                return False, f"{min_length}글자 미만"
+        
+        # 이모지만 있는 메시지 필터링
+        if settings.get('filter_emoji', True):
+            if self._is_emoji_only(text):
+                return False, "이모지만 포함"
+        
+        # URL만 있는 메시지 필터링
+        if text.startswith('http://') or text.startswith('https://'):
+            return False, "URL만 포함"
+        
+        return True, None
+
+    async def _get_user_voice_channel(self, guild: discord.Guild, user_id: str) -> Optional[discord.VoiceChannel]:
+        """사용자가 현재 있는 음성 채널 반환"""
+        member = guild.get_member(int(user_id))
+        if member and member.voice:
+            return member.voice.channel
+        return None
+
     async def _cleanup_audio_file(self, audio_file: str):
         """오디오 파일 비동기 정리"""
         try:
@@ -1857,6 +2465,142 @@ class TTSCommands(commands.Cog):
             
         except Exception as e:
             logger.error(f"⚠️ 채널 정리 중 오류: {e}", exc_info=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """
+        TTS 전용 채널에서 자동 TTS 처리
+        """
+        # 기본 필터링
+        if not message.guild:
+            return
+        
+        if message.author.bot:
+            return  # 봇 메시지는 일단 여기서 걸러짐
+        
+        guild_id = str(message.guild.id)
+        channel_id = str(message.channel.id)
+        
+        # 🔍 디버그 1: 메시지 수신 확인
+        logger.info(f"📩 [TTS-AUTO] 메시지 수신: '{message.content[:50]}' from {message.author.name} in #{message.channel.name}")
+        
+        # TTS 전용 채널 설정 조회
+        settings = await self.bot.db_manager.get_tts_channel_settings(guild_id)
+        
+        # 🔍 디버그 2: 설정 확인
+        logger.info(f"⚙️ [TTS-AUTO] TTS 채널 설정: {settings}")
+        
+        if not settings or not settings.get('channel_id'):
+            logger.info(f"❌ [TTS-AUTO] TTS 전용 채널 미설정 - 서버: {message.guild.name}")
+            return  # 전용 채널 미설정
+        
+        # 🔍 디버그 3: 채널 ID 비교
+        logger.info(f"🔍 [TTS-AUTO] 현재 채널: {channel_id}, 설정된 채널: {settings['channel_id']}, 일치: {settings['channel_id'] == channel_id}")
+        
+        # 전용 채널이 아니면 무시
+        if settings['channel_id'] != channel_id:
+            logger.debug(f"[TTS-AUTO] 다른 채널의 메시지 (무시) - #{message.channel.name}")
+            return
+        
+        logger.info(f"✅ [TTS-AUTO] TTS 전용 채널 확인됨: #{message.channel.name}")
+        
+        # 메시지 필터링 체크
+        should_process, reason = self._should_process_auto_tts(message, settings)
+        
+        # 🔍 디버그 4: 필터링 결과
+        logger.info(f"🔍 [TTS-AUTO] 필터링 결과: {should_process}, 사유: {reason}")
+        
+        if not should_process:
+            logger.info(f"🚫 [TTS-AUTO] 자동 TTS 스킵: {reason} - '{message.content[:20]}'")
+            return
+        
+        logger.info(f"✅ [TTS-AUTO] 필터링 통과: '{message.content[:30]}'")
+        
+        # 사용자가 음성 채널에 있는지 확인
+        user_voice_channel = await self._get_user_voice_channel(message.guild, str(message.author.id))
+        
+        # 🔍 디버그 5: 사용자 음성 채널 확인
+        if user_voice_channel:
+            logger.info(f"✅ [TTS-AUTO] 사용자 음성 채널: {user_voice_channel.name} (ID: {user_voice_channel.id})")
+        else:
+            logger.warning(f"❌ [TTS-AUTO] 사용자가 음성 채널에 없음: {message.author.name}")
+            logger.warning(f"   ⚠️ 해결방법: 사용자가 먼저 음성 채널에 입장해야 합니다!")
+        
+        if not user_voice_channel:
+            # 조용히 무시 (사용자가 음성 채널에 없음)
+            return
+        
+        user_channel_id = str(user_voice_channel.id)
+        
+        # 🔍 디버그 6: 봇 연결 상태 확인
+        logger.info(f"🔍 [TTS-AUTO] 현재 봇이 연결된 채널들: {list(self.voice_clients.keys())}")
+        logger.info(f"🔍 [TTS-AUTO] 사용자가 있는 채널 ID: {user_channel_id}")
+        logger.info(f"🔍 [TTS-AUTO] 봇이 사용자 채널에 연결됨: {user_channel_id in self.voice_clients}")
+        
+        # 해당 음성 채널에 봇이 연결되어 있는지 확인
+        if user_channel_id not in self.voice_clients:
+            logger.warning(f"❌ [TTS-AUTO] 봇이 사용자 채널에 연결되지 않음")
+            logger.warning(f"   ⚠️ 사용자 채널: {user_voice_channel.name} (ID: {user_channel_id})")
+            logger.warning(f"   ⚠️ 봇이 연결된 채널: {[self.voice_clients[cid].channel.name for cid in self.voice_clients.keys()] if self.voice_clients else '없음'}")
+            logger.warning(f"   ⚠️ 해결방법: 사용자가 있는 채널에서 `/입장` 명령어를 사용하세요!")
+            
+            # 봇이 연결되지 않음 - 안내 메시지
+            embed = discord.Embed(
+                title="🎤 TTS 봇이 연결되지 않음",
+                description=f"**{user_voice_channel.name}**에 먼저 `/입장` 해주세요!",
+                color=0xff9900
+            )
+            await message.channel.send(embed=embed, delete_after=5)
+            return
+        
+        logger.info(f"✅ [TTS-AUTO] 봇이 사용자 채널에 연결되어 있음!")
+        
+        voice_client = self.voice_clients[user_channel_id]
+        
+        if not voice_client.is_connected():
+            logger.warning(f"❌ [TTS-AUTO] 봇 연결이 끊어짐")
+            return
+        
+        logger.info(f"✅ [TTS-AUTO] 봇 음성 연결 정상")
+        
+        # TTS 큐에 추가
+        text = message.content.strip()
+        user_id = str(message.author.id)
+        
+        # 개인 설정 조회 (목소리 결정용)
+        preference = await self.bot.db_manager.get_user_tts_preference(guild_id, user_id)
+        selected_voice = preference['voice'] if preference else self.tts_settings.get(guild_id, {}).get('voice', '인준')
+        
+        logger.info(f"🎤 [TTS-AUTO] 선택된 목소리: {selected_voice}")
+        
+        tts_request = {
+            'user': message.author,
+            'user_id': user_id,
+            'text': text,
+            'voice': selected_voice,
+            'timestamp': time.time(),
+            'channel_name': user_voice_channel.name,
+            'channel_id': user_channel_id,
+            'auto_tts': True  # 자동 TTS 플래그
+        }
+        
+        await self.tts_queues[user_channel_id].put(tts_request)
+        queue_size = self.tts_queues[user_channel_id].qsize()
+        
+        logger.info(f"✅ [TTS-AUTO] TTS 큐에 추가 완료: 대기열 {queue_size}번째")
+        
+        # 반응 추가 (처리 중 표시)
+        try:
+            await message.add_reaction('🎵')
+            logger.info(f"✅ [TTS-AUTO] 메시지에 반응 추가 완료")
+        except discord.Forbidden:
+            logger.warning(f"⚠️ [TTS-AUTO] 반응 추가 권한 없음")
+            pass
+        
+        logger.info(
+            f"🎵 [TTS-AUTO] 자동 TTS 큐 추가 완료: {message.author.display_name} > "
+            f"'{text[:30]}...' (대기: {queue_size})"
+        )
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):

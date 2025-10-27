@@ -42,7 +42,6 @@ class DatabaseManager:
             await self.initialize_voice_level_tables()
             await self.create_inquiry_tables()
             await self.create_consultation_tables()
-            await self.add_ticket_unique_constraints()
 
             # users 테이블
             await db.execute('''
@@ -380,6 +379,36 @@ class DatabaseManager:
                     PRIMARY KEY (guild_id, date)
                 )
             ''')
+
+            # 개인별 TTS 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_tts_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    default_voice TEXT DEFAULT '인준',
+                    default_rate TEXT DEFAULT '+0%',
+                    default_pitch TEXT DEFAULT '+0Hz',
+                    default_volume TEXT DEFAULT '+0%',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(guild_id, user_id)
+                );
+            ''')
+            
+            # TTS 전용 채널 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS tts_channel_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    dedicated_channel_id TEXT,
+                    auto_filter_short_reactions BOOLEAN DEFAULT TRUE,
+                    min_message_length INTEGER DEFAULT 2,
+                    filter_emoji_only BOOLEAN DEFAULT TRUE, 
+                    filter_bot_messages BOOLEAN DEFAULT TRUE, 
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_participants_match_id ON participants(match_id)')
@@ -404,6 +433,8 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_monitor_guild ON voice_monitor_settings(guild_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_log_guild ON tts_log_settings(guild_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_daily_threads_guild_date ON tts_daily_threads(guild_id, date)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_user_tts_prefs ON user_tts_preferences(guild_id, user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_channel_guild ON tts_channel_settings(guild_id)')
 
             await db.commit()
 
@@ -10245,31 +10276,119 @@ class DatabaseManager:
             logger.error(f"❌ 상담 정리 실패: {e}")
             return 0
 
-    async def add_ticket_unique_constraints(self):
-        """티켓 번호에 UNIQUE 제약 조건 추가
-        
-        동시에 여러 요청이 들어와도 중복된 티켓 번호가 생성되지 않도록 보장
-        """
+    async def set_tts_dedicated_channel(
+        self, 
+        guild_id: str, 
+        channel_id: Optional[str]
+    ) -> bool:
+        """TTS 전용 채널 설정"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                await db.execute('PRAGMA journal_mode=WAL')
-                
-                # inquiries 테이블: (guild_id, ticket_number) 조합 UNIQUE
-                await db.execute('''
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_inquiry_guild_ticket
-                    ON inquiries(guild_id, ticket_number)
-                ''')
-                
-                # consultations 테이블: (guild_id, ticket_number) 조합 UNIQUE
-                await db.execute('''
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_consultation_guild_ticket
-                    ON consultations(guild_id, ticket_number)
-                ''')
-                
+                await db.execute(
+                    '''
+                    INSERT INTO tts_channel_settings (guild_id, dedicated_channel_id, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        dedicated_channel_id = excluded.dedicated_channel_id,
+                        updated_at = CURRENT_TIMESTAMP
+                    ''',
+                    (guild_id, channel_id)
+                )
                 await db.commit()
-                logger.info("✅ 티켓 번호 UNIQUE 제약 조건 추가 완료")
                 return True
-                
         except Exception as e:
-            logger.error(f"❌ UNIQUE 제약 추가 실패: {e}", exc_info=True)
+            logger.error(f"❌ TTS 전용 채널 설정 실패: {e}")
             return False
+
+    async def get_tts_dedicated_channel(self, guild_id: str) -> str:
+        """TTS 전용 채널 ID 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT dedicated_channel_id FROM tts_channel_settings
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row and row[0] else None
+                    
+        except Exception as e:
+            print(f"❌ TTS 전용 채널 조회 실패: {e}")
+            return None
+
+    async def get_tts_channel_settings(self, guild_id: str) -> Optional[Dict[str, Any]]:
+        """TTS 전용 채널 설정 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                '''
+                SELECT dedicated_channel_id, auto_filter_short_reactions, 
+                    min_message_length, filter_emoji_only, filter_bot_messages
+                FROM tts_channel_settings
+                WHERE guild_id = ?
+                ''',
+                (guild_id,)
+            )
+            result = await cursor.fetchone()
+            
+            if result:
+                return {
+                    'channel_id': result[0],
+                    'filter_short': bool(result[1]),
+                    'min_length': result[2],
+                    'filter_emoji': bool(result[3]),
+                    'filter_bot': bool(result[4])
+                }
+            return None
+
+    async def set_user_tts_preference(
+        self, 
+        guild_id: str, 
+        user_id: str, 
+        voice: str,
+        rate: str = '+0%',
+        pitch: str = '+0Hz',
+        volume: str = '+0%'
+    ) -> bool:
+        """사용자의 TTS 설정 저장"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    '''
+                    INSERT INTO user_tts_preferences 
+                    (guild_id, user_id, default_voice, default_rate, default_pitch, default_volume, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        default_voice = excluded.default_voice,
+                        default_rate = excluded.default_rate,
+                        default_pitch = excluded.default_pitch,
+                        default_volume = excluded.default_volume,
+                        updated_at = CURRENT_TIMESTAMP
+                    ''',
+                    (guild_id, user_id, voice, rate, pitch, volume)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"❌ TTS 설정 저장 실패: {e}")
+            return False
+
+    async def get_user_tts_preference(self, guild_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """사용자의 TTS 설정 조회"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                '''
+                SELECT default_voice, default_rate, default_pitch, default_volume
+                FROM user_tts_preferences
+                WHERE guild_id = ? AND user_id = ?
+                ''',
+                (guild_id, user_id)
+            )
+            result = await cursor.fetchone()
+            
+            if result:
+                return {
+                    'voice': result[0],
+                    'rate': result[1],
+                    'pitch': result[2],
+                    'volume': result[3]
+                }
+            return None
