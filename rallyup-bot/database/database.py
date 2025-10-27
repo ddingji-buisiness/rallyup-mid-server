@@ -9558,23 +9558,27 @@ class DatabaseManager:
 
 
     async def get_user_daily_inquiry_count(self, guild_id: str, user_id: str) -> int:
-        """사용자의 오늘 문의 횟수 조회"""
+        """사용자의 오늘 문의 횟수 조회 (한국 시간 기준)"""
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone
             
             async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
-                # 오늘 00:00:00 UTC
-                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                # ✅ 한국 시간(KST = UTC+9) 기준 오늘 00:00:00
+                kst = timezone(timedelta(hours=9))
+                now_kst = datetime.now(kst)
+                today_start_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                # UTC로 변환 (DB는 UTC로 저장됨)
+                today_start_utc = today_start_kst.astimezone(timezone.utc)
                 
                 async with db.execute('''
                     SELECT COUNT(*) FROM inquiries
                     WHERE guild_id = ? AND user_id = ?
                     AND created_at >= ?
                     AND inquiry_type = 'team'
-                ''', (guild_id, user_id, today_start.isoformat())) as cursor:
+                ''', (guild_id, user_id, today_start_utc.isoformat())) as cursor:
                     row = await cursor.fetchone()
                     return row[0] if row else 0
-                    
         except Exception as e:
             print(f"❌ 일일 문의 횟수 조회 실패: {e}")
             return 0
