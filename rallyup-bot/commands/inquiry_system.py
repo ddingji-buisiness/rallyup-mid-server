@@ -3846,7 +3846,7 @@ class InquirySystem(commands.Cog):
                 pass
     
     @app_commands.command(name="문의채널설정", description="[관리자] 관리팀 문의가 올라갈 채널을 설정합니다")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.default_permissions(manage_guild=True)
     async def set_inquiry_channel(
         self,
         interaction: discord.Interaction,
