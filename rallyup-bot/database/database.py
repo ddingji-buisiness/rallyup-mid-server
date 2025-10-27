@@ -1,3 +1,4 @@
+import logging
 import aiosqlite
 import json
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,9 @@ import discord
 from database.models import BestPairSummary, ClanScrim, ClanTeam, ScrimRecruitment, TeamWinrateAnalysis, TeammatePairStats, User, Match, Participant, UserMatchup, WordleAttempt, WordleGame, WordleGuess, WordleRating
 import uuid
 import asyncio
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     def __init__(self, db_path: str = "database/rallyup.db"):
@@ -38,6 +42,7 @@ class DatabaseManager:
             await self.initialize_voice_level_tables()
             await self.create_inquiry_tables()
             await self.create_consultation_tables()
+            await self.add_ticket_unique_constraints()
 
             # users 테이블
             await db.execute('''
@@ -445,6 +450,12 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_consultations_admin 
                 ON consultations(guild_id, admin_id, status)
             ''')
+
+            await db.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_consultation_per_user
+                ON consultations(guild_id, user_id)
+                WHERE status IN ('pending', 'accepted')
+            ''')
             
             await db.commit()
             print("✅ 1:1 상담 테이블이 생성되었습니다.")
@@ -515,6 +526,18 @@ class DatabaseManager:
                     notification_role_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 쿨다운 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS inquiry_cooldowns (
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    cooldown_until TIMESTAMP NOT NULL,
+                    reason TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, user_id)
                 )
             ''')
             
@@ -9256,29 +9279,45 @@ class DatabaseManager:
 
 
     async def get_next_ticket_number(self, guild_id: str) -> str:
-        """다음 티켓 번호 생성"""
+        """다음 티켓 번호 생성 (관리팀 문의 + 1:1 상담 모두 고려)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                # 해당 서버의 가장 최근 티켓 번호 조회
+                # 1. inquiries 테이블에서 마지막 티켓 번호 조회
                 async with db.execute('''
                     SELECT ticket_number FROM inquiries 
                     WHERE guild_id = ? 
                     ORDER BY id DESC LIMIT 1
                 ''', (guild_id,)) as cursor:
-                    result = await cursor.fetchone()
-                    
-                    if result and result[0]:
-                        # 기존 번호에서 증가
-                        last_number = int(result[0].replace('#', ''))
-                        new_number = last_number + 1
-                    else:
-                        # 첫 티켓
-                        new_number = 1
-                    
-                    return f"#{new_number:04d}"  # #0001 형식
-                    
+                    inquiry_result = await cursor.fetchone()
+                
+                # 2. consultations 테이블에서 마지막 티켓 번호 조회
+                async with db.execute('''
+                    SELECT ticket_number FROM consultations 
+                    WHERE guild_id = ? 
+                    ORDER BY id DESC LIMIT 1
+                ''', (guild_id,)) as cursor:
+                    consultation_result = await cursor.fetchone()
+                
+                # 3. 두 테이블의 티켓 번호 중 더 큰 값 사용
+                max_number = 0
+                
+                if inquiry_result and inquiry_result[0]:
+                    inquiry_num = int(inquiry_result[0].replace('#', ''))
+                    max_number = max(max_number, inquiry_num)
+                
+                if consultation_result and consultation_result[0]:
+                    consultation_num = int(consultation_result[0].replace('#', ''))
+                    max_number = max(max_number, consultation_num)
+                
+                # 4. 다음 번호 생성
+                new_number = max_number + 1
+                
+                return f"#{new_number:04d}"  # #0001 형식
+                
         except Exception as e:
             print(f"❌ 티켓 번호 생성 실패: {e}")
+            import traceback
+            traceback.print_exc()
             return "#0001"
 
 
@@ -9360,28 +9399,34 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
                 await db.execute('PRAGMA journal_mode=WAL')
                 
-                await db.execute('''
-                    INSERT INTO inquiries (
+                try:
+                    await db.execute('''
+                        INSERT INTO inquiries (
+                            ticket_number, guild_id, user_id, username,
+                            inquiry_type, category, title, content,
+                            is_anonymous, status, assigned_to, channel_message_id,
+                            created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''', (
                         ticket_number, guild_id, user_id, username,
                         inquiry_type, category, title, content,
-                        is_anonymous, status, assigned_to, channel_message_id,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ''', (
-                    ticket_number, guild_id, user_id, username,
-                    inquiry_type, category, title, content,
-                    is_anonymous, assigned_to, channel_message_id
-                ))
-                
-                await db.commit()
-                print(f"✅ 문의 저장 완료: {ticket_number}")
-                return True
-                
+                        is_anonymous, assigned_to, channel_message_id
+                    ))
+                    
+                    await db.commit()
+                    print(f"✅ 문의 저장 완료: {ticket_number}")
+                    return True
+                    
+                except Exception as e:
+                    # 🆕 트랜잭션 롤백
+                    await db.rollback()
+                    print(f"❌ 문의 DB 저장 실패 (롤백됨): {e}")
+                    raise
+                    
         except Exception as e:
             print(f"❌ 문의 저장 실패: {e}")
             return False
-
 
     async def update_inquiry_status(
         self,
@@ -9671,24 +9716,31 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
                 await db.execute('PRAGMA journal_mode=WAL')
                 
-                await db.execute('''
-                    INSERT INTO consultations (
+                try:
+                    await db.execute('''
+                        INSERT INTO consultations (
+                            ticket_number, guild_id, user_id, username,
+                            admin_id, admin_name, category, content,
+                            is_urgent, status, request_message_id,
+                            created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''', (
                         ticket_number, guild_id, user_id, username,
                         admin_id, admin_name, category, content,
-                        is_urgent, status, request_message_id,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ''', (
-                    ticket_number, guild_id, user_id, username,
-                    admin_id, admin_name, category, content,
-                    is_urgent, request_message_id
-                ))
-                
-                await db.commit()
-                print(f"✅ 상담 요청 저장: {ticket_number}")
-                return True
-                
+                        is_urgent, request_message_id
+                    ))
+                    
+                    await db.commit()
+                    print(f"✅ 상담 요청 저장: {ticket_number}")
+                    return True
+                    
+                except Exception as e:
+                    # 🆕 트랜잭션 롤백
+                    await db.rollback()
+                    print(f"❌ 상담 DB 저장 실패 (롤백됨): {e}")
+                    raise
+                    
         except Exception as e:
             print(f"❌ 상담 요청 저장 실패: {e}")
             return False
@@ -9981,3 +10033,239 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 문의 통계 조회 실패: {e}")
             return {}
+
+    async def get_active_inquiries(self, guild_id: str) -> List[dict]:
+        """활성 상태의 문의 목록 조회 (View 복원용)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM inquiries
+                    WHERE guild_id = ? AND status IN ('pending', 'processing')
+                    ORDER BY created_at DESC
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ 활성 문의 조회 실패: {e}")
+            return []
+
+
+    async def get_active_consultations(self, guild_id: str) -> List[dict]:
+        """활성 상태의 상담 목록 조회 (View 복원용)"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM consultations
+                    WHERE guild_id = ? AND status IN ('pending', 'accepted')
+                    ORDER BY created_at DESC
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ 활성 상담 조회 실패: {e}")
+            return []
+
+    async def get_server_admins(self, guild_id: str) -> List[dict]:
+        """서버 관리자 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT * FROM server_admins
+                    WHERE guild_id = ? AND is_active = TRUE
+                    ORDER BY added_at DESC
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ 서버 관리자 조회 실패: {e}")
+            return []
+
+    async def check_inquiry_spam(self, guild_id: str, user_id: str) -> dict:
+        """문의 스팸 체크"""
+        try:
+            from datetime import datetime, timedelta
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                now = datetime.utcnow()
+                one_hour_ago = now - timedelta(hours=1)
+                one_day_ago = now - timedelta(days=1)
+                
+                # 1시간 내 문의 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries
+                    WHERE guild_id = ? AND user_id = ?
+                    AND created_at >= ?
+                ''', (guild_id, user_id, one_hour_ago.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    hour_count = row[0] if row else 0
+                
+                # 1일 내 문의 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM inquiries
+                    WHERE guild_id = ? AND user_id = ?
+                    AND created_at >= ?
+                ''', (guild_id, user_id, one_day_ago.isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    day_count = row[0] if row else 0
+                
+                # 최근 문의 내용 (유사도 체크용)
+                async with db.execute('''
+                    SELECT content FROM inquiries
+                    WHERE guild_id = ? AND user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 5
+                ''', (guild_id, user_id)) as cursor:
+                    recent_contents = [row[0] for row in await cursor.fetchall()]
+                
+                return {
+                    'hour_count': hour_count,
+                    'day_count': day_count,
+                    'recent_contents': recent_contents,
+                    'is_spam': hour_count >= 5 or day_count >= 15
+                }
+                
+        except Exception as e:
+            print(f"❌ 스팸 체크 실패: {e}")
+            return {
+                'hour_count': 0,
+                'day_count': 0,
+                'recent_contents': [],
+                'is_spam': False
+            }
+
+    async def add_inquiry_cooldown(self, guild_id: str, user_id: str, hours: int = 1):
+        """문의 쿨다운 추가"""
+        try:
+            from datetime import datetime, timedelta
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                cooldown_until = datetime.now() + timedelta(hours=hours)
+                
+                await db.execute('''
+                    INSERT OR REPLACE INTO inquiry_cooldowns (
+                        guild_id, user_id, cooldown_until, reason
+                    )
+                    VALUES (?, ?, ?, ?)
+                ''', (guild_id, user_id, cooldown_until.isoformat(), 'spam_detection'))
+                
+                await db.commit()
+                print(f"⏰ 쿨다운 추가: {user_id} ({hours}시간)")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 쿨다운 추가 실패: {e}")
+            return False
+
+    async def check_inquiry_cooldown(self, guild_id: str, user_id: str) -> dict:
+        """문의 쿨다운 체크"""
+        try:
+            from datetime import datetime
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                async with db.execute('''
+                    SELECT cooldown_until, reason FROM inquiry_cooldowns
+                    WHERE guild_id = ? AND user_id = ?
+                    AND cooldown_until > ?
+                ''', (guild_id, user_id, datetime.utcnow().isoformat())) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        cooldown_until = datetime.fromisoformat(row[0])
+                        remaining = cooldown_until - datetime.utcnow()
+                        
+                        return {
+                            'is_cooldown': True,
+                            'cooldown_until': cooldown_until,
+                            'remaining_minutes': int(remaining.total_seconds() / 60),
+                            'reason': row[1]
+                        }
+                    
+                    return {'is_cooldown': False}
+                    
+        except Exception as e:
+            print(f"❌ 쿨다운 체크 실패: {e}")
+            return {'is_cooldown': False}
+
+    async def cleanup_stale_consultations(self, hours: int = 72):
+        """오래된 상담 자동 정리 (72시간 이상 응답 없음)"""
+        try:
+            from datetime import datetime, timedelta, timezone
+            
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+            
+            async with aiosqlite.connect(self.db_path, timeout=30.0) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # pending 상태 72시간 이상
+                await db.execute('''
+                    UPDATE consultations
+                    SET status = 'completed',
+                        completed_at = CURRENT_TIMESTAMP,
+                        completed_by = 'system_timeout'
+                    WHERE status = 'pending'
+                    AND datetime(created_at) < ?
+                ''', (cutoff_time.isoformat(),))
+                
+                # accepted 상태 72시간 이상 업데이트 없음
+                await db.execute('''
+                    UPDATE consultations
+                    SET status = 'completed',
+                        completed_at = CURRENT_TIMESTAMP,
+                        completed_by = 'system_timeout'
+                    WHERE status = 'accepted'
+                    AND datetime(updated_at) < ?
+                ''', (cutoff_time.isoformat(),))
+                
+                await db.commit()
+                
+                # 정리된 개수 확인
+                async with db.execute('''
+                    SELECT COUNT(*) FROM consultations
+                    WHERE completed_by = 'system_timeout'
+                    AND datetime(completed_at) > ?
+                ''', (cutoff_time.isoformat(),)) as cursor:
+                    row = await cursor.fetchone()
+                    cleaned_count = row[0] if row else 0
+                
+                if cleaned_count > 0:
+                    logger.info(f"🧹 오래된 상담 {cleaned_count}개 자동 정리")
+                
+                return cleaned_count
+                
+        except Exception as e:
+            logger.error(f"❌ 상담 정리 실패: {e}")
+            return 0
+
+    async def add_ticket_unique_constraints(self):
+        """티켓 번호에 UNIQUE 제약 조건 추가
+        
+        동시에 여러 요청이 들어와도 중복된 티켓 번호가 생성되지 않도록 보장
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # inquiries 테이블: (guild_id, ticket_number) 조합 UNIQUE
+                await db.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_inquiry_guild_ticket
+                    ON inquiries(guild_id, ticket_number)
+                ''')
+                
+                # consultations 테이블: (guild_id, ticket_number) 조합 UNIQUE
+                await db.execute('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_consultation_guild_ticket
+                    ON consultations(guild_id, ticket_number)
+                ''')
+                
+                await db.commit()
+                logger.info("✅ 티켓 번호 UNIQUE 제약 조건 추가 완료")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ UNIQUE 제약 추가 실패: {e}", exc_info=True)
+            return False

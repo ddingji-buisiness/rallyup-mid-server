@@ -60,6 +60,9 @@ class RallyUpBot(commands.Bot):
 
             await self.load_commands()
 
+            await self._register_persistent_views()
+            logger.info("✅ Persistent Views 등록 완료")
+
             from utils.battle_tag_logger import BattleTagLogger
             self.battle_tag_logger = BattleTagLogger(self)
             logger.info("배틀태그 로거 초기화 완료")
@@ -87,6 +90,9 @@ class RallyUpBot(commands.Bot):
                 self.tier_change_scheduler = TierChangeScheduler(self)
                 await self.tier_change_scheduler.start()
                 logger.info("티어 변동 감지 스케줄러 시작")
+
+            await self.restore_inquiry_views()
+            logger.info("문의 시스템 View 복원 완료")
 
             try:
                 print("슬래시 커맨드 동기화 중...")
@@ -120,7 +126,8 @@ class RallyUpBot(commands.Bot):
             'commands.team_info',
             'commands.voice_level_admin',
             'commands.voice_level_user',
-            'commands.tts_commands'
+            'commands.tts_commands',
+            'commands.inquiry_system'
         ]
 
         for command_module in commands_to_load:
@@ -189,7 +196,91 @@ class RallyUpBot(commands.Bot):
         else:
             logger.warning("스크림 스케줄러가 실행되지 않았습니다!")
 
+        if not hasattr(self, '_consultation_cleanup_task'):
+            self._consultation_cleanup_task = asyncio.create_task(
+                self._consultation_cleanup_loop()
+            )
+            logger.info("상담 자동 정리 태스크 시작")
+
         await self.restore_recruitment_views()
+
+    async def _consultation_cleanup_loop(self):
+        """상담 자동 정리 루프 (24시간마다 실행)"""
+        await self.wait_until_ready()
+        
+        while not self.is_closed():
+            try:
+                # 72시간 이상 응답 없는 상담 정리
+                cleaned = await self.db_manager.cleanup_stale_consultations(hours=72)
+                
+                if cleaned > 0:
+                    logger.info(f"🧹 자동 정리: {cleaned}개 상담 타임아웃")
+                
+                # 24시간 대기
+                await asyncio.sleep(86400)  # 24시간
+                
+            except Exception as e:
+                logger.error(f"❌ 상담 정리 루프 오류: {e}")
+                await asyncio.sleep(3600)  # 1시간 후 재시도
+
+    async def _register_persistent_views(self):
+        """Persistent Views 등록 (봇 재시작 후에도 작동)"""
+        try:
+            from commands.inquiry_system import (
+                TicketManagementView,
+                ThreadDMBridgeView,
+                UserReplyView,
+                ConsultationRequestView
+            )
+
+            # TicketManagementView (티켓 관리)
+            self.add_view(TicketManagementView(
+                bot=self,
+                guild_id="",
+                ticket_number="",
+                is_anonymous=False,
+                user_id=""
+            ))
+            
+            # ThreadDMBridgeView (쓰레드-DM 브리지)
+            self.add_view(ThreadDMBridgeView(
+                bot=self,
+                guild_id="",
+                ticket_number="",
+                user_id="",
+                thread=None
+            ))
+            
+            # UserReplyView (사용자 답장)
+            self.add_view(UserReplyView(
+                bot=self,
+                guild_id="",
+                ticket_number="",
+                thread_id=""
+            ))
+            
+            # ConsultationResponseView (1:1 상담 수락/거절)
+            self.add_view(ConsultationRequestView(
+                bot=self,
+                ticket_number="",
+                user_id="",
+                username="",
+                guild_id="",
+                admin_id="",
+                admin_name="",
+                category="",
+                content="",
+                is_urgent=False
+            ))
+            
+            logger.info("📋 문의 시스템 Persistent Views 등록 완료")
+            
+        except Exception as e:
+            logger.error(f"❌ Persistent Views 등록 실패: {e}", exc_info=True)
+
+    async def restore_inquiry_views(self):
+        # TicketManagementView는 callback에서 동적으로 처리
+        logger.info("✅ 문의 View 복원 완료")
 
     async def restore_recruitment_views(self):
         try:
@@ -409,6 +500,154 @@ class RallyUpBot(commands.Bot):
     
     async def on_command_error(self, ctx, error):
         logger.error(f'Error in command {ctx.command}: {error}')
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        """
+        모든 interaction을 가로채서 처리
+        Persistent Views의 동적 custom_id 처리를 위함
+        """
+        try:
+            # custom_id가 없으면 무시
+            if not interaction.data or 'custom_id' not in interaction.data:
+                return
+            
+            custom_id = interaction.data['custom_id']
+            
+            # 🔧 ConsultationReplyView 처리 (1:1 상담 답장/종료)
+            if custom_id.startswith('consultation:'):
+                from commands.inquiry_system import ConsultationReplyView
+                
+                # custom_id 파싱: consultation:action:guild_id:ticket:user_id:is_admin
+                parts = custom_id.split(':', 2)
+                if len(parts) >= 3:
+                    _, action, data = parts
+                    data_parts = data.split(':')
+                    
+                    if len(data_parts) == 4:
+                        guild_id, ticket_number, target_user_id, is_admin_str = data_parts
+                        is_admin = bool(int(is_admin_str))
+                        
+                        # View 생성 (데이터 복원)
+                        view = ConsultationReplyView(
+                            bot=self,
+                            guild_id=guild_id,
+                            ticket_number=ticket_number,
+                            target_user_id=target_user_id,
+                            is_admin=is_admin
+                        )
+                        
+                        # 해당 액션의 콜백 직접 호출
+                        if action == 'reply':
+                            await view.reply_button_callback(interaction)
+                            return
+                        elif action == 'end':
+                            await view.end_button_callback(interaction)
+                            return
+                        
+                        logger.info(f"✅ 상담 버튼 처리: {action} - {ticket_number}")
+            
+            # TicketManagementView 처리 (관리팀 문의 버튼)
+            elif custom_id in ['ticket:reply', 'ticket:complete', 'ticket:delete']:
+                from commands.inquiry_system import TicketManagementView
+                
+                # 메시지에서 티켓 번호 추출
+                if not interaction.message or not interaction.message.embeds:
+                    logger.error("❌ 메시지 또는 embed 없음")
+                    return
+                
+                embed = interaction.message.embeds[0]
+                guild_id = str(interaction.guild_id)
+                ticket_number = None
+                
+                # Footer에서 추출: "티켓: #0011"
+                if embed.footer and embed.footer.text:
+                    footer_text = embed.footer.text
+                    logger.debug(f"🔍 Footer 텍스트: {footer_text}")
+                    
+                    if '#' in footer_text:
+                        # "티켓: #0011" → "#0011" 추출
+                        parts = footer_text.split('#')
+                        if len(parts) > 1:
+                            # "#0011 • 오늘" 같은 경우 처리
+                            ticket_part = parts[1].split()[0].split('•')[0].strip()
+                            ticket_number = f"#{ticket_part}"
+                            logger.debug(f"✅ Footer에서 추출: {ticket_number}")
+                
+                # 2️Title에서 추출: "📋 문의 답변 - #0011"
+                if not ticket_number and embed.title:
+                    logger.debug(f"🔍 Title: {embed.title}")
+                    if '#' in embed.title:
+                        parts = embed.title.split('#')
+                        if len(parts) > 1:
+                            ticket_part = parts[1].split()[0].strip()
+                            ticket_number = f"#{ticket_part}"
+                            logger.debug(f"✅ Title에서 추출: {ticket_number}")
+                
+                # 3️Fields에서 추출
+                if not ticket_number:
+                    for field in embed.fields:
+                        logger.debug(f"🔍 Field: {field.name} = {field.value}")
+                        if '티켓' in field.name or 'ticket' in field.name.lower():
+                            value = field.value.strip()
+                            if '#' in value:
+                                ticket_number = value.strip('`').strip()
+                            else:
+                                # "#" 없으면 추가
+                                ticket_number = f"#{value.strip('`').strip()}"
+                            logger.debug(f"✅ Field에서 추출: {ticket_number}")
+                            break
+                
+                if not ticket_number:
+                    logger.error("❌ 티켓 번호를 찾을 수 없음")
+                    await interaction.response.send_message(
+                        "❌ 티켓 번호를 찾을 수 없습니다.",
+                        ephemeral=True
+                    )
+                    return
+                
+                logger.info(f"🎫 추출된 티켓 번호: {ticket_number}")
+                
+                # DB에서 티켓 정보 조회
+                inquiry = await self.db_manager.get_inquiry_by_ticket(
+                    guild_id,
+                    ticket_number  # ✅ "#0015" 형태로 조회
+                )
+                
+                if not inquiry:
+                    logger.error(f"❌ 티켓을 찾을 수 없음: {ticket_number}")
+                    await interaction.response.send_message(
+                        "❌ 티켓 정보를 찾을 수 없습니다.",
+                        ephemeral=True
+                    )
+                    return
+                
+                logger.info(f"✅ 티켓 조회 성공: {ticket_number}")
+                
+                # View 생성 (데이터 복원)
+                view = TicketManagementView(
+                    bot=self,
+                    guild_id=guild_id,
+                    ticket_number=ticket_number,
+                    is_anonymous=inquiry.get('is_anonymous', False),
+                    user_id=inquiry['user_id']
+                )
+                
+                # 해당 버튼의 콜백 호출
+                if custom_id == 'ticket:reply':
+                    await view.reply_button(interaction, None)
+                    return
+                elif custom_id == 'ticket:complete':
+                    await view.complete_button(interaction, None)
+                    return
+                elif custom_id == 'ticket:delete':
+                    await view.delete_button(interaction, None)
+                    return
+                
+                logger.info(f"✅ 티켓 버튼 처리 완료: {custom_id} - {ticket_number}")
+            
+        except Exception as e:
+            logger.error(f"❌ on_interaction 처리 오류: {e}", exc_info=True)
+
 
 async def main():
     bot = RallyUpBot()
