@@ -41,9 +41,7 @@ class VoiceChannelSession:
             not self.processor_task.done()
         )
         
-class TTSCommands(commands.Cog):
-    """Linux 서버용 TTS Commands (Opus 경로 수정)"""
-    
+class TTSCommands(commands.Cog):    
     def __init__(self, bot):
         self.bot = bot
         self.sessions: Dict[str, VoiceChannelSession] = {}

@@ -40,6 +40,7 @@ class DatabaseManager:
             await self.initialize_wordle_tables()
             await self.create_inter_guild_scrim_tables()
             await self.initialize_voice_level_tables()
+            await self.create_scrim_settings_table()
             await self.create_inquiry_tables()
             await self.create_consultation_tables()
 
@@ -806,6 +807,32 @@ class DatabaseManager:
             
             await db.commit()
 
+    async def create_scrim_settings_table(self):
+        """내전 설정 테이블 생성 (채널 설정, 자동 스케줄링 등)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    recruitment_channel_id TEXT,
+                    auto_schedule_enabled BOOLEAN DEFAULT FALSE,
+                    schedule_day INTEGER,
+                    schedule_time TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_scrim_settings_guild 
+                ON scrim_settings(guild_id)
+            ''')
+            
+            await db.commit()
+            print("✅ Scrim settings table initialized")
+
     async def initialize_server_settings_tables(self):
         """서버 설정 테이블 초기화"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -820,6 +847,7 @@ class DatabaseManager:
                     member_role_id TEXT,
                     auto_role_change BOOLEAN DEFAULT FALSE,
                     welcome_channel_id TEXT,
+                    recruitment_channel_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -2972,38 +3000,42 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path) as db:
                 # 기존 설정이 있는지 확인
                 async with db.execute('''
-                    SELECT guild_id FROM server_settings WHERE guild_id = ?
+                    SELECT guild_id FROM scrim_settings WHERE guild_id = ?
                 ''', (guild_id,)) as cursor:
                     existing = await cursor.fetchone()
                 
                 if existing:
                     # 업데이트
                     await db.execute('''
-                        UPDATE server_settings 
+                        UPDATE scrim_settings 
                         SET recruitment_channel_id = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE guild_id = ?
                     ''', (channel_id, guild_id))
                 else:
                     # 신규 생성
                     await db.execute('''
-                        INSERT INTO server_settings (guild_id, recruitment_channel_id)
+                        INSERT INTO scrim_settings (guild_id, recruitment_channel_id)
                         VALUES (?, ?)
                     ''', (guild_id, channel_id))
                 
                 await db.commit()
+                print(f"✅ 공지 채널 설정 완료: guild_id={guild_id}, channel_id={channel_id}")
                 
             return True
             
         except Exception as e:
             print(f"❌ 공지 채널 설정 실패: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+
 
     async def get_recruitment_channel(self, guild_id: str) -> Optional[str]:
         """설정된 내전 공지 채널 ID 조회"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
-                    SELECT recruitment_channel_id FROM server_settings 
+                    SELECT recruitment_channel_id FROM scrim_settings 
                     WHERE guild_id = ?
                 ''', (guild_id,)) as cursor:
                     result = await cursor.fetchone()
