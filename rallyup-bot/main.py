@@ -12,6 +12,7 @@ from commands.scrim_recruitment import RecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
 from utils.balancing_session_manager import session_manager
 from utils.voice_level_tracker import VoiceLevelTracker
+from scheduler.auto_recruitment_scheduler import AutoRecruitmentScheduler
 
 from config.settings import Settings
 
@@ -39,6 +40,7 @@ class RallyUpBot(commands.Bot):
         self.recruitment_scheduler = None
         self.scrim_scheduler = None
         self.wordle_scheduler = None
+        self.auto_recruitment_scheduler = None
 
         self.korean_api = None
         self.similarity_calc = None
@@ -80,6 +82,11 @@ class RallyUpBot(commands.Bot):
                 await self.recruitment_scheduler.start()
                 logger.info("내전 모집 스케줄러 시작")
 
+            if not self.auto_recruitment_scheduler:
+                self.auto_recruitment_scheduler = AutoRecruitmentScheduler(self)
+                await self.auto_recruitment_scheduler.start()
+                logger.info("✅ 정기 내전 자동 등록 스케줄러 시작")
+
             if not self.scrim_scheduler:
                 self.scrim_scheduler = ScrimScheduler(self)
                 await self.scrim_scheduler.start()
@@ -110,16 +117,16 @@ class RallyUpBot(commands.Bot):
         """커맨드 로드"""
         commands_to_load = [
             'commands.help',
-            'commands.match_result',
-            'commands.scrim_session',
-            'commands.clan_scrim',
+            # 'commands.match_result',
+            # 'commands.scrim_session',
+            # 'commands.clan_scrim',
             'commands.user_application',
             'commands.admin_system',
             'commands.bamboo_forest',
             'commands.scrim_recruitment',
             'commands.scrim_result_recording',
             'commands.simple_user_management',
-            'commands.inter_guild_scrim',
+            # 'commands.inter_guild_scrim',
             'commands.team_balancing',
             'commands.nickname_format_admin',
             'commands.battle_tag_commands',
@@ -481,6 +488,10 @@ class RallyUpBot(commands.Bot):
             if self.recruitment_scheduler:
                 await self.recruitment_scheduler.stop()
                 logger.info("내전 모집 스케줄러 종료")
+
+            if self.auto_recruitment_scheduler:
+                await self.auto_recruitment_scheduler.stop()
+                logger.info("정기 내전 자동 등록 스케줄러 종료")
 
             if self.scrim_scheduler:
                 await self.scrim_scheduler.stop()

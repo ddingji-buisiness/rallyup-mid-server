@@ -611,114 +611,114 @@ class TeamBalancingCommand(commands.Cog):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @app_commands.command(name="밸런싱도움말", description="팀 밸런싱 기능 사용법을 안내합니다")
-    async def balancing_help(self, interaction: discord.Interaction):
-        """팀 밸런싱 도움말"""
-        embed = discord.Embed(
-            title="🎯 팀 밸런싱 가이드",
-            description="RallyUp Bot의 AI 기반 팀 밸런싱 시스템을 소개합니다.",
-            color=0x0099ff
-        )
+    # @app_commands.command(name="밸런싱도움말", description="팀 밸런싱 기능 사용법을 안내합니다")
+    # async def balancing_help(self, interaction: discord.Interaction):
+    #     """팀 밸런싱 도움말"""
+    #     embed = discord.Embed(
+    #         title="🎯 팀 밸런싱 가이드",
+    #         description="RallyUp Bot의 AI 기반 팀 밸런싱 시스템을 소개합니다.",
+    #         color=0x0099ff
+    #     )
         
-        embed.add_field(
-            name="🎮 기본 사용법",
-            value="1. `/팀밸런싱` - 밸런싱 시작\n"
-                "2. 모드 선택 (자동/수동)\n"
-                "3. 참가자 선택 및 설정\n"
-                "4. 결과 확인 및 활용",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="🎮 기본 사용법",
+    #         value="1. `/팀밸런싱` - 밸런싱 시작\n"
+    #             "2. 모드 선택 (자동/수동)\n"
+    #             "3. 참가자 선택 및 설정\n"
+    #             "4. 결과 확인 및 활용",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="🤖 자동 밸런싱 모드",
-            value="• **목적**: AI가 최적의 5vs5 팀 자동 구성\n"
-                "• **과정**: 10명 선택 → 밸런싱 모드 선택 → AI 분석\n"
-                "• **장점**: 빠르고 객관적인 최적 팀 구성\n"
-                "• **조건**: 최소 3경기 이상 참여한 유저만",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="🤖 자동 밸런싱 모드",
+    #         value="• **목적**: AI가 최적의 5vs5 팀 자동 구성\n"
+    #             "• **과정**: 10명 선택 → 밸런싱 모드 선택 → AI 분석\n"
+    #             "• **장점**: 빠르고 객관적인 최적 팀 구성\n"
+    #             "• **조건**: 최소 3경기 이상 참여한 유저만",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="📝 밸런스 체크 모드 (NEW!)",
-            value="• **목적**: 이미 구성된 팀의 밸런스 정밀 분석\n"
-                "• **과정**: A팀 5명 → B팀 5명 → A팀 포지션 → B팀 포지션 → 분석\n"
-                "• **장점**: 실제 포지션 기준 정확한 밸런스 측정\n"
-                "• **특징**: 신규 유저도 포함 가능, 포지션 적합도 분석",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="📝 밸런스 체크 모드 (NEW!)",
+    #         value="• **목적**: 이미 구성된 팀의 밸런스 정밀 분석\n"
+    #             "• **과정**: A팀 5명 → B팀 5명 → A팀 포지션 → B팀 포지션 → 분석\n"
+    #             "• **장점**: 실제 포지션 기준 정확한 밸런스 측정\n"
+    #             "• **특징**: 신규 유저도 포함 가능, 포지션 적합도 분석",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="⚔️ 포지션 설정 (밸런스 체크 모드)",
-            value="1️⃣ 각 팀 5명씩 선택 완료 후\n"
-                "2️⃣ A팀부터 순차적으로 포지션 지정\n"
-                "3️⃣ 탱커 1명, 딜러 2명, 힐러 2명 필수\n"
-                "4️⃣ 잘못 설정 시 재설정 옵션 제공\n"
-                "5️⃣ 포지션 적합도도 함께 분석",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="⚔️ 포지션 설정 (밸런스 체크 모드)",
+    #         value="1️⃣ 각 팀 5명씩 선택 완료 후\n"
+    #             "2️⃣ A팀부터 순차적으로 포지션 지정\n"
+    #             "3️⃣ 탱커 1명, 딜러 2명, 힐러 2명 필수\n"
+    #             "4️⃣ 잘못 설정 시 재설정 옵션 제공\n"
+    #             "5️⃣ 포지션 적합도도 함께 분석",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="🎯 새로운 기능: 간편 결과 기록",
-            value="• **게임 시작**: 밸런싱 완료 후 바로 게임 진행\n"
-                "• **게임 종료**: **📝 결과 기록하기** 버튼 클릭\n"
-                "• **간편 입력**: 승리팀과 맵만 선택\n"
-                "• **자동 저장**: 팀 구성/포지션은 이미 설정됨!\n"
-                "• **통계 반영**: 즉시 개인 통계 및 랭킹 업데이트",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="🎯 새로운 기능: 간편 결과 기록",
+    #         value="• **게임 시작**: 밸런싱 완료 후 바로 게임 진행\n"
+    #             "• **게임 종료**: **📝 결과 기록하기** 버튼 클릭\n"
+    #             "• **간편 입력**: 승리팀과 맵만 선택\n"
+    #             "• **자동 저장**: 팀 구성/포지션은 이미 설정됨!\n"
+    #             "• **통계 반영**: 즉시 개인 통계 및 랭킹 업데이트",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="📊 밸런싱 기준",
-            value="• **포지션별 숙련도**: 탱/딜/힐 각각의 승률\n"
-                "• **경험치 보정**: 게임 수에 따른 신뢰도\n"
-                "• **팀 밸런스**: 양팀 스킬 차이 최소화\n"
-                "• **포지션 적합도**: 주포지션 일치도\n"
-                "• **하이브리드 스코어링**: 내전 데이터 + 티어 정보",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="📊 밸런싱 기준",
+    #         value="• **포지션별 숙련도**: 탱/딜/힐 각각의 승률\n"
+    #             "• **경험치 보정**: 게임 수에 따른 신뢰도\n"
+    #             "• **팀 밸런스**: 양팀 스킬 차이 최소화\n"
+    #             "• **포지션 적합도**: 주포지션 일치도\n"
+    #             "• **하이브리드 스코어링**: 내전 데이터 + 티어 정보",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="✅ 참가 조건",
-            value="• **자동 모드**: 최소 3경기 이상 + 승인 유저\n"
-                "• **체크 모드**: 모든 등록된 유저 (신규 포함)\n"
-                "• **공통**: `/유저신청`으로 서버 등록 완료",
-            inline=True
-        )
+    #     embed.add_field(
+    #         name="✅ 참가 조건",
+    #         value="• **자동 모드**: 최소 3경기 이상 + 승인 유저\n"
+    #             "• **체크 모드**: 모든 등록된 유저 (신규 포함)\n"
+    #             "• **공통**: `/유저신청`으로 서버 등록 완료",
+    #         inline=True
+    #     )
         
-        embed.add_field(
-            name="🔧 관리 명령어",
-            value="• `/밸런싱상태` - 세션 상태 확인\n"
-                "• `/밸런싱취소` - 세션 강제 취소\n"
-                "• `/밸런싱도움말` - 이 도움말",
-            inline=True
-        )
+    #     embed.add_field(
+    #         name="🔧 관리 명령어",
+    #         value="• `/밸런싱상태` - 세션 상태 확인\n"
+    #             "• `/밸런싱취소` - 세션 강제 취소\n"
+    #             "• `/밸런싱도움말` - 이 도움말",
+    #         inline=True
+    #     )
         
-        embed.add_field(
-            name="💡 팁 & 활용법",
-            value="• **다양한 포지션** 플레이어 포함 시 더 좋은 결과\n"
-                "• **정밀 모드** 추천 (가장 균형잡힌 결과)\n"
-                "• **여러 조합** 비교 후 최적의 팀 선택\n"
-                "• **포지션 체크 모드**로 기존 팀 검증\n"
-                "• **개선 제안** 활용하여 밸런스 최적화\n"
-                "• **결과 기록** 버튼으로 빠른 통계 저장",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="💡 팁 & 활용법",
+    #         value="• **다양한 포지션** 플레이어 포함 시 더 좋은 결과\n"
+    #             "• **정밀 모드** 추천 (가장 균형잡힌 결과)\n"
+    #             "• **여러 조합** 비교 후 최적의 팀 선택\n"
+    #             "• **포지션 체크 모드**로 기존 팀 검증\n"
+    #             "• **개선 제안** 활용하여 밸런스 최적화\n"
+    #             "• **결과 기록** 버튼으로 빠른 통계 저장",
+    #         inline=False
+    #     )
         
-        embed.add_field(
-            name="🆕 최신 업데이트",
-            value="• ✨ **원클릭 결과 기록** 기능 추가\n"
-                "• 게임 종료 후 버튼 한 번으로 결과 저장\n"
-                "• 세션 데이터 자동 연계 (2시간 유효)\n"
-                "• 승리팀/맵만 선택하면 즉시 통계 반영",
-            inline=False
-        )
+    #     embed.add_field(
+    #         name="🆕 최신 업데이트",
+    #         value="• ✨ **원클릭 결과 기록** 기능 추가\n"
+    #             "• 게임 종료 후 버튼 한 번으로 결과 저장\n"
+    #             "• 세션 데이터 자동 연계 (2시간 유효)\n"
+    #             "• 승리팀/맵만 선택하면 즉시 통계 반영",
+    #         inline=False
+    #     )
         
-        embed.set_footer(
-            text="🤖 RallyUp Bot AI Team Balancing System v2.1",
-            icon_url=self.bot.user.display_avatar.url if self.bot.user else None
-        )
+    #     embed.set_footer(
+    #         text="🤖 RallyUp Bot AI Team Balancing System v2.1",
+    #         icon_url=self.bot.user.display_avatar.url if self.bot.user else None
+    #     )
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    #     await interaction.response.send_message(embed=embed, ephemeral=True)
     
     async def cog_load(self):
         """Cog 로드 시 실행"""

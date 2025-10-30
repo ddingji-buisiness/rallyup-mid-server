@@ -477,46 +477,46 @@ class AdminSystemCommands(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ 설정 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
 
-    @app_commands.command(name="역할테스트", description="[관리자] 역할 변경 기능을 테스트합니다")
-    @app_commands.describe(대상유저="테스트할 유저 (본인 권장)")
-    @app_commands.default_permissions(manage_guild=True)
-    async def test_role_change(self, interaction: discord.Interaction, 대상유저: discord.Member):
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message("❌ 관리자만 사용 가능합니다.", ephemeral=True)
-            return
+    # @app_commands.command(name="역할테스트", description="[관리자] 역할 변경 기능을 테스트합니다")
+    # @app_commands.describe(대상유저="테스트할 유저 (본인 권장)")
+    # @app_commands.default_permissions(manage_guild=True)
+    # async def test_role_change(self, interaction: discord.Interaction, 대상유저: discord.Member):
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message("❌ 관리자만 사용 가능합니다.", ephemeral=True)
+    #         return
         
-        await interaction.response.defer(ephemeral=True)
+    #     await interaction.response.defer(ephemeral=True)
         
-        try:
-            guild_id = str(interaction.guild_id)
-            result = await self.bot.db_manager._update_user_roles_conditional(대상유저, guild_id)
+    #     try:
+    #         guild_id = str(interaction.guild_id)
+    #         result = await self.bot.db_manager._update_user_roles_conditional(대상유저, guild_id)
             
-            embed = discord.Embed(
-                title="🧪 역할 변경 테스트 결과",
-                description=f"**{대상유저.display_name}**님에 대한 테스트 결과",
-                color=0xff9500,
-                timestamp=datetime.now()
-            )
+    #         embed = discord.Embed(
+    #             title="🧪 역할 변경 테스트 결과",
+    #             description=f"**{대상유저.display_name}**님에 대한 테스트 결과",
+    #             color=0xff9500,
+    #             timestamp=datetime.now()
+    #         )
             
-            embed.add_field(
-                name="📊 테스트 결과",
-                value=result,
-                inline=False
-            )
+    #         embed.add_field(
+    #             name="📊 테스트 결과",
+    #             value=result,
+    #             inline=False
+    #         )
             
-            embed.add_field(
-                name="ℹ️ 주의사항",
-                value="이것은 테스트 기능이며, 실제 유저 승인과 동일한 로직을 사용합니다.\n"
-                    "문제가 있다면 `/설정확인` 명령어로 설정을 점검해주세요.",
-                inline=False
-            )
+    #         embed.add_field(
+    #             name="ℹ️ 주의사항",
+    #             value="이것은 테스트 기능이며, 실제 유저 승인과 동일한 로직을 사용합니다.\n"
+    #                 "문제가 있다면 `/설정확인` 명령어로 설정을 점검해주세요.",
+    #             inline=False
+    #         )
             
-            embed.set_footer(text="RallyUp Bot | 테스트 기능")
+    #         embed.set_footer(text="RallyUp Bot | 테스트 기능")
             
-            await interaction.followup.send(embed=embed)
+    #         await interaction.followup.send(embed=embed)
             
-        except Exception as e:
-            await interaction.followup.send(f"❌ 테스트 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
+    #     except Exception as e:
+    #         await interaction.followup.send(f"❌ 테스트 중 오류가 발생했습니다: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="신규역할설정", description="[관리자] 신규 입장자에게 자동으로 배정할 역할을 설정합니다")
     @app_commands.describe(

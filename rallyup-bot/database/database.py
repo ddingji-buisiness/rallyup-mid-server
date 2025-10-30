@@ -41,6 +41,7 @@ class DatabaseManager:
             await self.create_inter_guild_scrim_tables()
             await self.initialize_voice_level_tables()
             await self.create_scrim_settings_table()
+            await self.create_auto_schedule_tables()
             await self.create_inquiry_tables()
             await self.create_consultation_tables()
 
@@ -438,6 +439,54 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_channel_guild ON tts_channel_settings(guild_id)')
 
             await db.commit()
+
+    async def create_auto_schedule_tables(self):
+        """정기 내전 자동 스케줄 테이블 생성"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS scrim_auto_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    schedule_name TEXT NOT NULL,
+                    recurrence_type TEXT NOT NULL DEFAULT 'weekly',
+                    recurrence_interval INTEGER NOT NULL DEFAULT 1,
+                    day_of_week INTEGER NOT NULL,
+                    scrim_time TEXT NOT NULL,
+                    post_days_before INTEGER NOT NULL DEFAULT 0,
+                    recruitment_title TEXT NOT NULL,
+                    recruitment_description TEXT,
+                    deadline_type TEXT NOT NULL DEFAULT 'relative',
+                    deadline_value TEXT NOT NULL,
+                    reminder_enabled BOOLEAN DEFAULT FALSE,
+                    reminder_hours_before INTEGER DEFAULT 5,
+                    channel_id TEXT NOT NULL,
+                    send_dm_notification BOOLEAN DEFAULT TRUE,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    last_created_date TEXT,
+                    next_scheduled_date TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_by TEXT NOT NULL,
+                    
+                    UNIQUE(guild_id, schedule_name)
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_auto_schedules_guild 
+                ON scrim_auto_schedules(guild_id)
+            ''')
+            
+            await db.execute('''
+                CREATE INDEX IF NOT EXISTS idx_auto_schedules_active 
+                ON scrim_auto_schedules(is_active, day_of_week)
+            ''')
+            
+            await db.commit()
+            print("✅ Auto schedule tables initialized")
 
     async def create_consultation_tables(self):
         """1:1 상담 관련 테이블 생성"""
@@ -10423,4 +10472,160 @@ class DatabaseManager:
                     'pitch': result[2],
                     'volume': result[3]
                 }
+            return None
+
+    async def create_auto_schedule(
+        self, 
+        guild_id: str, 
+        schedule_name: str,
+        day_of_week: int,
+        scrim_time: str,
+        recruitment_title: str,
+        recruitment_description: str,
+        deadline_type: str,
+        deadline_value: str,
+        channel_id: str,
+        send_dm: bool,
+        created_by: str,
+        post_days_before: int = 0,  # 🆕
+        recurrence_interval: int = 1,  # 🆕
+        reminder_enabled: bool = False,  # 🆕
+        reminder_hours_before: int = 5  # 🆕
+    ) -> bool:
+        """정기 내전 자동 스케줄 생성"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT INTO scrim_auto_schedules 
+                    (guild_id, schedule_name, day_of_week, scrim_time, 
+                    recruitment_title, recruitment_description, 
+                    deadline_type, deadline_value, channel_id, 
+                    send_dm_notification, created_by,
+                    post_days_before, recurrence_interval,
+                    reminder_enabled, reminder_hours_before)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    guild_id, schedule_name, day_of_week, scrim_time,
+                    recruitment_title, recruitment_description,
+                    deadline_type, deadline_value, channel_id,
+                    send_dm, created_by,
+                    post_days_before, recurrence_interval,
+                    reminder_enabled, reminder_hours_before
+                ))
+                await db.commit()
+                print(f"✅ 자동 스케줄 생성 완료: {schedule_name}")
+                return True
+        except Exception as e:
+            print(f"❌ 자동 스케줄 생성 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    async def get_auto_schedules(self, guild_id: str) -> List[Dict]:
+        """서버의 모든 자동 스케줄 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_auto_schedules 
+                    WHERE guild_id = ?
+                    ORDER BY day_of_week ASC, scrim_time ASC
+                ''', (guild_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    return [dict(zip(columns, row)) for row in results]
+        except Exception as e:
+            print(f"❌ 자동 스케줄 조회 실패: {e}")
+            return []
+
+
+    async def get_active_auto_schedules(self, day_of_week: int = None) -> List[Dict]:
+        """활성 자동 스케줄 조회 (특정 요일 또는 전체)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                if day_of_week is not None:
+                    query = '''
+                        SELECT * FROM scrim_auto_schedules 
+                        WHERE is_active = TRUE AND day_of_week = ?
+                        ORDER BY guild_id, scrim_time ASC
+                    '''
+                    params = (day_of_week,)
+                else:
+                    query = '''
+                        SELECT * FROM scrim_auto_schedules 
+                        WHERE is_active = TRUE
+                        ORDER BY guild_id, day_of_week, scrim_time ASC
+                    '''
+                    params = ()
+                
+                async with db.execute(query, params) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    return [dict(zip(columns, row)) for row in results]
+        except Exception as e:
+            print(f"❌ 활성 스케줄 조회 실패: {e}")
+            return []
+
+
+    async def update_schedule_last_created(self, schedule_id: int, date_str: str) -> bool:
+        """스케줄의 마지막 생성 날짜 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_auto_schedules 
+                    SET last_created_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (date_str, schedule_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 마지막 생성 날짜 업데이트 실패: {e}")
+            return False
+
+
+    async def toggle_schedule_status(self, schedule_id: int, is_active: bool) -> bool:
+        """스케줄 활성화/비활성화 토글"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_auto_schedules 
+                    SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (is_active, schedule_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 스케줄 상태 변경 실패: {e}")
+            return False
+
+
+    async def delete_auto_schedule(self, schedule_id: int, guild_id: str) -> bool:
+        """자동 스케줄 삭제"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    DELETE FROM scrim_auto_schedules 
+                    WHERE id = ? AND guild_id = ?
+                ''', (schedule_id, guild_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"❌ 스케줄 삭제 실패: {e}")
+            return False
+
+
+    async def get_schedule_by_id(self, schedule_id: int) -> Optional[Dict]:
+        """ID로 스케줄 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_auto_schedules WHERE id = ?
+                ''', (schedule_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    if result:
+                        columns = [description[0] for description in cursor.description]
+                        return dict(zip(columns, result))
+                    return None
+        except Exception as e:
+            print(f"❌ 스케줄 조회 실패: {e}")
             return None

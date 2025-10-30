@@ -1283,7 +1283,750 @@ class RecruitmentView(discord.ui.View):
         bar = "🟢" * joined_bars + "🟡" * late_join_bars + "🔴" * declined_bars
         
         return f"📊 `{bar}` ({total}명 응답)"
+
+class AutoScrimSetupModal(discord.ui.Modal):
+    """정기 내전 설정을 위한 Modal"""
     
+    def __init__(self, bot, channel_id: str):
+        super().__init__(title="🤖 정기 내전 자동 스케줄 설정")
+        self.bot = bot
+        self.channel_id = channel_id
+        
+        # 스케줄 이름
+        self.schedule_name_input = discord.ui.TextInput(
+            label="스케줄 이름",
+            placeholder="예: 금요정기내전, 주말내전",
+            required=True,
+            max_length=50
+        )
+        self.add_item(self.schedule_name_input)
+        
+        # 모집 제목
+        self.title_input = discord.ui.TextInput(
+            label="모집 제목",
+            placeholder="예: 금요일 정기 내전, 주말 내전",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.title_input)
+        
+        # 모집 설명
+        self.description_input = discord.ui.TextInput(
+            label="모집 설명 (선택)",
+            placeholder="예: 매주 금요일 밤 9시 정기 내전입니다!",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=500
+        )
+        self.add_item(self.description_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Modal 제출 시 요일/시간 선택 단계로 진행"""
+        
+        schedule_name = self.schedule_name_input.value
+        title = self.title_input.value
+        description = self.description_input.value or f"{title} 참가자를 모집합니다!"
+        
+        # 중복 이름 체크
+        guild_id = str(interaction.guild_id)
+        existing_schedules = await self.bot.db_manager.get_auto_schedules(guild_id)
+        
+        if any(s['schedule_name'] == schedule_name for s in existing_schedules):
+            await interaction.response.send_message(
+                f"❌ 이미 **{schedule_name}** 이름의 스케줄이 존재합니다.\n"
+                f"다른 이름을 사용해주세요.",
+                ephemeral=True
+            )
+            return
+        
+        # 선택 View 생성
+        view = AutoScrimConfigView(
+            self.bot,
+            self.channel_id,
+            schedule_name,
+            title,
+            description
+        )
+        
+        await interaction.response.send_message(
+            "📅 **정기 내전 설정**\n아래에서 내전 요일, 시간, 마감시간을 선택해주세요:",
+            view=view,
+            ephemeral=True
+        )
+
+class AutoScrimConfigView(discord.ui.View):
+    """정기 내전 설정을 위한 View (요일/시간/마감 선택)"""
+    
+    def __init__(self, bot, channel_id: str, schedule_name: str, title: str, description: str):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.channel_id = channel_id
+        self.schedule_name = schedule_name
+        self.title = title
+        self.description = description
+        
+        self.selected_weekday = None
+        self.selected_time = None
+        self.selected_post_timing = None  # 🆕
+        self.selected_recurrence = None  # 🆕
+        self.selected_deadline = None
+        self.reminder_enabled = False  # 🆕
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        """UI 초기 설정"""
+        # 1. 요일 선택
+        self.weekday_select = discord.ui.Select(
+            placeholder="📅 내전 요일을 선택하세요",
+            options=self._generate_weekday_options(),
+            custom_id="weekday_select",
+            row=0
+        )
+        self.weekday_select.callback = self.weekday_callback
+        self.add_item(self.weekday_select)
+        
+        # 2. 시간 선택 (비활성)
+        self.time_select = discord.ui.Select(
+            placeholder="⏰ 먼저 요일을 선택하세요",
+            options=[discord.SelectOption(label="요일을 먼저 선택하세요", value="placeholder")],
+            disabled=True,
+            custom_id="time_select",
+            row=1
+        )
+        self.time_select.callback = self.time_callback
+        self.add_item(self.time_select)
+        
+        # 3. 🆕 공지 등록 시점 (비활성)
+        self.post_timing_select = discord.ui.Select(
+            placeholder="📢 먼저 시간을 선택하세요",
+            options=[discord.SelectOption(label="시간을 먼저 선택하세요", value="placeholder")],
+            disabled=True,
+            custom_id="post_timing_select",
+            row=2
+        )
+        self.post_timing_select.callback = self.post_timing_callback
+        self.add_item(self.post_timing_select)
+        
+        # 4. 🆕 반복 주기 (비활성)
+        self.recurrence_select = discord.ui.Select(
+            placeholder="🔁 먼저 등록 시점을 선택하세요",
+            options=[discord.SelectOption(label="등록 시점을 먼저 선택하세요", value="placeholder")],
+            disabled=True,
+            custom_id="recurrence_select",
+            row=3
+        )
+        self.recurrence_select.callback = self.recurrence_callback
+        self.add_item(self.recurrence_select)
+        
+        # 5. 마감시간 선택 (비활성)
+        self.deadline_select = discord.ui.Select(
+            placeholder="⏰ 먼저 반복 주기를 선택하세요",
+            options=[discord.SelectOption(label="반복 주기를 먼저 선택하세요", value="placeholder")],
+            disabled=True,
+            custom_id="deadline_select",
+            row=4
+        )
+        self.deadline_select.callback = self.deadline_callback
+        self.add_item(self.deadline_select)
+    
+    def _generate_weekday_options(self) -> list:
+        """요일 옵션 생성"""
+        weekdays = [
+            ("월요일", 0, "🌙"),
+            ("화요일", 1, "🔥"),
+            ("수요일", 2, "💧"),
+            ("목요일", 3, "🌳"),
+            ("금요일", 4, "🎉"),
+            ("토요일", 5, "🌈"),
+            ("일요일", 6, "☀️")
+        ]
+        
+        return [
+            discord.SelectOption(
+                label=name,
+                value=str(value),
+                emoji=emoji,
+                description=f"매주 {name}마다 자동 등록"
+            )
+            for name, value, emoji in weekdays
+        ]
+    
+    def _generate_time_options(self) -> list:
+        """시간 옵션 생성"""
+        times = []
+        
+        for hour in range(17, 24):
+            times.append(
+                discord.SelectOption(
+                    label=f"{hour:02d}:00",
+                    value=f"{hour:02d}:00",
+                    emoji="🌙"
+                )
+            )
+            times.append(
+                discord.SelectOption(
+                    label=f"{hour:02d}:30",
+                    value=f"{hour:02d}:30",
+                    emoji="🌙"
+                )
+            )
+        
+        for hour in range(0, 3):
+            times.append(
+                discord.SelectOption(
+                    label=f"{hour:02d}:00",
+                    value=f"{hour:02d}:00",
+                    emoji="🌃"
+                )
+            )
+        
+        times.append(
+            discord.SelectOption(
+                label="🛠️ 직접 입력하기",
+                value="custom_time",
+                emoji="⏰"
+            )
+        )
+        
+        return times[:25]
+    
+    def _generate_post_timing_options(self) -> list:
+        """공지 등록 시점 옵션"""
+        return [
+            discord.SelectOption(
+                label="내전 당일 (오전 6시)",
+                value="0",
+                emoji="📅",
+                description="내전 당일 아침에 공지 등록"
+            ),
+            discord.SelectOption(
+                label="내전 1일 전 (오전 6시)",
+                value="1",
+                emoji="📅",
+                description="하루 전에 미리 공지"
+            ),
+            discord.SelectOption(
+                label="내전 2일 전 (오전 6시)",
+                value="2",
+                emoji="📅",
+                description="이틀 전에 미리 공지"
+            ),
+            discord.SelectOption(
+                label="내전 3일 전 (오전 6시)",
+                value="3",
+                emoji="📅",
+                description="3일 전에 미리 공지"
+            ),
+            discord.SelectOption(
+                label="내전 4일 전 (오전 6시)",
+                value="4",
+                emoji="📅",
+                description="4일 전에 미리 공지"
+            ),
+            discord.SelectOption(
+                label="내전 5일 전 (오전 6시)",
+                value="5",
+                emoji="📅",
+                description="5일 전에 미리 공지"
+            )
+        ]
+    
+    def _generate_recurrence_options(self) -> list:
+        """반복 주기 옵션"""
+        return [
+            discord.SelectOption(
+                label="매주",
+                value="1",
+                emoji="🔁",
+                description="매주 반복"
+            ),
+            discord.SelectOption(
+                label="격주 (2주마다)",
+                value="2",
+                emoji="🔁",
+                description="2주에 한 번씩"
+            ),
+            discord.SelectOption(
+                label="3주마다",
+                value="3",
+                emoji="🔁",
+                description="3주에 한 번씩"
+            ),
+            discord.SelectOption(
+                label="매달 (4주마다)",
+                value="4",
+                emoji="📅",
+                description="한 달에 한 번씩 (월례전)"
+            )
+        ]
+    
+    def _generate_deadline_options(self) -> list:
+        """마감시간 옵션 생성"""
+        return [
+            discord.SelectOption(
+                label="⚡ 내전 10분 전", 
+                value="10min_before", 
+                emoji="🔥"
+            ),
+            discord.SelectOption(
+                label="⚡ 내전 30분 전", 
+                value="30min_before", 
+                emoji="🔥"
+            ),
+            discord.SelectOption(
+                label="내전 1시간 전", 
+                value="1hour_before", 
+                emoji="⏰"
+            ),
+            discord.SelectOption(
+                label="내전 3시간 전", 
+                value="3hour_before", 
+                emoji="⏰"
+            ),
+            discord.SelectOption(
+                label="내전 6시간 전", 
+                value="6hour_before", 
+                emoji="⏰"
+            ),
+            discord.SelectOption(
+                label="내전 하루 전", 
+                value="1day_before", 
+                emoji="⏰"
+            ),
+            discord.SelectOption(
+                label="내전 당일 오후 5시", 
+                value="same_day_5pm", 
+                emoji="🕔"
+            ),
+            discord.SelectOption(
+                label="내전 당일 오후 6시", 
+                value="same_day_6pm", 
+                emoji="🕕"
+            ),
+        ]
+    
+    async def weekday_callback(self, interaction: discord.Interaction):
+        """요일 선택 콜백"""
+        self.selected_weekday = int(self.weekday_select.values[0])
+        
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        # 시간 선택 활성화
+        self.time_select.placeholder = "⏰ 내전 시간을 선택하세요"
+        self.time_select.options = self._generate_time_options()
+        self.time_select.disabled = False
+        
+        await interaction.response.edit_message(
+            content=f"✅ **{weekday_names[self.selected_weekday]}** 선택됨\n다음: 내전 시간 선택",
+            view=self
+        )
+    
+    async def time_callback(self, interaction: discord.Interaction):
+        """시간 선택 콜백"""
+        time_value = self.time_select.values[0]
+        
+        if time_value == "custom_time":
+            modal = CustomAutoScrimTimeModal(self)
+            await interaction.response.send_modal(modal)
+            return
+        
+        self.selected_time = time_value
+        
+        # 🆕 공지 등록 시점 활성화
+        self.post_timing_select.placeholder = "📢 공지 등록 시점을 선택하세요"
+        self.post_timing_select.options = self._generate_post_timing_options()
+        self.post_timing_select.disabled = False
+        
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        await interaction.response.edit_message(
+            content=f"✅ **{weekday_names[self.selected_weekday]} {self.selected_time}** 선택됨\n"
+                   f"다음: 공지 등록 시점 선택",
+            view=self
+        )
+    
+    async def post_timing_callback(self, interaction: discord.Interaction):
+        """🆕 공지 등록 시점 선택"""
+        self.selected_post_timing = int(self.post_timing_select.values[0])
+        
+        # 반복 주기 활성화
+        self.recurrence_select.placeholder = "🔁 반복 주기를 선택하세요"
+        self.recurrence_select.options = self._generate_recurrence_options()
+        self.recurrence_select.disabled = False
+        
+        timing_text = {
+            0: "내전 당일",
+            1: "내전 1일 전",
+            2: "내전 2일 전",
+            3: "내전 3일 전",
+            4: "내전 4일 전",
+            5: "내전 5일 전"
+        }
+        
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        await interaction.response.edit_message(
+            content=f"✅ **{weekday_names[self.selected_weekday]} {self.selected_time}**\n"
+                   f"✅ **{timing_text[self.selected_post_timing]} 오전 6시** 공지 등록\n"
+                   f"다음: 반복 주기 선택",
+            view=self
+        )
+    
+    async def recurrence_callback(self, interaction: discord.Interaction):
+        """🆕 반복 주기 선택"""
+        self.selected_recurrence = int(self.recurrence_select.values[0])
+        
+        # 마감시간 활성화
+        self.deadline_select.placeholder = "⏰ 모집 마감시간을 선택하세요"
+        self.deadline_select.options = self._generate_deadline_options()
+        self.deadline_select.disabled = False
+        
+        recurrence_text = {1: "매주", 2: "격주"}
+        timing_text = {
+            0: "내전 당일",
+            1: "내전 1일 전",
+            2: "내전 2일 전",
+            3: "내전 3일 전",
+            4: "내전 4일 전", 
+            5: "내전 5일 전", 
+        }
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        await interaction.response.edit_message(
+            content=f"✅ **{recurrence_text[self.selected_recurrence]} {weekday_names[self.selected_weekday]} {self.selected_time}**\n"
+                   f"✅ **{timing_text[self.selected_post_timing]} 오전 6시** 공지 등록\n"
+                   f"다음: 모집 마감시간 선택",
+            view=self
+        )
+    
+    async def deadline_callback(self, interaction: discord.Interaction):
+        """마감시간 선택 + 🆕 미응답자 독촉 버튼 추가"""
+        self.selected_deadline = self.deadline_select.values[0]
+        
+        # 🆕 미응답자 독촉 버튼 추가
+        self.clear_items()
+        
+        # 미응답자 독촉 토글 버튼
+        reminder_button = discord.ui.Button(
+            label="미응답자 독촉 알림: OFF",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔔",
+            custom_id="reminder_toggle"
+        )
+        reminder_button.callback = self.reminder_toggle_callback
+        self.add_item(reminder_button)
+        
+        # 등록 버튼
+        register_button = discord.ui.Button(
+            label="등록하기",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id="register_button"
+        )
+        register_button.callback = self.register_callback
+        self.add_item(register_button)
+        
+        deadline_map = {
+            "10min_before": "내전 10분 전",
+            "30min_before": "내전 30분 전",
+            "1hour_before": "내전 1시간 전",
+            "3hour_before": "내전 3시간 전",
+            "6hour_before": "내전 6시간 전",
+            "1day_before": "내전 하루 전",
+            "same_day_5pm": "내전 당일 오후 5시",
+            "same_day_6pm": "내전 당일 오후 6시"
+        }
+        
+        recurrence_text = {1: "매주", 2: "격주"}
+        timing_text = {
+            0: "내전 당일",
+            1: "내전 1일 전",
+            2: "내전 2일 전",
+            3: "내전 3일 전",
+            4: "내전 4일 전",
+            5: "내전 5일 전"
+        }
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        await interaction.response.edit_message(
+            content=f"📋 **설정 요약**\n"
+                   f"━━━━━━━━━━━━━━━\n"
+                   f"✅ **{recurrence_text[self.selected_recurrence]} {weekday_names[self.selected_weekday]} {self.selected_time}**\n"
+                   f"✅ **{timing_text[self.selected_post_timing]} 오전 6시** 공지 등록\n"
+                   f"✅ **{deadline_map.get(self.selected_deadline)}** 모집 마감\n"
+                   f"━━━━━━━━━━━━━━━\n\n"
+                   f"💡 **미응답자 독촉 알림**을 활성화하면\n"
+                   f"마감 5시간 전, 아직 응답 안한 사람들에게만 DM을 발송합니다.\n\n"
+                   f"설정을 완료하려면 **등록하기** 버튼을 눌러주세요!",
+            view=self
+        )
+    
+    async def reminder_toggle_callback(self, interaction: discord.Interaction):
+        """🆕 미응답자 독촉 토글"""
+        self.reminder_enabled = not self.reminder_enabled
+        
+        # 버튼 텍스트 업데이트
+        for item in self.children:
+            if item.custom_id == "reminder_toggle":
+                if self.reminder_enabled:
+                    item.label = "미응답자 독촉 알림: ON"
+                    item.style = discord.ButtonStyle.success
+                else:
+                    item.label = "미응답자 독촉 알림: OFF"
+                    item.style = discord.ButtonStyle.secondary
+        
+        deadline_map = {
+            "10min_before": "내전 10분 전",
+            "30min_before": "내전 30분 전",
+            "1hour_before": "내전 1시간 전",
+            "3hour_before": "내전 3시간 전",
+            "6hour_before": "내전 6시간 전",
+            "1day_before": "내전 하루 전",
+            "same_day_5pm": "내전 당일 오후 5시",
+            "same_day_6pm": "내전 당일 오후 6시"
+        }
+        
+        recurrence_text = {1: "매주", 2: "격주"}
+        timing_text = {
+            0: "내전 당일",
+            1: "내전 1일 전",
+            2: "내전 2일 전",
+            3: "내전 3일 전",
+            4: "내전 4일 전", 
+            5: "내전 5일 전",
+        }
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        reminder_status = "🔔 **활성화** (마감 5시간 전 미응답자에게 DM)" if self.reminder_enabled else "🔕 비활성화"
+        
+        await interaction.response.edit_message(
+            content=f"📋 **설정 요약**\n"
+                   f"━━━━━━━━━━━━━━━\n"
+                   f"✅ **{recurrence_text[self.selected_recurrence]} {weekday_names[self.selected_weekday]} {self.selected_time}**\n"
+                   f"✅ **{timing_text[self.selected_post_timing]} 오전 6시** 공지 등록\n"
+                   f"✅ **{deadline_map.get(self.selected_deadline)}** 모집 마감\n"
+                   f"✅ **미응답자 독촉**: {reminder_status}\n"
+                   f"━━━━━━━━━━━━━━━\n\n"
+                   f"설정을 완료하려면 **등록하기** 버튼을 눌러주세요!",
+            view=self
+        )
+    
+    async def register_callback(self, interaction: discord.Interaction):
+        """최종 등록 처리"""
+        await interaction.response.defer()
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # DB에 저장
+            success = await self.bot.db_manager.create_auto_schedule(
+                guild_id=guild_id,
+                schedule_name=self.schedule_name,
+                day_of_week=self.selected_weekday,
+                scrim_time=self.selected_time,
+                recruitment_title=self.title,
+                recruitment_description=self.description,
+                deadline_type="relative",
+                deadline_value=self.selected_deadline,
+                channel_id=self.channel_id,
+                send_dm=True,
+                created_by=str(interaction.user.id),
+                post_days_before=self.selected_post_timing,  # 🆕
+                recurrence_interval=self.selected_recurrence,  # 🆕
+                reminder_enabled=self.reminder_enabled,  # 🆕
+                reminder_hours_before=5  # 🆕 고정값
+            )
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 스케줄 등록 중 오류가 발생했습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 성공 임베드
+            embed = self._create_success_embed()
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # View 비활성화
+            for item in self.children:
+                item.disabled = True
+            
+            await interaction.edit_original_response(
+                content="✅ 등록이 완료되었습니다!",
+                view=self
+            )
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(
+                f"❌ 등록 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+    
+    def _create_success_embed(self) -> discord.Embed:
+        """성공 임베드 생성"""
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        recurrence_text = {1: "매주", 2: "격주"}
+        timing_text = {
+            0: "내전 당일",
+            1: "내전 1일 전",
+            2: "내전 2일 전",
+            3: "내전 3일 전",
+            4: "내전 4일 전", 
+            5: "내전 5일 전"
+        }
+        deadline_map = {
+            "10min_before": "내전 10분 전",
+            "30min_before": "내전 30분 전",
+            "1hour_before": "내전 1시간 전",
+            "3hour_before": "내전 3시간 전",
+            "6hour_before": "내전 6시간 전",
+            "1day_before": "내전 하루 전",
+            "same_day_5pm": "내전 당일 오후 5시",
+            "same_day_6pm": "내전 당일 오후 6시"
+        }
+        
+        embed = discord.Embed(
+            title="✅ 정기 내전 자동 스케줄 등록 완료",
+            description=f"**{self.schedule_name}** 스케줄이 성공적으로 등록되었습니다!",
+            color=0x00ff88,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="📅 스케줄 정보",
+            value=f"**{recurrence_text[self.selected_recurrence]} {weekday_names[self.selected_weekday]} {self.selected_time}**",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📢 공지 등록",
+            value=f"{timing_text[self.selected_post_timing]} 오전 6시",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⏰ 모집 마감",
+            value=deadline_map.get(self.selected_deadline),
+            inline=True
+        )
+        
+        if self.reminder_enabled:
+            embed.add_field(
+                name="🔔 미응답자 독촉",
+                value="마감 5시간 전 활성화",
+                inline=True
+            )
+        
+        channel = self.bot.get_channel(int(self.channel_id))
+        embed.add_field(
+            name="📍 공지 채널",
+            value=channel.mention if channel else f"<#{self.channel_id}>",
+            inline=False
+        )
+        
+        # 다음 실행 날짜
+        next_date = self._calculate_next_post_date()
+        embed.add_field(
+            name="🚀 다음 자동 등록",
+            value=f"{next_date.strftime('%Y년 %m월 %d일 (%A)')} 오전 6시경",
+            inline=False
+        )
+        
+        embed.set_footer(text="정기 내전 자동 스케줄 | /정기내전목록으로 확인")
+        
+        return embed
+    
+    def _calculate_next_post_date(self) -> datetime:
+        """다음 공지 등록 날짜 계산"""
+        today = datetime.now()
+        days_ahead = self.selected_weekday - today.weekday()
+        
+        if days_ahead <= 0:
+            days_ahead += 7
+        
+        next_scrim_date = today + timedelta(days=days_ahead)
+        next_post_date = next_scrim_date - timedelta(days=self.selected_post_timing)
+        
+        return next_post_date.replace(hour=6, minute=0, second=0, microsecond=0)
+    
+class CustomAutoScrimTimeModal(discord.ui.Modal):
+    """정기 내전 커스텀 시간 입력 Modal"""
+    
+    def __init__(self, parent_view):
+        super().__init__(title="⏰ 커스텀 시간 입력")
+        self.parent_view = parent_view
+        
+        self.time_input = discord.ui.TextInput(
+            label="시간 입력 (24시간 형식)",
+            placeholder="예: 14:30, 09:15, 21:45",
+            required=True,
+            max_length=5
+        )
+        self.add_item(self.time_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """시간 입력 처리"""
+        time_str = self.time_input.value.strip()
+        
+        # 시간 형식 검증
+        if not self._validate_time_format(time_str):
+            await interaction.response.send_message(
+                "❌ 올바른 시간 형식이 아닙니다.\n"
+                "24시간 형식으로 입력해주세요. (예: 14:30, 09:15, 21:45)",
+                ephemeral=True
+            )
+            return
+        
+        self.parent_view.selected_time = time_str
+        
+        # 마감시간 선택 드롭다운 활성화
+        self.parent_view.deadline_select.placeholder = "⏰ 모집 마감시간을 선택하세요"
+        self.parent_view.deadline_select.options = self.parent_view._generate_deadline_options()
+        self.parent_view.deadline_select.disabled = False
+        
+        weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+        
+        await interaction.response.edit_message(
+            content=f"✅ 선택된 요일: **매주 {weekday_names[self.parent_view.selected_weekday]}**\n"
+                   f"✅ 선택된 시간: **{time_str}** ({self._format_time_display(time_str)})\n"
+                   f"이제 모집 마감시간을 선택해주세요:",
+            view=self.parent_view
+        )
+    
+    def _validate_time_format(self, time_str: str) -> bool:
+        """시간 형식 검증"""
+        import re
+        pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        if not re.match(pattern, time_str):
+            return False
+        
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except ValueError:
+            return False
+    
+    def _format_time_display(self, time_str: str) -> str:
+        """시간 표시 포맷"""
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            
+            if hour == 0:
+                return f"자정"
+            elif hour < 12:
+                return f"오전 {hour}시 {minute:02d}분"
+            elif hour == 12:
+                return f"정오" if minute == 0 else f"오후 12시 {minute:02d}분"
+            else:
+                return f"오후 {hour-12}시 {minute:02d}분"
+        except:
+            return time_str
+
 class ScrimRecruitmentCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1360,6 +2103,334 @@ class ScrimRecruitmentCommands(commands.Cog):
                 f"❌ 채널 설정 중 오류가 발생했습니다: {str(e)}",
                 ephemeral=True
             )
+
+    @app_commands.command(
+        name="정기내전설정", 
+        description="[관리자] 매주 자동으로 등록되는 정기 내전을 설정합니다"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def setup_auto_scrim(self, interaction: discord.Interaction):
+        """정기 내전 자동 등록 설정 - UX 개선"""
+        
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+                ephemeral=True
+            )
+            return
+        
+        # 채널 확인 먼저
+        guild_id = str(interaction.guild_id)
+        channel_id = await self.bot.db_manager.get_recruitment_channel(guild_id)
+        
+        if not channel_id:
+            await interaction.response.send_message(
+                "❌ 먼저 `/내전공지채널설정` 명령어로 공지 채널을 설정해주세요.",
+                ephemeral=True
+            )
+            return
+        
+        # Modal 표시
+        modal = AutoScrimSetupModal(self.bot, channel_id)
+        await interaction.response.send_modal(modal)
+
+    @app_commands.command(
+        name="정기내전목록",
+        description="[관리자] 등록된 정기 내전 스케줄 목록을 확인합니다"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def list_auto_scrims(self, interaction: discord.Interaction):
+        """정기 내전 목록 조회"""
+        
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            schedules = await self.bot.db_manager.get_auto_schedules(guild_id)
+            
+            if not schedules:
+                await interaction.followup.send(
+                    "ℹ️ 등록된 정기 내전 스케줄이 없습니다.\n"
+                    "`/정기내전설정` 명령어로 스케줄을 등록해보세요!",
+                    ephemeral=True
+                )
+                return
+            
+            embed = discord.Embed(
+                title="📋 정기 내전 스케줄 목록",
+                description=f"총 {len(schedules)}개의 스케줄이 등록되어 있습니다.",
+                color=0x0099ff,
+                timestamp=datetime.now()
+            )
+            
+            weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+            
+            for schedule in schedules:
+                status_emoji = "🟢" if schedule['is_active'] else "🔴"
+                weekday = weekday_names[schedule['day_of_week']]
+                
+                value_text = (
+                    f"**요일**: {weekday}\n"
+                    f"**시간**: {schedule['scrim_time']}\n"
+                    f"**채널**: <#{schedule['channel_id']}>\n"
+                    f"**상태**: {status_emoji} {'활성' if schedule['is_active'] else '비활성'}\n"
+                    f"**마지막 생성**: {schedule['last_created_date'] or '없음'}\n"
+                    f"**ID**: `{schedule['id']}`"
+                )
+                
+                embed.add_field(
+                    name=f"{status_emoji} {schedule['schedule_name']}",
+                    value=value_text,
+                    inline=False
+                )
+            
+            embed.set_footer(text="스케줄 ID는 수정/삭제 시 필요합니다")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 스케줄 목록 조회 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    @app_commands.command(
+        name="정기내전삭제",
+        description="[관리자] 등록된 정기 내전 스케줄을 삭제합니다"
+    )
+    @app_commands.describe(
+        스케줄id="삭제할 스케줄의 ID (/정기내전목록에서 확인)"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def delete_auto_scrim(
+        self,
+        interaction: discord.Interaction,
+        스케줄id: int
+    ):
+        """정기 내전 삭제"""
+        
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # 스케줄 존재 확인
+            schedule = await self.bot.db_manager.get_schedule_by_id(스케줄id)
+            
+            if not schedule:
+                await interaction.followup.send(
+                    f"❌ ID가 `{스케줄id}`인 스케줄을 찾을 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            if schedule['guild_id'] != guild_id:
+                await interaction.followup.send(
+                    "❌ 다른 서버의 스케줄은 삭제할 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 삭제 실행
+            success = await self.bot.db_manager.delete_auto_schedule(스케줄id, guild_id)
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 스케줄 삭제 중 오류가 발생했습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            embed = discord.Embed(
+                title="✅ 정기 내전 스케줄 삭제 완료",
+                description=f"**{schedule['schedule_name']}** 스케줄이 삭제되었습니다.",
+                color=0xff6b6b,
+                timestamp=datetime.now()
+            )
+            
+            weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+            
+            embed.add_field(
+                name="📋 삭제된 스케줄 정보",
+                value=f"**요일**: {weekday_names[schedule['day_of_week']]}\n"
+                    f"**시간**: {schedule['scrim_time']}\n"
+                    f"**제목**: {schedule['recruitment_title']}",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 스케줄 삭제 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    @app_commands.command(
+        name="정기내전토글",
+        description="[관리자] 정기 내전 스케줄을 활성화/비활성화합니다"
+    )
+    @app_commands.describe(
+        스케줄id="토글할 스케줄의 ID (/정기내전목록에서 확인)"
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def toggle_auto_scrim(
+        self,
+        interaction: discord.Interaction,
+        스케줄id: int
+    ):
+        """정기 내전 활성화/비활성화"""
+        
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            guild_id = str(interaction.guild_id)
+            
+            # 스케줄 존재 확인
+            schedule = await self.bot.db_manager.get_schedule_by_id(스케줄id)
+            
+            if not schedule:
+                await interaction.followup.send(
+                    f"❌ ID가 `{스케줄id}`인 스케줄을 찾을 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            if schedule['guild_id'] != guild_id:
+                await interaction.followup.send(
+                    "❌ 다른 서버의 스케줄은 변경할 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 상태 토글
+            new_status = not schedule['is_active']
+            success = await self.bot.db_manager.toggle_schedule_status(스케줄id, new_status)
+            
+            if not success:
+                await interaction.followup.send(
+                    "❌ 스케줄 상태 변경 중 오류가 발생했습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            status_text = "활성화" if new_status else "비활성화"
+            status_emoji = "🟢" if new_status else "🔴"
+            color = 0x00ff88 if new_status else 0x666666
+            
+            embed = discord.Embed(
+                title=f"{status_emoji} 정기 내전 스케줄 {status_text}",
+                description=f"**{schedule['schedule_name']}** 스케줄이 {status_text}되었습니다.",
+                color=color,
+                timestamp=datetime.now()
+            )
+            
+            weekday_names = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일']
+            
+            embed.add_field(
+                name="📋 스케줄 정보",
+                value=f"**요일**: {weekday_names[schedule['day_of_week']]}\n"
+                    f"**시간**: {schedule['scrim_time']}\n"
+                    f"**제목**: {schedule['recruitment_title']}\n"
+                    f"**새 상태**: {status_emoji} {status_text}",
+                inline=False
+            )
+            
+            if new_status:
+                next_date = self._calculate_next_occurrence(
+                    schedule['day_of_week'], 
+                    schedule['scrim_time']
+                )
+                embed.add_field(
+                    name="🚀 다음 자동 등록",
+                    value=next_date.strftime('%Y년 %m월 %d일 (%A) 오전 6시경'),
+                    inline=False
+                )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 스케줄 상태 변경 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    # @app_commands.command(
+    #     name="정기내전테스트",
+    #     description="[관리자] 정기 내전 자동 생성을 즉시 테스트합니다"
+    # )
+    # @app_commands.default_permissions(administrator=True)
+    # async def test_auto_scrim(self, interaction: discord.Interaction):
+    #     """정기 내전 자동 생성 즉시 테스트"""
+        
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+    #             ephemeral=True
+    #         )
+    #         return
+        
+    #     await interaction.response.defer(ephemeral=True)
+        
+    #     try:
+    #         if not self.bot.auto_recruitment_scheduler:
+    #             await interaction.followup.send(
+    #                 "❌ 자동 스케줄러가 초기화되지 않았습니다.",
+    #                 ephemeral=True
+    #             )
+    #             return
+            
+    #         # 수동 트리거
+    #         result = await self.bot.auto_recruitment_scheduler.manual_trigger()
+            
+    #         embed = discord.Embed(
+    #             title="🧪 자동 생성 테스트 완료",
+    #             description="오늘 요일에 해당하는 스케줄을 강제로 실행했습니다.",
+    #             color=0x00ff88,
+    #             timestamp=datetime.now()
+    #         )
+            
+    #         embed.add_field(
+    #             name="📊 결과",
+    #             value=f"상태: {result.get('status', 'unknown')}",
+    #             inline=False
+    #         )
+            
+    #         embed.add_field(
+    #             name="ℹ️ 참고",
+    #             value="• 이미 오늘 생성된 스케줄은 건너뜁니다\n"
+    #                 "• 서버 로그에서 상세 결과를 확인하세요",
+    #             inline=False
+    #         )
+            
+    #         await interaction.followup.send(embed=embed, ephemeral=True)
+            
+    #     except Exception as e:
+    #         await interaction.followup.send(
+    #             f"❌ 테스트 실행 중 오류가 발생했습니다: {str(e)}",
+    #             ephemeral=True
+    #         )
 
     @app_commands.command(name="내전모집현황", description="[관리자] 현재 진행 중인 내전 모집 현황을 확인합니다")
     @app_commands.default_permissions(manage_guild=True)
@@ -1527,89 +2598,89 @@ class ScrimRecruitmentCommands(commands.Cog):
                 ephemeral=True
             )
 
-    @app_commands.command(name="내전모집통계", description="[관리자] 서버의 내전 모집 통계를 확인합니다")
-    @app_commands.default_permissions(manage_guild=True)
-    async def recruitment_statistics(self, interaction: discord.Interaction):
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
+    # @app_commands.command(name="내전모집통계", description="[관리자] 서버의 내전 모집 통계를 확인합니다")
+    # @app_commands.default_permissions(manage_guild=True)
+    # async def recruitment_statistics(self, interaction: discord.Interaction):
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+    #         )
+    #         return
 
-        await interaction.response.defer(ephemeral=True)
+    #     await interaction.response.defer(ephemeral=True)
 
-        try:
-            guild_id = str(interaction.guild_id)
+    #     try:
+    #         guild_id = str(interaction.guild_id)
             
-            # 1. 기본 통계 조회
-            stats = await self.bot.db_manager.get_recruitment_stats(guild_id)
-            if not stats:
-                await interaction.followup.send(
-                    "❌ 통계 데이터를 불러올 수 없습니다.", ephemeral=True
-                )
-                return
+    #         # 1. 기본 통계 조회
+    #         stats = await self.bot.db_manager.get_recruitment_stats(guild_id)
+    #         if not stats:
+    #             await interaction.followup.send(
+    #                 "❌ 통계 데이터를 불러올 수 없습니다.", ephemeral=True
+    #             )
+    #             return
 
-            # 2. 시간대별 인기도 조회
-            time_stats = await self.bot.db_manager.get_popular_participation_times(guild_id)
+    #         # 2. 시간대별 인기도 조회
+    #         time_stats = await self.bot.db_manager.get_popular_participation_times(guild_id)
 
-            # 3. 임베드 생성
-            embed = discord.Embed(
-                title="📊 내전 모집 통계",
-                description=f"**{interaction.guild.name}** 서버의 내전 모집 현황",
-                color=0x0099ff,
-                timestamp=datetime.now()
-            )
+    #         # 3. 임베드 생성
+    #         embed = discord.Embed(
+    #             title="📊 내전 모집 통계",
+    #             description=f"**{interaction.guild.name}** 서버의 내전 모집 현황",
+    #             color=0x0099ff,
+    #             timestamp=datetime.now()
+    #         )
 
-            # 기본 통계
-            embed.add_field(
-                name="📋 모집 현황",
-                value=f"📊 **전체 모집**: {stats.get('total_recruitments', 0)}건\n"
-                      f"🟢 **진행 중**: {stats.get('active_recruitments', 0)}건\n"
-                      f"✅ **완료됨**: {stats.get('closed_recruitments', 0)}건\n"
-                      f"❌ **취소됨**: {stats.get('cancelled_recruitments', 0)}건",
-                inline=True
-            )
+    #         # 기본 통계
+    #         embed.add_field(
+    #             name="📋 모집 현황",
+    #             value=f"📊 **전체 모집**: {stats.get('total_recruitments', 0)}건\n"
+    #                   f"🟢 **진행 중**: {stats.get('active_recruitments', 0)}건\n"
+    #                   f"✅ **완료됨**: {stats.get('closed_recruitments', 0)}건\n"
+    #                   f"❌ **취소됨**: {stats.get('cancelled_recruitments', 0)}건",
+    #             inline=True
+    #         )
 
-            embed.add_field(
-                name="👥 참가자 통계",
-                value=f"👤 **고유 참가자**: {stats.get('unique_participants', 0)}명\n"
-                      f"📈 **평균 참가률**: "
-                      f"{round((stats.get('unique_participants', 0) / max(stats.get('total_recruitments', 1), 1)) * 100, 1)}%",
-                inline=True
-            )
+    #         embed.add_field(
+    #             name="👥 참가자 통계",
+    #             value=f"👤 **고유 참가자**: {stats.get('unique_participants', 0)}명\n"
+    #                   f"📈 **평균 참가률**: "
+    #                   f"{round((stats.get('unique_participants', 0) / max(stats.get('total_recruitments', 1), 1)) * 100, 1)}%",
+    #             inline=True
+    #         )
 
-            # 시간대별 통계
-            if time_stats:
-                time_analysis = []
-                for period, data in sorted(time_stats.items()):
-                    time_analysis.append(
-                        f"**{period}**: 평균 {data['avg_participants']}명 "
-                        f"({data['recruitment_count']}회)"
-                    )
+    #         # 시간대별 통계
+    #         if time_stats:
+    #             time_analysis = []
+    #             for period, data in sorted(time_stats.items()):
+    #                 time_analysis.append(
+    #                     f"**{period}**: 평균 {data['avg_participants']}명 "
+    #                     f"({data['recruitment_count']}회)"
+    #                 )
                 
-                embed.add_field(
-                    name="🕐 시간대별 인기도",
-                    value='\n'.join(time_analysis) if time_analysis else "데이터 없음",
-                    inline=False
-                )
+    #             embed.add_field(
+    #                 name="🕐 시간대별 인기도",
+    #                 value='\n'.join(time_analysis) if time_analysis else "데이터 없음",
+    #                 inline=False
+    #             )
 
-            # 최근 활동
-            recent_recruitments = await self.bot.db_manager.get_active_recruitments(guild_id)
-            if recent_recruitments:
-                embed.add_field(
-                    name="🚀 현재 활성 모집",
-                    value=f"{len(recent_recruitments)}건의 모집이 진행 중입니다.",
-                    inline=True
-                )
+    #         # 최근 활동
+    #         recent_recruitments = await self.bot.db_manager.get_active_recruitments(guild_id)
+    #         if recent_recruitments:
+    #             embed.add_field(
+    #                 name="🚀 현재 활성 모집",
+    #                 value=f"{len(recent_recruitments)}건의 모집이 진행 중입니다.",
+    #                 inline=True
+    #             )
 
-            embed.set_footer(text="RallyUp Bot | 내전 모집 통계")
+    #         embed.set_footer(text="RallyUp Bot | 내전 모집 통계")
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+    #         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ 통계 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
-            )
+    #     except Exception as e:
+    #         await interaction.followup.send(
+    #             f"❌ 통계 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+    #         )
 
     @cancel_recruitment.autocomplete('모집id')
     async def recruitment_id_autocomplete(
@@ -1649,6 +2720,34 @@ class ScrimRecruitmentCommands(commands.Cog):
         except Exception as e:
             print(f"[DEBUG] 모집 ID 자동완성 오류: {e}")
             return []
+
+    def _validate_time_format(self, time_str: str) -> bool:
+        """시간 형식 검증 (HH:MM)"""
+        import re
+        pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        if not re.match(pattern, time_str):
+            return False
+        
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except ValueError:
+            return False
+
+    def _calculate_next_occurrence(self, day_of_week: int, time_str: str) -> datetime:
+        """다음 발생 날짜 계산"""
+        from datetime import datetime, timedelta
+        
+        today = datetime.now()
+        days_ahead = day_of_week - today.weekday()
+        
+        if days_ahead <= 0:  # 이미 지났거나 오늘
+            days_ahead += 7
+        
+        next_date = today + timedelta(days=days_ahead)
+        hour, minute = map(int, time_str.split(':'))
+        
+        return next_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def _parse_datetime(self, date_str: str, time_str: str) -> Optional[datetime]:
         """날짜와 시간 문자열을 datetime 객체로 변환"""

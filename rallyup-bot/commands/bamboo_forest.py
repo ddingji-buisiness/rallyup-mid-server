@@ -450,60 +450,60 @@ class BambooForestCommands(commands.Cog):
                 f"❌ 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
             )
 
-    @app_commands.command(name="대나무숲통계", description="[관리자] 대나무숲 사용 통계를 확인합니다")
-    @app_commands.default_permissions(manage_guild=True)  
-    async def bamboo_stats(self, interaction: discord.Interaction):
-        """관리자 전용: 대나무숲 통계"""
+    # @app_commands.command(name="대나무숲통계", description="[관리자] 대나무숲 사용 통계를 확인합니다")
+    # @app_commands.default_permissions(manage_guild=True)  
+    # async def bamboo_stats(self, interaction: discord.Interaction):
+    #     """관리자 전용: 대나무숲 통계"""
         
-        if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
+    #     if not await self.is_admin(interaction):
+    #         await interaction.response.send_message(
+    #             "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+    #         )
+    #         return
         
-        await interaction.response.defer(ephemeral=True)
+    #     await interaction.response.defer(ephemeral=True)
         
-        try:
-            stats = await self.bot.db_manager.get_bamboo_statistics(str(interaction.guild_id))
+    #     try:
+    #         stats = await self.bot.db_manager.get_bamboo_statistics(str(interaction.guild_id))
             
-            embed = discord.Embed(
-                title="📊 대나무숲 사용 통계",
-                color=0x00ff88,
-                timestamp=datetime.now()
-            )
+    #         embed = discord.Embed(
+    #             title="📊 대나무숲 사용 통계",
+    #             color=0x00ff88,
+    #             timestamp=datetime.now()
+    #         )
             
-            embed.add_field(
-                name="📈 전체 통계",
-                value=f"**총 메시지**: {stats.get('total_messages', 0):,}개\n"
-                      f"**완전 익명**: {stats.get('anonymous_messages', 0):,}개\n"
-                      f"**시간 공개**: {stats.get('timed_messages', 0):,}개\n"
-                      f"**이미 공개됨**: {stats.get('revealed_messages', 0):,}개",
-                inline=False
-            )
+    #         embed.add_field(
+    #             name="📈 전체 통계",
+    #             value=f"**총 메시지**: {stats.get('total_messages', 0):,}개\n"
+    #                   f"**완전 익명**: {stats.get('anonymous_messages', 0):,}개\n"
+    #                   f"**시간 공개**: {stats.get('timed_messages', 0):,}개\n"
+    #                   f"**이미 공개됨**: {stats.get('revealed_messages', 0):,}개",
+    #             inline=False
+    #         )
             
-            embed.add_field(
-                name="📅 최근 활동",
-                value=f"**오늘**: {stats.get('today_messages', 0)}개\n"
-                      f"**이번 주**: {stats.get('week_messages', 0)}개\n"
-                      f"**이번 달**: {stats.get('month_messages', 0)}개",
-                inline=True
-            )
+    #         embed.add_field(
+    #             name="📅 최근 활동",
+    #             value=f"**오늘**: {stats.get('today_messages', 0)}개\n"
+    #                   f"**이번 주**: {stats.get('week_messages', 0)}개\n"
+    #                   f"**이번 달**: {stats.get('month_messages', 0)}개",
+    #             inline=True
+    #         )
             
-            embed.add_field(
-                name="⏰ 대기 중",
-                value=f"**공개 예정**: {stats.get('pending_reveals', 0)}개\n"
-                      f"**다음 공개**: {stats.get('next_reveal', '없음')}",
-                inline=True
-            )
+    #         embed.add_field(
+    #             name="⏰ 대기 중",
+    #             value=f"**공개 예정**: {stats.get('pending_reveals', 0)}개\n"
+    #                   f"**다음 공개**: {stats.get('next_reveal', '없음')}",
+    #             inline=True
+    #         )
             
-            embed.set_footer(text=f"조회자: {interaction.user.display_name}")
+    #         embed.set_footer(text=f"조회자: {interaction.user.display_name}")
             
-            await interaction.followup.send(embed=embed, ephemeral=True)
+    #         await interaction.followup.send(embed=embed, ephemeral=True)
             
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ 통계 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
-            )
+    #     except Exception as e:
+    #         await interaction.followup.send(
+    #             f"❌ 통계 조회 중 오류가 발생했습니다: {str(e)}", ephemeral=True
+    #         )
 
     @app_commands.command(name="대나무숲강제공개", description="[관리자] 시간 공개 메시지를 즉시 공개합니다")
     @app_commands.describe(메시지링크="즉시 공개할 메시지의 링크")
