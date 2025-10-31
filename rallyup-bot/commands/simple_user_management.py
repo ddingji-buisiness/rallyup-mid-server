@@ -1883,12 +1883,7 @@ class SimpleUserManagementCog(commands.Cog):
                 ephemeral=True
             )
 
-    @app_commands.command(name="순위표", description="서버 내 유저 랭킹을 확인합니다")
-    @app_commands.describe(
-        정렬기준="랭킹 정렬 기준",
-        포지션="특정 포지션만 보기 (선택사항)",
-        특정맵="특정 맵에서의 랭킹 (맵 이름 입력)" 
-    )
+    @app_commands.command(name="순위표", description="서버 내 사용자 랭킹을 확인합니다")
     @app_commands.choices(정렬기준=[
         app_commands.Choice(name="승률 기준", value="winrate"),
         app_commands.Choice(name="경기 수 기준", value="games"),
@@ -1988,7 +1983,7 @@ class SimpleUserManagementCog(commands.Cog):
                 display_rankings = list(reversed(display_rankings))
             elif display_range == "around_me":
                 user_rank = await self.bot.db_manager.get_user_server_rank(
-                    str(interaction.user.id), guild_id, position=position_filter  # 포지션 파라미터 추가
+                    str(interaction.user.id), guild_id, position=position_filter
                 )
                 if user_rank and user_rank['rank'] <= len(rankings):
                     idx = user_rank['rank'] - 1  # 0-based index
@@ -2020,26 +2015,29 @@ class SimpleUserManagementCog(commands.Cog):
                 
             embed.description = " | ".join(desc_parts)
             
-            # 순위 표시 (표시 범위에 따라 시작 순위 계산)
+            # 순위 표시 (표시 범위에 따라 순위 계산)
             ranking_text = []
             
-            if display_range == "bottom10" and len(rankings) > 10:
-                # 하위 10명일 경우 실제 순위 계산
-                start_rank = len(rankings) - len(display_rankings) + 1
-            elif display_range == "around_me" and display_rankings:
-                # 내 주변 순위일 경우 시작 순위 계산
-                user_rank_info = await self.bot.db_manager.get_user_server_rank(
-                    str(interaction.user.id), guild_id
-                )
-                if user_rank_info:
-                    start_rank = max(1, user_rank_info['rank'] - 5)
-                else:
-                    start_rank = 1
-            else:
-                start_rank = 1
-            
             for i, user_rank in enumerate(display_rankings):
-                actual_rank = start_rank + i if display_range != "top10" else i + 1
+                # 실제 순위 계산
+                if display_range == "top10":
+                    actual_rank = i + 1
+                elif display_range == "bottom10":
+                    # 하위 10명은 역순이므로 끝에서부터 계산
+                    actual_rank = len(rankings) - i
+                elif display_range == "around_me":
+                    # 내 주변 순위일 경우 시작 순위 계산
+                    user_rank_info = await self.bot.db_manager.get_user_server_rank(
+                        str(interaction.user.id), guild_id, position=position_filter
+                    )
+                    if user_rank_info:
+                        actual_rank = max(1, user_rank_info['rank'] - 5) + i
+                    else:
+                        actual_rank = i + 1
+                elif display_range == "all":
+                    actual_rank = i + 1
+                else:
+                    actual_rank = i + 1
                 
                 # 메달 이모지
                 if display_range == "top10":
@@ -2100,7 +2098,7 @@ class SimpleUserManagementCog(commands.Cog):
             # 본인 순위 표시 (맵별 랭킹이 아니고, "내 주변 순위"가 아닐 때만)
             if not specific_map and not sort_by.endswith('_winrate') and display_range != "around_me":
                 user_rank = await self.bot.db_manager.get_user_server_rank(
-                    str(interaction.user.id), guild_id, position=position_filter  # 포지션 파라미터 추가
+                    str(interaction.user.id), guild_id, position=position_filter
                 )
                 if user_rank:
                     embed.add_field(
