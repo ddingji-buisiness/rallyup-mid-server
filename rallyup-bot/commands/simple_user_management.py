@@ -1890,9 +1890,9 @@ class SimpleUserManagementCog(commands.Cog):
         특정맵="특정 맵에서의 랭킹 (맵 이름 입력)" 
     )
     @app_commands.choices(정렬기준=[
-        app_commands.Choice(name="승률", value="winrate"),
-        app_commands.Choice(name="총 경기수", value="games"),
-        app_commands.Choice(name="승수", value="wins"),
+        app_commands.Choice(name="승률 기준", value="winrate"),
+        app_commands.Choice(name="경기 수 기준", value="games"),
+        app_commands.Choice(name="승리 수 기준", value="wins"),
         app_commands.Choice(name="호위 맵 승률", value="escort_winrate"),
         app_commands.Choice(name="쟁탈 맵 승률", value="control_winrate"),
         app_commands.Choice(name="혼합 맵 승률", value="hybrid_winrate"),
@@ -1906,16 +1906,24 @@ class SimpleUserManagementCog(commands.Cog):
         app_commands.Choice(name="딜러", value="dps"),
         app_commands.Choice(name="힐러", value="support")
     ])
+    @app_commands.choices(표시범위=[
+        app_commands.Choice(name="🏆 상위 10명", value="top10"),
+        app_commands.Choice(name="📍 내 주변 순위", value="around_me"),
+        app_commands.Choice(name="📊 하위 10명", value="bottom10"),
+        app_commands.Choice(name="📋 전체 순위 (1-50위)", value="all")
+    ])
     async def leaderboard(
         self,
         interaction: discord.Interaction,
         정렬기준: app_commands.Choice[str] = None,
         포지션: app_commands.Choice[str] = None,
-        특정맵: str = None 
+        특정맵: str = None,
+        표시범위: app_commands.Choice[str] = None
     ):
         sort_by = 정렬기준.value if 정렬기준 else "winrate"
         position_filter = 포지션.value if 포지션 else "all"
         specific_map = 특정맵 if 특정맵 else None
+        display_range = 표시범위.value if 표시범위 else "top10"
         guild_id = str(interaction.guild_id)
         
         try:
@@ -1966,8 +1974,37 @@ class SimpleUserManagementCog(commands.Cog):
                 )
                 return
             
+            # 표시 범위에 따른 데이터 필터링
+            display_rankings = []
+            range_description = ""
+            
+            if display_range == "top10":
+                display_rankings = rankings[:10]
+                range_description = "상위 10명"
+            elif display_range == "bottom10":
+                display_rankings = rankings[-10:] if len(rankings) > 10 else rankings
+                range_description = f"하위 10명 ({len(rankings)-9}위~{len(rankings)}위)"
+                # 하위권 표시 시 역순으로 정렬 (꼴찌부터 보여주기)
+                display_rankings = list(reversed(display_rankings))
+            elif display_range == "around_me":
+                user_rank = await self.bot.db_manager.get_user_server_rank(
+                    str(interaction.user.id), guild_id, position=position_filter  # 포지션 파라미터 추가
+                )
+                if user_rank and user_rank['rank'] <= len(rankings):
+                    idx = user_rank['rank'] - 1  # 0-based index
+                    start = max(0, idx - 5)
+                    end = min(len(rankings), idx + 6)
+                    display_rankings = rankings[start:end]
+                    range_description = f"내 주변 순위 ({max(start+1, 1)}위~{min(end, len(rankings))}위)"
+                else:
+                    display_rankings = rankings[:10]
+                    range_description = "상위 10명 (본인 랭킹 없음)"
+            elif display_range == "all":
+                display_rankings = rankings  # 최대 50명
+                range_description = f"전체 순위 (1~{len(rankings)}위)"
+            
             embed = discord.Embed(
-                title=ranking_title,
+                title=f"{ranking_title} - {range_description}",
                 color=0xffd700
             )
             
@@ -1983,12 +2020,39 @@ class SimpleUserManagementCog(commands.Cog):
                 
             embed.description = " | ".join(desc_parts)
             
-            # 상위 10명 표시
+            # 순위 표시 (표시 범위에 따라 시작 순위 계산)
             ranking_text = []
-            for i, user_rank in enumerate(rankings[:10], 1):
-                medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            
+            if display_range == "bottom10" and len(rankings) > 10:
+                # 하위 10명일 경우 실제 순위 계산
+                start_rank = len(rankings) - len(display_rankings) + 1
+            elif display_range == "around_me" and display_rankings:
+                # 내 주변 순위일 경우 시작 순위 계산
+                user_rank_info = await self.bot.db_manager.get_user_server_rank(
+                    str(interaction.user.id), guild_id
+                )
+                if user_rank_info:
+                    start_rank = max(1, user_rank_info['rank'] - 5)
+                else:
+                    start_rank = 1
+            else:
+                start_rank = 1
+            
+            for i, user_rank in enumerate(display_rankings):
+                actual_rank = start_rank + i if display_range != "top10" else i + 1
                 
-                # 🆕 맵별 랭킹일 때는 게임수와 승률 표시 방식 변경
+                # 메달 이모지
+                if display_range == "top10":
+                    medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                else:
+                    medal = f"{actual_rank}."
+                
+                # 본인 순위 강조
+                username = user_rank['username']
+                if user_rank['user_id'] == str(interaction.user.id):
+                    username = f"**[YOU] {username}**"
+                
+                # 맵별 랭킹일 때는 게임수와 승률 표시 방식 변경
                 if specific_map or sort_by.endswith('_winrate'):
                     # 맵별 랭킹: 승률 우선 표시
                     value = f"{user_rank['winrate']}%"
@@ -2006,20 +2070,38 @@ class SimpleUserManagementCog(commands.Cog):
                         games_info = f"({user_rank['total_games']}경기)"
                 
                 ranking_text.append(
-                    f"{medal} **{user_rank['username']}** | "
+                    f"{medal} {username} | "
                     f"{user_rank['tier'] or 'N/A'} | "
                     f"{value} {games_info}"
                 )
             
-            embed.add_field(
-                name="📋 순위표",
-                value="\n".join(ranking_text),
-                inline=False
-            )
+            # Embed 필드 길이 체크 (디스코드 제한: 1024자)
+            ranking_text_str = "\n".join(ranking_text)
+            if len(ranking_text_str) > 1024:
+                # 너무 길면 반으로 나눠서 두 개 필드로 표시
+                mid_point = len(display_rankings) // 2
+                embed.add_field(
+                    name="📋 순위표 (1/2)",
+                    value="\n".join(ranking_text[:mid_point]),
+                    inline=False
+                )
+                embed.add_field(
+                    name="📋 순위표 (2/2)",
+                    value="\n".join(ranking_text[mid_point:]),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="📋 순위표",
+                    value=ranking_text_str,
+                    inline=False
+                )
             
-            # 본인 순위 표시 (맵별 랭킹이 아닐 때만)
-            if not specific_map and not sort_by.endswith('_winrate'):
-                user_rank = await self.bot.db_manager.get_user_server_rank(str(interaction.user.id), guild_id)
+            # 본인 순위 표시 (맵별 랭킹이 아니고, "내 주변 순위"가 아닐 때만)
+            if not specific_map and not sort_by.endswith('_winrate') and display_range != "around_me":
+                user_rank = await self.bot.db_manager.get_user_server_rank(
+                    str(interaction.user.id), guild_id, position=position_filter  # 포지션 파라미터 추가
+                )
                 if user_rank:
                     embed.add_field(
                         name="🎯 내 순위",
@@ -2027,7 +2109,12 @@ class SimpleUserManagementCog(commands.Cog):
                         inline=True
                     )
             
-            embed.set_footer(text=f"최소 {min_games_text} 이상 참여한 유저만 표시됩니다")
+            # Footer 메시지 (하위권일 때 격려 메시지)
+            footer_text = f"최소 {min_games_text} 이상 참여한 유저만 표시됩니다"
+            if display_range == "bottom10":
+                footer_text += " | 💪 경기 수를 늘려 순위를 올려보세요!"
+            
+            embed.set_footer(text=footer_text)
             
             await interaction.response.send_message(embed=embed)
             

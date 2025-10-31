@@ -4009,90 +4009,42 @@ class DatabaseManager:
             print(f"최근 경기 조회 실패: {e}")
             return []
 
-    async def get_server_rankings(self, guild_id: str, sort_by: str = 'winrate', 
-                                position: str = 'all', min_games: int = 5) -> List[Dict]:
-        """서버 내 사용자 랭킹 조회"""
+    async def get_user_server_rank(self, user_id: str, guild_id: str, position: str = "all") -> Dict:
+        """특정 사용자의 서버 내 순위 조회 (포지션별 순위 지원)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                # 정렬 기준에 따른 쿼리 구성
-                if sort_by == 'winrate':
-                    order_clause = 'ORDER BY winrate DESC, total_games DESC'
-                elif sort_by == 'games':
-                    order_clause = 'ORDER BY total_games DESC'
-                elif sort_by == 'wins':
-                    order_clause = 'ORDER BY total_wins DESC'
-                else:
-                    order_clause = 'ORDER BY winrate DESC'
+                # 포지션별 게임 수와 승수 컬럼 선택
+                if position == "tank":
+                    games_col = "tank_games"
+                    wins_col = "tank_wins"
+                elif position == "dps":
+                    games_col = "dps_games"
+                    wins_col = "dps_wins"
+                elif position == "support":
+                    games_col = "support_games"
+                    wins_col = "support_wins"
+                else:  # all
+                    games_col = "total_games"
+                    wins_col = "total_wins"
                 
-                # 포지션별 필터링
-                if position != 'all':
-                    position_filter = {
-                        'tank': 'AND tank_games >= ?',
-                        'dps': 'AND dps_games >= ?', 
-                        'support': 'AND support_games >= ?'
-                    }.get(position, '')
-                else:
-                    position_filter = ''
-                
-                query = f'''
-                    SELECT us.user_id, ua.username, us.total_games, us.total_wins,
-                        CASE WHEN us.total_games > 0 
-                                THEN ROUND(us.total_wins * 100.0 / us.total_games, 1)
-                                ELSE 0 END as winrate,
-                        ua.current_season_tier
-                    FROM user_statistics us
-                    JOIN user_applications ua ON us.user_id = ua.user_id AND ua.guild_id = us.guild_id
-                    WHERE us.guild_id = ? AND us.total_games >= ?
-                    {position_filter}
-                    {order_clause}
-                    LIMIT 50
-                '''
-                
-                params = [guild_id, min_games]
-                if position != 'all':
-                    params.append(min_games)
-                
-                async with db.execute(query, params) as cursor:
-                    rows = await cursor.fetchall()
-                    
-                    return [
-                        {
-                            'user_id': row[0],
-                            'username': row[1],
-                            'total_games': row[2],
-                            'wins': row[3],
-                            'winrate': row[4],
-                            'tier': row[5]
-                        }
-                        for row in rows
-                    ]
-                    
-        except Exception as e:
-            print(f"랭킹 조회 실패: {e}")
-            return []
-
-    async def get_user_server_rank(self, user_id: str, guild_id: str) -> Dict:
-        """특정 사용자의 서버 내 순위 조회"""
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
                 # 전체 랭킹에서 해당 사용자 순위 찾기
-                async with db.execute('''
+                async with db.execute(f'''
                     WITH ranked_users AS (
                         SELECT user_id,
                             ROW_NUMBER() OVER (
                                 ORDER BY 
-                                    CASE WHEN total_games > 0 
-                                            THEN total_wins * 100.0 / total_games 
+                                    CASE WHEN {games_col} > 0 
+                                            THEN {wins_col} * 100.0 / {games_col} 
                                             ELSE 0 END DESC,
-                                    total_games DESC
+                                    {games_col} DESC
                             ) as rank
                         FROM user_statistics
-                        WHERE guild_id = ? AND total_games >= 5
+                        WHERE guild_id = ? AND {games_col} >= 5
                     ),
                     user_stats AS (
                         SELECT COUNT(*) as total_users
                         FROM user_statistics
-                        WHERE guild_id = ? AND total_games >= 5
+                        WHERE guild_id = ? AND {games_col} >= 5
                     )
                     SELECT ru.rank, us.total_users
                     FROM ranked_users ru, user_stats us
@@ -4405,7 +4357,7 @@ class DatabaseManager:
 
     async def get_server_rankings(self, guild_id: str, sort_by: str = "winrate", 
                                 position: str = "all", min_games: int = 5) -> List[Dict]:
-        """기존 서버 랭킹 메서드 (맵 타입 정렬 지원 추가)"""
+        """서버 내 사용자 랭킹 조회 (포지션별 데이터 반환 지원)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 # 맵 타입별 정렬인지 확인
@@ -4426,41 +4378,43 @@ class DatabaseManager:
                             guild_id, map_type_map[map_type_name], min_games=3
                         )
                 
-                # 기존 일반 랭킹 로직
-                base_query = '''
+                # 포지션별 게임 수와 승수 컬럼 선택
+                if position == "tank":
+                    games_col = "us.tank_games"
+                    wins_col = "us.tank_wins"
+                elif position == "dps":
+                    games_col = "us.dps_games"
+                    wins_col = "us.dps_wins"
+                elif position == "support":
+                    games_col = "us.support_games"
+                    wins_col = "us.support_wins"
+                else:  # all
+                    games_col = "us.total_games"
+                    wins_col = "us.total_wins"
+                
+                # 기본 쿼리
+                base_query = f'''
                     SELECT 
                         us.user_id,
                         ru.username,
                         ru.current_season_tier,
-                        us.total_games,
-                        us.total_wins,
-                        ROUND(us.total_wins * 100.0 / us.total_games, 1) as winrate
+                        {games_col} as games,
+                        {wins_col} as wins,
+                        ROUND({wins_col} * 100.0 / {games_col}, 1) as winrate
                     FROM user_statistics us
                     LEFT JOIN registered_users ru ON us.user_id = ru.user_id AND us.guild_id = ru.guild_id
-                    WHERE us.guild_id = ? AND us.total_games >= ?
+                    WHERE us.guild_id = ? AND {games_col} >= ?
                 '''
                 
                 params = [guild_id, min_games]
                 
-                # 포지션 필터 적용
-                if position != "all":
-                    if position == "tank":
-                        base_query += " AND us.tank_games >= ?"
-                        params.append(min_games)
-                    elif position == "dps": 
-                        base_query += " AND us.dps_games >= ?"
-                        params.append(min_games)
-                    elif position == "support":
-                        base_query += " AND us.support_games >= ?"
-                        params.append(min_games)
-                
                 # 정렬 기준 적용
                 if sort_by == "winrate":
-                    base_query += " ORDER BY winrate DESC, us.total_games DESC"
+                    base_query += " ORDER BY winrate DESC, games DESC"
                 elif sort_by == "games":
-                    base_query += " ORDER BY us.total_games DESC, winrate DESC"
+                    base_query += " ORDER BY games DESC, winrate DESC"
                 elif sort_by == "wins":
-                    base_query += " ORDER BY us.total_wins DESC, winrate DESC"
+                    base_query += " ORDER BY wins DESC, winrate DESC"
                 
                 base_query += " LIMIT 50"
                 
@@ -4472,8 +4426,8 @@ class DatabaseManager:
                             'user_id': row[0],
                             'username': row[1] or 'Unknown',
                             'tier': row[2],
-                            'total_games': row[3],
-                            'wins': row[4], 
+                            'total_games': row[3],  # 실제로는 포지션별 게임 수
+                            'wins': row[4],  # 실제로는 포지션별 승수
                             'winrate': row[5]
                         }
                         for row in rows
