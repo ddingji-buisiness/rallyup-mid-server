@@ -1884,11 +1884,6 @@ class SimpleUserManagementCog(commands.Cog):
             )
 
     @app_commands.command(name="순위표", description="서버 내 사용자 랭킹을 확인합니다")
-    @app_commands.describe(
-        정렬기준="랭킹 정렬 기준",
-        포지션="특정 포지션만 보기 (선택사항)",
-        특정맵="특정 맵에서의 랭킹 (맵 이름 입력)" 
-    )
     @app_commands.choices(정렬기준=[
         app_commands.Choice(name="승률 기준", value="winrate"),
         app_commands.Choice(name="경기 수 기준", value="games"),
@@ -1984,8 +1979,7 @@ class SimpleUserManagementCog(commands.Cog):
             elif display_range == "bottom10":
                 display_rankings = rankings[-10:] if len(rankings) > 10 else rankings
                 range_description = f"하위 10명 ({len(rankings)-9}위~{len(rankings)}위)"
-                # 하위권 표시 시 역순으로 정렬 (꼴찌부터 보여주기)
-                display_rankings = list(reversed(display_rankings))
+                # 역순 정렬 제거 - 14위부터 23위 순서로 표시
             elif display_range == "around_me":
                 user_rank = await self.bot.db_manager.get_user_server_rank(
                     str(interaction.user.id), guild_id, position=position_filter
@@ -2028,8 +2022,9 @@ class SimpleUserManagementCog(commands.Cog):
                 if display_range == "top10":
                     actual_rank = i + 1
                 elif display_range == "bottom10":
-                    # 하위 10명은 역순이므로 끝에서부터 계산
-                    actual_rank = len(rankings) - i
+                    # 하위 10명 시작 순위 계산 (14위부터 시작)
+                    start_rank = len(rankings) - len(display_rankings) + 1
+                    actual_rank = start_rank + i
                 elif display_range == "around_me":
                     # 내 주변 순위일 경우 시작 순위 계산
                     user_rank_info = await self.bot.db_manager.get_user_server_rank(
@@ -2053,7 +2048,7 @@ class SimpleUserManagementCog(commands.Cog):
                 # 본인 순위 강조
                 username = user_rank['username']
                 if user_rank['user_id'] == str(interaction.user.id):
-                    username = f"**[YOU] {username}**"
+                    username = f"⭐ **{username}**"
                 
                 # 맵별 랭킹일 때는 게임수와 승률 표시 방식 변경
                 if specific_map or sort_by.endswith('_winrate'):
@@ -2073,9 +2068,7 @@ class SimpleUserManagementCog(commands.Cog):
                         games_info = f"({user_rank['total_games']}경기)"
                 
                 ranking_text.append(
-                    f"{medal} {username} | "
-                    f"{user_rank['tier'] or 'N/A'} | "
-                    f"{value} {games_info}"
+                    f"{medal} {username} • {user_rank['tier'] or 'N/A'} • {value} {games_info}"
                 )
             
             # Embed 필드 길이 체크 (디스코드 제한: 1024자)
