@@ -842,6 +842,15 @@ class ParticipantManagementView(discord.ui.View):
         )
         add_button.callback = self.add_participant_callback
         self.add_item(add_button)
+
+        # 외부 유저 추가 버튼
+        add_external_button = discord.ui.Button(
+            label="➕ 외부 유저 추가",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔓"
+        )
+        add_external_button.callback = self.add_external_user_callback
+        self.add_item(add_external_button)
         
         # 참가자 제거 버튼 (참가자가 있을 때만)
         if self.current_participants:
@@ -871,6 +880,40 @@ class ParticipantManagementView(discord.ui.View):
         )
         confirm_button.callback = self.confirm_participants_callback
         self.add_item(confirm_button)
+
+    async def add_external_user_callback(self, interaction: discord.Interaction):
+        """외부 유저 추가 버튼 클릭 - 자동으로 임시 유저 생성"""
+        
+        # 현재 임시 유저 개수 카운트
+        temp_user_count = sum(
+            1 for p in self.current_participants 
+            if p.get('entry_method') == 'external'
+        )
+        temp_number = temp_user_count + 1
+        
+        # 🔥 임시 유저 자동 생성 (입력 없이)
+        external_user = {
+            'user_id': f'temp_{uuid.uuid4().hex[:8]}',  # 고유 임시 ID
+            'username': f'임시유저{temp_number}',
+            'entry_method': 'external',
+            'battle_tag': None,
+            'main_position': None,
+            'current_season_tier': '미등록',
+            'registered_at': None,
+            'approved_by': None
+        }
+        
+        # 참가자 목록에 추가
+        self.current_participants.append(external_user)
+        
+        # 화면 업데이트
+        await self.show_management_screen(interaction)
+        
+        await interaction.followup.send(
+            f"✅ **임시유저{temp_number}**를 참가자로 추가했습니다.\n"
+            f"⚠️ 이 유저는 내전 기록에는 저장되지만, 개인 통계에는 반영되지 않습니다.",
+            ephemeral=True
+        )
     
     async def show_management_screen(self, interaction: discord.Interaction):
         """참가자 관리 화면 표시"""
@@ -895,7 +938,7 @@ class ParticipantManagementView(discord.ui.View):
         embed.add_field(
             name="📅 내전 정보",
             value=f"**일시**: {scrim_date.strftime('%Y년 %m월 %d일 %H:%M')}\n"
-                  f"**모집 ID**: `{self.recruitment_id}`",
+                f"**모집 ID**: `{self.recruitment_id}`",
             inline=False
         )
         
@@ -903,8 +946,8 @@ class ParticipantManagementView(discord.ui.View):
         embed.add_field(
             name="📊 참가자 현황",
             value=f"**현재 참가자**: {len(self.current_participants)}명\n"
-                  f"**기본 참가자**: {len(self.base_participants)}명 (참가 버튼)\n"
-                  f"**필요 인원**: 10명 이상",
+                f"**기본 참가자**: {len(self.base_participants)}명 (참가 버튼)\n"
+                f"**필요 인원**: 10명 이상",
             inline=True
         )
         
@@ -926,9 +969,14 @@ class ParticipantManagementView(discord.ui.View):
         if self.current_participants:
             participant_list = []
             for i, participant in enumerate(self.current_participants[:20], 1):
-                # 기본 참가자인지 추가된 참가자인지 구분
-                is_base = participant in self.base_participants
-                icon = "🔹" if is_base else "➕"
+                # 🔥 외부 유저 구분 표시
+                if participant.get('entry_method') == 'external':
+                    icon = "🔓"  # 외부 유저 (미등록)
+                elif participant in self.base_participants:
+                    icon = "🔹"  # 참가 버튼을 누른 기본 참가자
+                else:
+                    icon = "➕"  # 수동 추가된 등록 유저
+                
                 participant_list.append(f"{icon} {i}. {participant['username']}")
             
             participant_text = '\n'.join(participant_list)
@@ -947,10 +995,12 @@ class ParticipantManagementView(discord.ui.View):
                 inline=False
             )
         
-        # 범례
+        # 🔥 범례 업데이트 (외부 유저 표시 추가)
         embed.add_field(
-            name="📝 범례",
-            value="🔹 참가 버튼을 누른 기본 참가자\n➕ 수동으로 추가된 참가자",
+            name="📖 범례",
+            value="🔹 참가 버튼을 누른 기본 참가자\n"
+                "➕ 수동으로 추가된 등록 유저\n"
+                "🔓 임시 유저 (통계 제외)",
             inline=False
         )
         

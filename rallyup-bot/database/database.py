@@ -3788,10 +3788,38 @@ class DatabaseManager:
             print(f"❌ 매치 저장 실패: {e}")
             raise
 
-    async def update_user_statistics(self, guild_id: str, match_results: List[Dict]):
-        """여러 매치 결과를 기반으로 사용자 통계 업데이트"""
+    async def _get_registered_user_ids(self, guild_id: str) -> set:
+        """등록된 유저 ID 목록을 Set으로 반환"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id FROM registered_users 
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return {row[0] for row in rows}
+        except Exception as e:
+            print(f"❌ 등록된 유저 ID 조회 실패: {e}")
+            return set()
+
+    async def update_user_statistics(self, guild_id: str, match_results: List[Dict]):
+        """여러 매치 결과를 기반으로 사용자 통계 업데이트 (등록된 유저만)
+        
+        Args:
+            guild_id: 서버 ID
+            match_results: 매치 결과 데이터 리스트
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 🔍 등록된 유저 ID 목록 조회 (한 번만)
+                registered_user_ids = await self._get_registered_user_ids(guild_id)
+                
+                if not registered_user_ids:
+                    print("⚠️ 등록된 유저가 없습니다.")
+                    return
+                
+                skipped_users = [] 
+                
                 for match_data in match_results:
                     for team_key in ['team_a', 'team_b']:
                         team_data = match_data[team_key]
@@ -3800,6 +3828,15 @@ class DatabaseManager:
                         
                         for participant in team_data:
                             user_id = participant['user_id']
+                            
+                            if user_id not in registered_user_ids:
+                                skipped_users.append({
+                                    'username': participant['username'],
+                                    'user_id': user_id
+                                })
+                                print(f"⚠️ 미등록 유저 통계 제외: {participant['username']} ({user_id})")
+                                continue
+                            
                             position = positions[user_id]
                             
                             await self._update_single_user_stats(
@@ -3808,8 +3845,13 @@ class DatabaseManager:
                 
                 await db.commit()
                 
+                # 결과 요약 로그
+                registered_count = len(registered_user_ids)
+                skipped_count = len(set(u['user_id'] for u in skipped_users))
+                print(f"✅ 통계 업데이트 완료 - 등록 유저: {registered_count}명 반영, 외부 유저: {skipped_count}명 제외")
+                
         except Exception as e:
-            print(f"통계 업데이트 실패: {e}")
+            print(f"❌ 통계 업데이트 실패: {e}")
             raise
 
     async def _update_single_user_stats(self, db, guild_id: str, user_id: str, position: str, won: bool):
