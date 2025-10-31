@@ -1884,6 +1884,11 @@ class SimpleUserManagementCog(commands.Cog):
             )
 
     @app_commands.command(name="순위표", description="서버 내 사용자 랭킹을 확인합니다")
+    @app_commands.describe(
+        정렬기준="랭킹 정렬 기준",
+        포지션="특정 포지션만 보기 (선택사항)",
+        특정맵="특정 맵에서의 랭킹 (맵 이름 입력)" 
+    )
     @app_commands.choices(정렬기준=[
         app_commands.Choice(name="승률 기준", value="winrate"),
         app_commands.Choice(name="경기 수 기준", value="games"),
@@ -2039,11 +2044,11 @@ class SimpleUserManagementCog(commands.Cog):
                 else:
                     actual_rank = i + 1
                 
-                # 메달 이모지
+                # 메달 이모지 및 순위 표시 (Discord 자동 번호 매기기 방지)
                 if display_range == "top10":
-                    medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+                    medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"**{i+1}위**"
                 else:
-                    medal = f"{actual_rank}."
+                    medal = f"**{actual_rank}위**"
                 
                 # 본인 순위 강조
                 username = user_rank['username']
