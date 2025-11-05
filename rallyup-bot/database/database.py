@@ -44,6 +44,7 @@ class DatabaseManager:
             await self.create_auto_schedule_tables()
             await self.create_inquiry_tables()
             await self.create_consultation_tables()
+            await self.initialize_event_system_tables()
 
             # users 테이블
             await db.execute('''
@@ -439,6 +440,91 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_channel_guild ON tts_channel_settings(guild_id)')
 
             await db.commit()
+
+    async def initialize_event_system_tables(self):
+        """이벤트 시스템 테이블 초기화"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('PRAGMA journal_mode=WAL')
+            
+            # 1. 팀 정보 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_teams (
+                    team_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    team_name TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    UNIQUE(guild_id, team_name)
+                )
+            ''')
+            
+            # 2. 팀원 구성 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_team_members (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE,
+                    UNIQUE(team_id, user_id)
+                )
+            ''')
+            
+            # 3. 미션 정보 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_missions (
+                    mission_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    mission_name TEXT NOT NULL,
+                    description TEXT,
+                    base_points INTEGER NOT NULL,
+                    category TEXT NOT NULL CHECK (category IN ('daily', 'offline', 'online', 'hidden')),
+                    min_participants INTEGER DEFAULT 1,
+                    bonus_conditions TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            
+            # 4. 미션 완료 기록 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_mission_completions (
+                    completion_id TEXT PRIMARY KEY,
+                    team_id TEXT NOT NULL,
+                    mission_id TEXT NOT NULL,
+                    participants_count INTEGER NOT NULL,
+                    awarded_points INTEGER NOT NULL,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_by TEXT NOT NULL,
+                    notes TEXT,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id),
+                    FOREIGN KEY (mission_id) REFERENCES event_missions(mission_id)
+                )
+            ''')
+
+            # 5. 공지 채널 설정 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_announcement_channels (
+                    guild_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # 인덱스 생성
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_teams_guild ON event_teams(guild_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_team_members_team ON event_team_members(team_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_team_members_user ON event_team_members(user_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_missions_guild ON event_missions(guild_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_completions_team ON event_mission_completions(team_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_completions_mission ON event_mission_completions(mission_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_teams_guild ON event_teams(guild_id, is_active)')
+
+            await db.commit()
+            print("✅ 이벤트 시스템 테이블 생성 완료")
 
     async def create_auto_schedule_tables(self):
         """정기 내전 자동 스케줄 테이블 생성"""
@@ -10625,3 +10711,1207 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 스케줄 조회 실패: {e}")
             return None
+
+    async def create_event_team(
+        self, 
+        guild_id: str, 
+        team_name: str, 
+        member_ids: list,  # [(user_id, username), ...]
+        created_by: str
+    ) -> tuple[bool, str]:
+        """이벤트 팀 생성
+        
+        Returns:
+            (성공여부, 팀ID 또는 에러메시지)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 팀명 중복 체크
+                async with db.execute('''
+                    SELECT team_id FROM event_teams 
+                    WHERE guild_id = ? AND team_name = ? AND is_active = TRUE
+                ''', (guild_id, team_name)) as cursor:
+                    if await cursor.fetchone():
+                        return False, f"'{team_name}' 팀이 이미 존재합니다"
+                
+                # 팀 ID 생성
+                team_id = self.generate_uuid()
+                
+                # 팀 생성
+                await db.execute('''
+                    INSERT INTO event_teams (team_id, guild_id, team_name, created_by)
+                    VALUES (?, ?, ?, ?)
+                ''', (team_id, guild_id, team_name, created_by))
+                
+                # 팀원 추가
+                for user_id, username in member_ids:
+                    await db.execute('''
+                        INSERT INTO event_team_members (team_id, user_id, username)
+                        VALUES (?, ?, ?)
+                    ''', (team_id, user_id, username))
+                
+                await db.commit()
+                print(f"✅ 팀 생성 완료: {team_name} (ID: {team_id})")
+                return True, team_id
+                
+        except Exception as e:
+            print(f"❌ 팀 생성 실패: {e}")
+            return False, str(e)
+
+    async def get_event_teams(self, guild_id: str) -> list:
+        """서버의 모든 활성 팀 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        t.team_id,
+                        t.team_name,
+                        t.created_at,
+                        COUNT(m.user_id) as member_count
+                    FROM event_teams t
+                    LEFT JOIN event_team_members m ON t.team_id = m.team_id
+                    WHERE t.guild_id = ? AND t.is_active = TRUE
+                    GROUP BY t.team_id
+                    ORDER BY t.team_name
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    teams = []
+                    for row in rows:
+                        teams.append({
+                            'team_id': row[0],
+                            'team_name': row[1],
+                            'created_at': row[2],
+                            'member_count': row[3]
+                        })
+                    
+                    return teams
+                    
+        except Exception as e:
+            print(f"❌ 팀 목록 조회 실패: {e}")
+            return []
+
+    async def get_event_team_details(self, team_id: str) -> dict:
+        """특정 팀의 상세 정보 (팀원 포함)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 팀 기본 정보
+                async with db.execute('''
+                    SELECT team_id, guild_id, team_name, created_by, created_at
+                    FROM event_teams
+                    WHERE team_id = ? AND is_active = TRUE
+                ''', (team_id,)) as cursor:
+                    team_row = await cursor.fetchone()
+                    
+                    if not team_row:
+                        return None
+                    
+                    team_info = {
+                        'team_id': team_row[0],
+                        'guild_id': team_row[1],
+                        'team_name': team_row[2],
+                        'created_by': team_row[3],
+                        'created_at': team_row[4],
+                        'members': []
+                    }
+                
+                # 팀원 목록
+                async with db.execute('''
+                    SELECT user_id, username, joined_at
+                    FROM event_team_members
+                    WHERE team_id = ?
+                    ORDER BY joined_at
+                ''', (team_id,)) as cursor:
+                    member_rows = await cursor.fetchall()
+                    
+                    for row in member_rows:
+                        team_info['members'].append({
+                            'user_id': row[0],
+                            'username': row[1],
+                            'joined_at': row[2]
+                        })
+                    
+                    return team_info
+                    
+        except Exception as e:
+            print(f"❌ 팀 상세 정보 조회 실패: {e}")
+            return None
+
+    async def add_team_member(
+        self, 
+        team_id: str, 
+        user_id: str, 
+        username: str
+    ) -> tuple[bool, str]:
+        """팀에 새 팀원 추가"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 이미 팀원인지 체크
+                async with db.execute('''
+                    SELECT id FROM event_team_members
+                    WHERE team_id = ? AND user_id = ?
+                ''', (team_id, user_id)) as cursor:
+                    if await cursor.fetchone():
+                        return False, "이미 팀원입니다"
+                
+                # 팀원 추가
+                await db.execute('''
+                    INSERT INTO event_team_members (team_id, user_id, username)
+                    VALUES (?, ?, ?)
+                ''', (team_id, user_id, username))
+                
+                await db.commit()
+                return True, "팀원이 추가되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 팀원 추가 실패: {e}")
+            return False, str(e)
+
+    async def remove_team_member(self, team_id: str, user_id: str) -> tuple[bool, str]:
+        """팀에서 팀원 제거"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                cursor = await db.execute('''
+                    DELETE FROM event_team_members
+                    WHERE team_id = ? AND user_id = ?
+                ''', (team_id, user_id))
+                
+                await db.commit()
+                
+                if cursor.rowcount == 0:
+                    return False, "해당 유저가 팀원이 아닙니다"
+                
+                return True, "팀원이 제거되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 팀원 제거 실패: {e}")
+            return False, str(e)
+
+    async def delete_event_team(self, team_id: str) -> tuple[bool, str]:
+        """팀 비활성화 (완전 삭제 대신 is_active=FALSE)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                cursor = await db.execute('''
+                    UPDATE event_teams
+                    SET is_active = FALSE
+                    WHERE team_id = ?
+                ''', (team_id,))
+                
+                await db.commit()
+                
+                if cursor.rowcount == 0:
+                    return False, "팀을 찾을 수 없습니다"
+                
+                return True, "팀이 삭제되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 팀 삭제 실패: {e}")
+            return False, str(e)
+
+    async def get_user_event_team(self, guild_id: str, user_id: str) -> dict:
+        """특정 유저가 속한 팀 정보 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT t.team_id, t.team_name
+                    FROM event_teams t
+                    JOIN event_team_members m ON t.team_id = m.team_id
+                    WHERE t.guild_id = ? AND m.user_id = ? AND t.is_active = TRUE
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'team_id': row[0],
+                            'team_name': row[1]
+                        }
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 유저 팀 조회 실패: {e}")
+            return None
+
+    async def create_event_mission(
+        self,
+        guild_id: str,
+        mission_name: str,
+        description: str,
+        base_points: int,
+        category: str,  # 'daily', 'offline', 'online', 'hidden'
+        min_participants: int = 1,
+        bonus_conditions: dict = None
+    ) -> tuple[bool, str]:
+        """이벤트 미션 생성
+        
+        Args:
+            bonus_conditions: {"all_clear_bonus": 5, "four_players_bonus": 1}
+        
+        Returns:
+            (성공여부, 미션ID 또는 에러메시지)
+        """
+        try:
+            import json
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 미션명 중복 체크
+                async with db.execute('''
+                    SELECT mission_id FROM event_missions
+                    WHERE guild_id = ? AND mission_name = ? AND is_active = TRUE
+                ''', (guild_id, mission_name)) as cursor:
+                    if await cursor.fetchone():
+                        return False, f"'{mission_name}' 미션이 이미 존재합니다"
+                
+                # 미션 ID 생성
+                mission_id = self.generate_uuid()
+                
+                # bonus_conditions를 JSON 문자열로 변환
+                bonus_json = json.dumps(bonus_conditions) if bonus_conditions else None
+                
+                # 미션 생성
+                await db.execute('''
+                    INSERT INTO event_missions (
+                        mission_id, guild_id, mission_name, description,
+                        base_points, category, min_participants, bonus_conditions
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (mission_id, guild_id, mission_name, description,
+                    base_points, category, min_participants, bonus_json))
+                
+                await db.commit()
+                print(f"✅ 미션 생성 완료: {mission_name} (ID: {mission_id})")
+                return True, mission_id
+                
+        except Exception as e:
+            print(f"❌ 미션 생성 실패: {e}")
+            return False, str(e)
+
+    async def get_event_missions(
+        self, 
+        guild_id: str, 
+        category: str = None
+    ) -> list:
+        """서버의 미션 목록 조회
+        
+        Args:
+            category: 'daily', 'offline', 'online', 'hidden' 또는 None (전체)
+        """
+        try:
+            import json
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                if category:
+                    query = '''
+                        SELECT 
+                            mission_id, mission_name, description, base_points,
+                            category, min_participants, bonus_conditions, created_at
+                        FROM event_missions
+                        WHERE guild_id = ? AND category = ? AND is_active = TRUE
+                        ORDER BY base_points DESC, mission_name
+                    '''
+                    params = (guild_id, category)
+                else:
+                    query = '''
+                        SELECT 
+                            mission_id, mission_name, description, base_points,
+                            category, min_participants, bonus_conditions, created_at
+                        FROM event_missions
+                        WHERE guild_id = ? AND is_active = TRUE
+                        ORDER BY 
+                            CASE category
+                                WHEN 'daily' THEN 1
+                                WHEN 'online' THEN 2
+                                WHEN 'offline' THEN 3
+                                WHEN 'hidden' THEN 4
+                            END,
+                            base_points DESC
+                    '''
+                    params = (guild_id,)
+                
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    missions = []
+                    for row in rows:
+                        bonus = json.loads(row[6]) if row[6] else {}
+                        
+                        missions.append({
+                            'mission_id': row[0],
+                            'mission_name': row[1],
+                            'description': row[2],
+                            'base_points': row[3],
+                            'category': row[4],
+                            'min_participants': row[5],
+                            'bonus_conditions': bonus,
+                            'created_at': row[7]
+                        })
+                    
+                    return missions
+                    
+        except Exception as e:
+            print(f"❌ 미션 목록 조회 실패: {e}")
+            return []
+
+    async def get_event_mission_details(self, mission_id: str) -> dict:
+        """특정 미션의 상세 정보"""
+        try:
+            import json
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        mission_id, guild_id, mission_name, description,
+                        base_points, category, min_participants, 
+                        bonus_conditions, created_at
+                    FROM event_missions
+                    WHERE mission_id = ? AND is_active = TRUE
+                ''', (mission_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return None
+                    
+                    bonus = json.loads(row[7]) if row[7] else {}
+                    
+                    return {
+                        'mission_id': row[0],
+                        'guild_id': row[1],
+                        'mission_name': row[2],
+                        'description': row[3],
+                        'base_points': row[4],
+                        'category': row[5],
+                        'min_participants': row[6],
+                        'bonus_conditions': bonus,
+                        'created_at': row[8]
+                    }
+                    
+        except Exception as e:
+            print(f"❌ 미션 상세 정보 조회 실패: {e}")
+            return None
+
+    async def delete_event_mission(self, mission_id: str) -> tuple[bool, str]:
+        """미션 비활성화"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                cursor = await db.execute('''
+                    UPDATE event_missions
+                    SET is_active = FALSE
+                    WHERE mission_id = ?
+                ''', (mission_id,))
+                
+                await db.commit()
+                
+                if cursor.rowcount == 0:
+                    return False, "미션을 찾을 수 없습니다"
+                
+                return True, "미션이 삭제되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 미션 삭제 실패: {e}")
+            return False, str(e)
+
+    async def get_mission_stats(self, guild_id: str) -> dict:
+        """카테고리별 미션 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        category,
+                        COUNT(*) as count,
+                        SUM(base_points) as total_points
+                    FROM event_missions
+                    WHERE guild_id = ? AND is_active = TRUE
+                    GROUP BY category
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    stats = {
+                        'daily': {'count': 0, 'total_points': 0},
+                        'online': {'count': 0, 'total_points': 0},
+                        'offline': {'count': 0, 'total_points': 0},
+                        'hidden': {'count': 0, 'total_points': 0}
+                    }
+                    
+                    for row in rows:
+                        category = row[0]
+                        stats[category] = {
+                            'count': row[1],
+                            'total_points': row[2]
+                        }
+                    
+                    return stats
+                    
+        except Exception as e:
+            print(f"❌ 미션 통계 조회 실패: {e}")
+            return {}
+
+    async def record_mission_completion(
+        self,
+        team_id: str,
+        mission_id: str,
+        participants_count: int,
+        completed_by: str,
+        notes: str = None
+    ) -> tuple[bool, str, int]:
+        """미션 완료 기록 및 점수 부여
+        
+        Returns:
+            (성공여부, 메시지, 부여된점수)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 미션 정보 조회
+                mission = await self.get_event_mission_details(mission_id)
+                if not mission:
+                    return False, "미션을 찾을 수 없습니다", 0
+                
+                # 최소 참여 인원 체크
+                if participants_count < mission['min_participants']:
+                    return False, f"최소 {mission['min_participants']}명 이상 참여해야 합니다", 0
+                
+                # 1. 일일 퀘스트인 경우 하루 1회 제한 체크
+                if mission['category'] == 'daily':
+                    from datetime import datetime
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    
+                    already_completed = await self.check_daily_mission_completed(
+                        team_id, mission_id, today
+                    )
+                    
+                    if already_completed:
+                        return False, "❌ 오늘 이미 완료한 미션입니다", 0
+                
+                # 2. 기본 점수
+                awarded_points = mission['base_points']
+                
+                # 3. 일일 퀘스트 4명 이상 참여 보너스
+                if mission['category'] == 'daily' and participants_count >= 4:
+                    awarded_points += 1
+                    print(f"🎁 4명 이상 참여 보너스: +1점")
+                
+                # 4. 완료 ID 생성
+                completion_id = self.generate_uuid()
+                
+                # 5. 완료 기록 저장
+                await db.execute('''
+                    INSERT INTO event_mission_completions (
+                        completion_id, team_id, mission_id,
+                        participants_count, awarded_points,
+                        completed_by, notes
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (completion_id, team_id, mission_id,
+                    participants_count, awarded_points,
+                    completed_by, notes))
+                
+                await db.commit()
+                
+                # 6. 일일 퀘스트 올클리어 보너스 체크 (하루 1회만)
+                bonus_message = ""
+                if mission['category'] == 'daily':
+                    # 올클리어 달성 체크
+                    all_clear, bonus = await self.check_daily_all_clear_bonus(team_id)
+                    
+                    if all_clear:
+                        # 오늘 이미 보너스를 받았는지 체크
+                        from datetime import datetime
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        already_given = await self.check_daily_all_clear_bonus_already_given(
+                            team_id, today
+                        )
+                        
+                        if not already_given:
+                            # 올클리어 보너스 별도 기록 (하루 1회만)
+                            bonus_completion_id = self.generate_uuid()
+                            
+                            await db.execute('''
+                                INSERT INTO event_mission_completions (
+                                    completion_id, team_id, mission_id,
+                                    participants_count, awarded_points,
+                                    completed_by, notes
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ''', (bonus_completion_id, team_id, 
+                                'daily_all_clear_bonus',  # 특수 ID
+                                participants_count, bonus,
+                                completed_by, '일일 퀘스트 올클리어 보너스'))
+                            
+                            await db.commit()
+                            
+                            awarded_points += bonus
+                            bonus_message = f"\n🎉 일일 퀘스트 올클리어! 보너스 +{bonus}점 추가!"
+                            print(f"🎉 일일 올클리어 보너스: +{bonus}점")
+                        else:
+                            print(f"ℹ️ 올클리어 보너스는 오늘 이미 지급됨")
+                
+                print(f"✅ 미션 완료 기록: {mission['mission_name']} - {awarded_points}점")
+                return True, f"미션 완료 처리되었습니다{bonus_message}", awarded_points
+                
+        except Exception as e:
+            print(f"❌ 미션 완료 기록 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, str(e), 0
+
+    async def get_team_total_score(self, team_id: str) -> int:
+        """팀의 총 누적 점수 계산"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT SUM(awarded_points)
+                    FROM event_mission_completions
+                    WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row[0] else 0
+                    
+        except Exception as e:
+            print(f"❌ 팀 총점 계산 실패: {e}")
+            return 0
+
+    async def get_team_mission_history(
+        self, 
+        team_id: str,
+        limit: int = 20
+    ) -> list:
+        """팀의 미션 완료 이력"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        c.completion_id,
+                        c.mission_id,
+                        m.mission_name,
+                        m.category,
+                        c.participants_count,
+                        c.awarded_points,
+                        c.completed_at,
+                        c.completed_by,
+                        c.notes
+                    FROM event_mission_completions c
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.team_id = ?
+                    ORDER BY c.completed_at DESC
+                    LIMIT ?
+                ''', (team_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    history = []
+                    for row in rows:
+                        history.append({
+                            'completion_id': row[0],
+                            'mission_id': row[1],
+                            'mission_name': row[2],
+                            'category': row[3],
+                            'participants_count': row[4],
+                            'awarded_points': row[5],
+                            'completed_at': row[6],
+                            'completed_by': row[7],
+                            'notes': row[8]
+                        })
+                    
+                    return history
+                    
+        except Exception as e:
+            print(f"❌ 팀 미션 이력 조회 실패: {e}")
+            return []
+
+    async def get_mission_completion_stats(self, mission_id: str) -> dict:
+        """특정 미션의 완료 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as completion_count,
+                        SUM(awarded_points) as total_points_awarded,
+                        AVG(participants_count) as avg_participants
+                    FROM event_mission_completions
+                    WHERE mission_id = ?
+                ''', (mission_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    return {
+                        'completion_count': row[0] if row[0] else 0,
+                        'total_points_awarded': row[1] if row[1] else 0,
+                        'avg_participants': round(row[2], 1) if row[2] else 0
+                    }
+                    
+        except Exception as e:
+            print(f"❌ 미션 완료 통계 조회 실패: {e}")
+            return {}
+
+    async def get_team_category_stats(self, team_id: str) -> dict:
+        """팀의 카테고리별 미션 완료 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        m.category,
+                        COUNT(*) as completed_count,
+                        SUM(c.awarded_points) as category_points
+                    FROM event_mission_completions c
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.team_id = ?
+                    GROUP BY m.category
+                ''', (team_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    stats = {
+                        'daily': {'count': 0, 'points': 0},
+                        'online': {'count': 0, 'points': 0},
+                        'offline': {'count': 0, 'points': 0},
+                        'hidden': {'count': 0, 'points': 0}
+                    }
+                    
+                    for row in rows:
+                        category = row[0]
+                        stats[category] = {
+                            'count': row[1],
+                            'points': row[2]
+                        }
+                    
+                    return stats
+                    
+        except Exception as e:
+            print(f"❌ 팀 카테고리 통계 조회 실패: {e}")
+            return {}
+
+    async def check_daily_all_clear_bonus(
+        self,
+        team_id: str,
+        completion_date: str = None
+    ) -> tuple[bool, int]:
+        """특정 날짜에 팀이 모든 일일 퀘스트를 완료했는지 확인
+        
+        Args:
+            completion_date: 'YYYY-MM-DD' 형식, None이면 오늘
+        
+        Returns:
+            (전체완료여부, 보너스점수)
+        """
+        try:
+            from datetime import datetime
+            
+            if not completion_date:
+                completion_date = datetime.now().strftime('%Y-%m-%d')
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 해당 서버의 일일 퀘스트 총 개수
+                async with db.execute('''
+                    SELECT COUNT(*) 
+                    FROM event_missions m
+                    JOIN event_teams t ON m.guild_id = t.guild_id
+                    WHERE t.team_id = ? AND m.category = 'daily' AND m.is_active = TRUE
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    total_daily = row[0] if row[0] else 0
+                
+                if total_daily == 0:
+                    return False, 0
+                
+                # 해당 날짜에 팀이 완료한 일일 퀘스트 개수 (중복 제거)
+                async with db.execute('''
+                    SELECT COUNT(DISTINCT c.mission_id)
+                    FROM event_mission_completions c
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.team_id = ? 
+                    AND m.category = 'daily'
+                    AND DATE(c.completed_at) = ?
+                ''', (team_id, completion_date)) as cursor:
+                    row = await cursor.fetchone()
+                    completed_daily = row[0] if row[0] else 0
+                
+                # ✅ 전체 완료 시 보너스 (5점)
+                if completed_daily >= total_daily:
+                    return True, 5
+                
+                return False, 0
+                
+        except Exception as e:
+            print(f"❌ 일일 전체 완료 보너스 체크 실패: {e}")
+            return False, 0
+
+    async def get_team_rankings(self, guild_id: str) -> list:
+        """서버의 전체 팀 순위 (점수 순)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        t.team_id,
+                        t.team_name,
+                        COALESCE(scores.total_score, 0) as total_score,
+                        COALESCE(scores.completed_missions, 0) as completed_missions,
+                        COALESCE(members.member_count, 0) as member_count
+                    FROM event_teams t
+                    LEFT JOIN (
+                        SELECT 
+                            team_id,
+                            SUM(awarded_points) as total_score,
+                            COUNT(DISTINCT mission_id) as completed_missions
+                        FROM event_mission_completions
+                        GROUP BY team_id
+                    ) scores ON t.team_id = scores.team_id
+                    LEFT JOIN (
+                        SELECT 
+                            team_id,
+                            COUNT(DISTINCT user_id) as member_count
+                        FROM event_team_members
+                        GROUP BY team_id
+                    ) members ON t.team_id = members.team_id
+                    WHERE t.guild_id = ? AND t.is_active = TRUE
+                    GROUP BY t.team_id
+                    ORDER BY total_score DESC, completed_missions DESC, t.team_name
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    rankings = []
+                    for rank, row in enumerate(rows, 1):
+                        rankings.append({
+                            'rank': rank,
+                            'team_id': row[0],
+                            'team_name': row[1],
+                            'total_score': row[2],
+                            'completed_missions': row[3],
+                            'member_count': row[4]
+                        })
+                    
+                    return rankings
+                    
+        except Exception as e:
+            print(f"❌ 팀 순위 조회 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    async def get_team_rank(self, team_id: str) -> dict:
+        """특정 팀의 순위 정보"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 팀의 길드 ID 조회
+                async with db.execute('''
+                    SELECT guild_id FROM event_teams WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return None
+                    guild_id = row[0]
+                
+                # 전체 순위 조회
+                rankings = await self.get_team_rankings(guild_id)
+                
+                # 해당 팀 찾기
+                for team_rank in rankings:
+                    if team_rank['team_id'] == team_id:
+                        return {
+                            'rank': team_rank['rank'],
+                            'total_teams': len(rankings),
+                            'team_name': team_rank['team_name'],
+                            'total_score': team_rank['total_score'],
+                            'completed_missions': team_rank['completed_missions']
+                        }
+                
+                return None
+                    
+        except Exception as e:
+            print(f"❌ 팀 순위 정보 조회 실패: {e}")
+            return None
+
+    async def get_event_overview(self, guild_id: str) -> dict:
+        """이벤트 전체 현황 통계"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                overview = {}
+                
+                # 총 팀 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM event_teams
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    overview['total_teams'] = row[0] if row[0] else 0
+                
+                # 총 미션 수
+                async with db.execute('''
+                    SELECT COUNT(*) FROM event_missions
+                    WHERE guild_id = ? AND is_active = TRUE
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    overview['total_missions'] = row[0] if row[0] else 0
+                
+                # 카테고리별 미션 수
+                async with db.execute('''
+                    SELECT category, COUNT(*) 
+                    FROM event_missions
+                    WHERE guild_id = ? AND is_active = TRUE
+                    GROUP BY category
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    overview['missions_by_category'] = {
+                        'daily': 0, 'online': 0, 'offline': 0, 'hidden': 0
+                    }
+                    for row in rows:
+                        overview['missions_by_category'][row[0]] = row[1]
+                
+                # 총 미션 완료 횟수
+                async with db.execute('''
+                    SELECT COUNT(c.completion_id)
+                    FROM event_mission_completions c
+                    WHERE c.team_id IN (
+                        SELECT team_id FROM event_teams WHERE guild_id = ?
+                    )
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    overview['total_completions'] = row[0] if row[0] else 0
+                
+                # 총 부여된 점수
+                async with db.execute('''
+                    SELECT COALESCE(SUM(c.awarded_points), 0)
+                    FROM event_mission_completions c
+                    WHERE c.team_id IN (
+                        SELECT team_id FROM event_teams WHERE guild_id = ?
+                    )
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    overview['total_points_awarded'] = row[0] if row[0] else 0
+                
+                # ✅ 가장 많이 완료된 미션 TOP 3 (수정)
+                async with db.execute('''
+                    SELECT 
+                        m.mission_name,
+                        m.category,
+                        COUNT(c.completion_id) as completion_count
+                    FROM event_mission_completions c
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.team_id IN (
+                        SELECT team_id FROM event_teams WHERE guild_id = ?
+                    )
+                    GROUP BY c.mission_id
+                    ORDER BY completion_count DESC
+                    LIMIT 3
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    overview['popular_missions'] = []
+                    for row in rows:
+                        overview['popular_missions'].append({
+                            'mission_name': row[0],
+                            'category': row[1],
+                            'completion_count': row[2]
+                        })
+                
+                # 평균 팀 점수
+                if overview['total_teams'] > 0:
+                    overview['avg_team_score'] = round(
+                        overview['total_points_awarded'] / overview['total_teams'],
+                        1
+                    )
+                else:
+                    overview['avg_team_score'] = 0
+                
+                return overview
+                    
+        except Exception as e:
+            print(f"❌ 이벤트 전체 통계 조회 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
+    async def get_team_completion_rate(self, team_id: str) -> dict:
+        """팀의 미션 완료율 (카테고리별)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 팀의 길드 ID 조회
+                async with db.execute('''
+                    SELECT guild_id FROM event_teams WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return None
+                    guild_id = row[0]
+                
+                completion_rates = {}
+                
+                for category in ['daily', 'online', 'offline', 'hidden']:
+                    # 해당 카테고리의 전체 미션 수
+                    async with db.execute('''
+                        SELECT COUNT(*) 
+                        FROM event_missions
+                        WHERE guild_id = ? AND category = ? AND is_active = TRUE
+                    ''', (guild_id, category)) as cursor:
+                        row = await cursor.fetchone()
+                        total_missions = row[0] if row[0] else 0
+                    
+                    # 팀이 완료한 미션 수 (중복 제외)
+                    async with db.execute('''
+                        SELECT COUNT(DISTINCT c.mission_id)
+                        FROM event_mission_completions c
+                        JOIN event_missions m ON c.mission_id = m.mission_id
+                        WHERE c.team_id = ? AND m.category = ?
+                    ''', (team_id, category)) as cursor:
+                        row = await cursor.fetchone()
+                        completed_missions = row[0] if row[0] else 0
+                    
+                    # 완료율 계산
+                    if total_missions > 0:
+                        rate = round((completed_missions / total_missions) * 100, 1)
+                    else:
+                        rate = 0
+                    
+                    completion_rates[category] = {
+                        'total': total_missions,
+                        'completed': completed_missions,
+                        'rate': rate
+                    }
+                
+                return completion_rates
+                    
+        except Exception as e:
+            print(f"❌ 팀 완료율 계산 실패: {e}")
+            return {}
+
+    async def get_recent_event_activities(
+        self, 
+        guild_id: str,
+        limit: int = 10
+    ) -> list:
+        """서버의 최근 미션 완료 활동"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        t.team_name,
+                        m.mission_name,
+                        m.category,
+                        c.awarded_points,
+                        c.participants_count,
+                        c.completed_at
+                    FROM event_mission_completions c
+                    JOIN event_teams t ON c.team_id = t.team_id
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE t.guild_id = ?
+                    ORDER BY c.completed_at DESC
+                    LIMIT ?
+                ''', (guild_id, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    activities = []
+                    for row in rows:
+                        activities.append({
+                            'team_name': row[0],
+                            'mission_name': row[1],
+                            'category': row[2],
+                            'awarded_points': row[3],
+                            'participants_count': row[4],
+                            'completed_at': row[5]
+                        })
+                    
+                    return activities
+                    
+        except Exception as e:
+            print(f"❌ 최근 활동 내역 조회 실패: {e}")
+            return []
+
+    async def check_daily_mission_completed(
+        self, 
+        team_id: str, 
+        mission_id: str, 
+        completion_date: str = None
+    ) -> bool:
+        """특정 날짜에 팀이 이미 해당 미션을 완료했는지 체크
+        
+        Args:
+            team_id: 팀 ID
+            mission_id: 미션 ID
+            completion_date: 'YYYY-MM-DD' 형식, None이면 오늘
+        
+        Returns:
+            True: 이미 완료함
+            False: 아직 완료 안 함
+        """
+        try:
+            from datetime import datetime
+            
+            if not completion_date:
+                completion_date = datetime.now().strftime('%Y-%m-%d')
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT COUNT(*) 
+                    FROM event_mission_completions
+                    WHERE team_id = ? 
+                    AND mission_id = ?
+                    AND DATE(completed_at) = ?
+                ''', (team_id, mission_id, completion_date)) as cursor:
+                    row = await cursor.fetchone()
+                    count = row[0] if row[0] else 0
+                    
+                    return count > 0  # 1개 이상이면 True (이미 완료)
+                    
+        except Exception as e:
+            print(f"❌ 일일 미션 완료 체크 실패: {e}")
+            return False  # 에러 시 False 반환 (진행 허용)
+
+    async def check_daily_all_clear_bonus_already_given(
+        self,
+        team_id: str,
+        completion_date: str = None
+    ) -> bool:
+        """오늘 이미 올클리어 보너스를 받았는지 체크
+        
+        Returns:
+            True: 이미 받음
+            False: 아직 안 받음
+        """
+        try:
+            from datetime import datetime
+            
+            if not completion_date:
+                completion_date = datetime.now().strftime('%Y-%m-%d')
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT COUNT(*) 
+                    FROM event_mission_completions
+                    WHERE team_id = ? 
+                    AND mission_id = 'daily_all_clear_bonus'
+                    AND DATE(completed_at) = ?
+                ''', (team_id, completion_date)) as cursor:
+                    row = await cursor.fetchone()
+                    count = row[0] if row[0] else 0
+                    
+                    return count > 0  # 이미 받았으면 True
+                    
+        except Exception as e:
+            print(f"❌ 올클리어 보너스 중복 체크 실패: {e}")
+            return True  # 에러 시 중복 방지를 위해 True 반환
+
+    async def debug_team_completions(self, team_id: str) -> dict:
+        """팀의 모든 완료 기록 디버깅용 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 전체 완료 기록
+                async with db.execute('''
+                    SELECT 
+                        c.completion_id,
+                        c.mission_id,
+                        m.mission_name,
+                        m.category,
+                        c.awarded_points,
+                        c.completed_at,
+                        DATE(c.completed_at) as completion_date
+                    FROM event_mission_completions c
+                    LEFT JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.team_id = ?
+                    ORDER BY c.completed_at DESC
+                ''', (team_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    completions = []
+                    total_points = 0
+                    
+                    for row in rows:
+                        completion = {
+                            'completion_id': row[0],
+                            'mission_id': row[1],
+                            'mission_name': row[2] or '(보너스)',
+                            'category': row[3] or 'bonus',
+                            'awarded_points': row[4],
+                            'completed_at': row[5],
+                            'completion_date': row[6]
+                        }
+                        completions.append(completion)
+                        total_points += row[4]
+                    
+                    return {
+                        'team_id': team_id,
+                        'total_completions': len(completions),
+                        'total_points': total_points,
+                        'completions': completions
+                    }
+                    
+        except Exception as e:
+            print(f"❌ 디버그 조회 실패: {e}")
+            return {}
+
+    async def set_event_announcement_channel(
+        self,
+        guild_id: str,
+        channel_id: str
+    ) -> tuple[bool, str]:
+        """이벤트 공지 채널 설정"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # UPSERT (있으면 업데이트, 없으면 삽입)
+                await db.execute('''
+                    INSERT INTO event_announcement_channels (guild_id, channel_id, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) 
+                    DO UPDATE SET 
+                        channel_id = excluded.channel_id,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (guild_id, channel_id))
+                
+                await db.commit()
+                print(f"✅ 이벤트 공지 채널 설정: {guild_id} -> {channel_id}")
+                return True, "공지 채널이 설정되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 공지 채널 설정 실패: {e}")
+            return False, str(e)
+
+    async def get_event_announcement_channel(self, guild_id: str) -> str:
+        """이벤트 공지 채널 조회
+        
+        Returns:
+            channel_id 또는 None
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT channel_id 
+                    FROM event_announcement_channels
+                    WHERE guild_id = ?
+                ''', (guild_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else None
+                    
+        except Exception as e:
+            print(f"❌ 공지 채널 조회 실패: {e}")
+            return None
+
+    async def remove_event_announcement_channel(self, guild_id: str) -> tuple[bool, str]:
+        """이벤트 공지 채널 해제"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                cursor = await db.execute('''
+                    DELETE FROM event_announcement_channels
+                    WHERE guild_id = ?
+                ''', (guild_id,))
+                
+                await db.commit()
+                
+                if cursor.rowcount == 0:
+                    return False, "설정된 공지 채널이 없습니다"
+                
+                print(f"✅ 이벤트 공지 채널 해제: {guild_id}")
+                return True, "공지 채널 설정이 해제되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 공지 채널 해제 실패: {e}")
+            return False, str(e)

@@ -135,7 +135,8 @@ class RallyUpBot(commands.Bot):
             'commands.voice_level_admin',
             'commands.voice_level_user',
             'commands.tts_commands',
-            'commands.inquiry_system'
+            'commands.inquiry_system',
+            'commands.event_system',
         ]
 
         for command_module in commands_to_load:
