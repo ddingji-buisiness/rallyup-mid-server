@@ -615,8 +615,8 @@ class ParticipantsModal(discord.ui.Modal, title="참여 인원 입력"):
                 
                 # 일일 퀘스트 보너스 표시
                 if self.mission_info['category'] == 'daily':
-                    if count >= 4:
-                        score_detail += f"**4명 이상 보너스**: +1점\n"
+                    if count >= 5:
+                        score_detail += f"**5명 이상 보너스**: +1점\n"
                     
                     # 올클리어 보너스 확인
                     if "올클리어" in message:
