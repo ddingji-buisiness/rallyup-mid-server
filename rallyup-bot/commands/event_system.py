@@ -65,113 +65,220 @@ class InfoMessages:
     CONFIRM_CREATION = "'팀 생성 완료' 버튼을 눌러주세요."
     CANCELLED = "❌ 점수 부여가 취소되었습니다."
 
-class TeamManagementView(discord.ui.View):
-    """팀 생성 시 팀원 선택용 View"""
+class TeamMembersInputModal(discord.ui.Modal, title="팀원 선택"):
+    """팀원 멘션 입력 Modal"""
     
-    def __init__(self, bot, guild: discord.Guild, team_name: str, admin_id: str, members: list):
-        super().__init__(timeout=ViewConstants.TIMEOUT)
+    members_input = discord.ui.TextInput(
+        label="팀원 멘션",
+        placeholder="@유저1 @유저2 @유저3 형태로 입력하세요",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000
+    )
+    
+    def __init__(self, bot, guild: discord.Guild, team_name: str, admin_id: str):
+        super().__init__()
         self.bot = bot
         self.guild = guild
         self.team_name = team_name
         self.admin_id = admin_id
-        self.selected_members = []
-        self.view_id = f"{guild.id}_{id(self)}"
-        
-        # 서버 멤버 목록을 드롭다운에 추가
-        self._add_member_select(members)
     
-    def _add_member_select(self, members: list):
-        """멤버 선택 드롭다운 추가 (동기 메서드)"""
-        options = []
-        for member in members[:ViewConstants.DISCORD_SELECT_MAX]:
-            options.append(
-                discord.SelectOption(
-                    label=member.display_name,
-                    value=str(member.id),
-                    description=f"ID: {member.id}"
-                )
-            )
-        
-        if not options:
-            # 멤버가 없는 경우 처리
-            return
-        
-        select = discord.ui.Select(
-            placeholder="팀원을 선택하세요 (최대 25명)",
-            min_values=1,
-            max_values=min(len(options), 25),
-            options=options,
-            custom_id=f"team_member_select_{self.view_id}"
-        )
-        select.callback = self.member_selected
-        self.add_item(select)
-    
-    async def member_selected(self, interaction: discord.Interaction):
-        """팀원 선택 완료"""
-        self.selected_members = [
-            (user_id, self.guild.get_member(int(user_id)).display_name)
-            for user_id in interaction.data['values']
-        ]
-        
-        # 1. 기존 아이템 제거
-        self.clear_items()
-        
-        # 2. 확인 버튼 추가
-        confirm_btn = discord.ui.Button(
-            label="✅ 팀 생성 완료",
-            style=discord.ButtonStyle.success
-        )
-        confirm_btn.callback = self.confirm_team_creation
-        self.add_item(confirm_btn)
-        
-        await interaction.response.edit_message(
-            content=InfoMessages.MEMBERS_SELECTED.format(count=len(self.selected_members)),
-            view=self
-        )
-    
-    async def confirm_team_creation(self, interaction: discord.Interaction):
-        """팀 생성 확정"""
+    async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        # DB에 팀 생성
-        success, result = await self.bot.db_manager.create_event_team(
-            guild_id=str(self.guild.id),
-            team_name=self.team_name,
-            member_ids=self.selected_members,
-            created_by=self.admin_id
-        )
-        
-        if success:
-            embed = discord.Embed(
-                title="✅ 팀 생성 완료",
-                description=SuccessMessages.TEAM_CREATED.format(team_name=self.team_name),
-                color=0x00ff88,
-                timestamp=datetime.now()
+        try:
+            # 멘션에서 유저 ID 추출
+            import re
+            
+            # <@123456789> 형태 추출
+            mention_pattern = r'<@!?(\d+)>'
+            user_ids = re.findall(mention_pattern, self.members_input.value)
+            
+            if not user_ids:
+                await interaction.followup.send(
+                    "❌ 유효한 멘션을 찾을 수 없습니다.\n"
+                    "@유저명 형태로 입력해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 유저 정보 수집
+            member_data = []
+            invalid_users = []
+            
+            for user_id in user_ids:
+                member = self.guild.get_member(int(user_id))
+                if member and not member.bot:
+                    member_data.append((user_id, member.display_name))
+                elif member and member.bot:
+                    invalid_users.append(f"{member.display_name} (봇)")
+                else:
+                    invalid_users.append(f"<@{user_id}> (찾을 수 없음)")
+            
+            if not member_data:
+                await interaction.followup.send(
+                    "❌ 유효한 팀원이 없습니다.\n"
+                    "봇이 아닌 서버 멤버를 멘션해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # 팀 생성
+            success, result = await self.bot.db_manager.create_event_team(
+                guild_id=str(self.guild.id),
+                team_name=self.team_name,
+                member_ids=member_data,
+                created_by=self.admin_id
             )
             
-            members_text = "\n".join([
-                f"• <@{user_id}>" for user_id, _ in self.selected_members
-            ])
-            
-            embed.add_field(
-                name=f"👥 팀원 ({len(self.selected_members)}명)",
-                value=members_text,
-                inline=False
-            )
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
+            if success:
+                embed = discord.Embed(
+                    title="✅ 팀 생성 완료",
+                    description=f"**{self.team_name}** 팀이 생성되었습니다!",
+                    color=EventSystemSettings.Colors.SUCCESS,
+                    timestamp=datetime.now()
+                )
+                
+                members_text = "\n".join([
+                    f"• <@{user_id}>" for user_id, _ in member_data
+                ])
+                
+                embed.add_field(
+                    name=f"👥 팀원 ({len(member_data)}명)",
+                    value=members_text,
+                    inline=False
+                )
+                
+                if invalid_users:
+                    embed.add_field(
+                        name="⚠️ 제외된 유저",
+                        value="\n".join([f"• {user}" for user in invalid_users]),
+                        inline=False
+                    )
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    f"❌ 팀 생성 실패: {result}",
+                    ephemeral=True
+                )
+                
+        except Exception as e:
+            print(f"❌ 팀 생성 Modal 처리 오류: {e}")
+            import traceback
+            traceback.print_exc()
             await interaction.followup.send(
-                f"❌ 팀 생성 실패: {result}",
+                "❌ 팀 생성 중 오류가 발생했습니다.",
                 ephemeral=True
             )
-        
-        self.stop()
 
-    async def on_timeout(self):
-        """View 타임아웃 시 처리"""
-        for item in self.children:
-            item.disabled = True
+# class TeamManagementView(discord.ui.View):
+#     """팀 생성 시 팀원 선택용 View"""
+    
+#     def __init__(self, bot, guild: discord.Guild, team_name: str, admin_id: str, members: list):
+#         super().__init__(timeout=ViewConstants.TIMEOUT)
+#         self.bot = bot
+#         self.guild = guild
+#         self.team_name = team_name
+#         self.admin_id = admin_id
+#         self.selected_members = []
+#         self.view_id = f"{guild.id}_{id(self)}"
+        
+#         # 서버 멤버 목록을 드롭다운에 추가
+#         self._add_member_select(members)
+    
+#     def _add_member_select(self, members: list):
+#         """멤버 선택 드롭다운 추가 (동기 메서드)"""
+#         options = []
+#         for member in members[:ViewConstants.DISCORD_SELECT_MAX]:
+#             options.append(
+#                 discord.SelectOption(
+#                     label=member.display_name,
+#                     value=str(member.id),
+#                     description=f"ID: {member.id}"
+#                 )
+#             )
+        
+#         if not options:
+#             # 멤버가 없는 경우 처리
+#             return
+        
+#         select = discord.ui.Select(
+#             placeholder="팀원을 선택하세요 (최대 25명)",
+#             min_values=1,
+#             max_values=min(len(options), 25),
+#             options=options,
+#             custom_id=f"team_member_select_{self.view_id}"
+#         )
+#         select.callback = self.member_selected
+#         self.add_item(select)
+    
+#     async def member_selected(self, interaction: discord.Interaction):
+#         """팀원 선택 완료"""
+#         self.selected_members = [
+#             (user_id, self.guild.get_member(int(user_id)).display_name)
+#             for user_id in interaction.data['values']
+#         ]
+        
+#         # 1. 기존 아이템 제거
+#         self.clear_items()
+        
+#         # 2. 확인 버튼 추가
+#         confirm_btn = discord.ui.Button(
+#             label="✅ 팀 생성 완료",
+#             style=discord.ButtonStyle.success
+#         )
+#         confirm_btn.callback = self.confirm_team_creation
+#         self.add_item(confirm_btn)
+        
+#         await interaction.response.edit_message(
+#             content=InfoMessages.MEMBERS_SELECTED.format(count=len(self.selected_members)),
+#             view=self
+#         )
+    
+#     async def confirm_team_creation(self, interaction: discord.Interaction):
+#         """팀 생성 확정"""
+#         await interaction.response.defer(ephemeral=True)
+        
+#         # DB에 팀 생성
+#         success, result = await self.bot.db_manager.create_event_team(
+#             guild_id=str(self.guild.id),
+#             team_name=self.team_name,
+#             member_ids=self.selected_members,
+#             created_by=self.admin_id
+#         )
+        
+#         if success:
+#             embed = discord.Embed(
+#                 title="✅ 팀 생성 완료",
+#                 description=SuccessMessages.TEAM_CREATED.format(team_name=self.team_name),
+#                 color=0x00ff88,
+#                 timestamp=datetime.now()
+#             )
+            
+#             members_text = "\n".join([
+#                 f"• <@{user_id}>" for user_id, _ in self.selected_members
+#             ])
+            
+#             embed.add_field(
+#                 name=f"👥 팀원 ({len(self.selected_members)}명)",
+#                 value=members_text,
+#                 inline=False
+#             )
+            
+#             await interaction.followup.send(embed=embed, ephemeral=True)
+#         else:
+#             await interaction.followup.send(
+#                 f"❌ 팀 생성 실패: {result}",
+#                 ephemeral=True
+#             )
+        
+#         self.stop()
+
+#     async def on_timeout(self):
+#         """View 타임아웃 시 처리"""
+#         for item in self.children:
+#             item.disabled = True
 
 class MissionCreateModal(discord.ui.Modal, title="미션 등록"):
     """미션 생성용 Modal"""
@@ -689,19 +796,14 @@ class EventSystemCommands(commands.Cog):
             )
             return
         
-        view = TeamManagementView(
+        modal = TeamMembersInputModal(
             self.bot,
             interaction.guild,
             팀명,
-            str(interaction.user.id),
-            members  # 미리 준비된 멤버 리스트
+            str(interaction.user.id)
         )
         
-        await interaction.response.send_message(
-            InfoMessages.SELECT_MEMBERS.format(team_name=팀명),
-            view=view,
-            ephemeral=True
-        )
+        await interaction.response.send_modal(modal)
     
     @app_commands.command(name="이벤트팀목록", description="[관리자] 생성된 팀 목록 확인")
     @app_commands.default_permissions(manage_guild=True)
@@ -750,8 +852,8 @@ class EventSystemCommands(commands.Cog):
     )
     @app_commands.choices(카테고리=[
         app_commands.Choice(name="📅 일일 퀘스트", value="daily"),
-        app_commands.Choice(name="💻 온라인 특별", value="online"),
-        app_commands.Choice(name="🏃 오프라인 특별", value="offline"),
+        app_commands.Choice(name="💻 온라인", value="online"),
+        app_commands.Choice(name="🏃 오프라인", value="offline"),
         app_commands.Choice(name="🎁 히든 미션", value="hidden")
     ])
     @app_commands.default_permissions(manage_guild=True)
@@ -783,8 +885,8 @@ class EventSystemCommands(commands.Cog):
     )
     @app_commands.choices(카테고리=[
         app_commands.Choice(name="📅 일일 퀘스트", value="daily"),
-        app_commands.Choice(name="💻 온라인 특별", value="online"),
-        app_commands.Choice(name="🏃 오프라인 특별", value="offline"),
+        app_commands.Choice(name="💻 온라인", value="online"),
+        app_commands.Choice(name="🏃 오프라인", value="offline"),
         app_commands.Choice(name="🎁 히든 미션", value="hidden"),
         app_commands.Choice(name="🌟 전체 보기", value="all")
     ])
@@ -828,8 +930,8 @@ class EventSystemCommands(commands.Cog):
         # 카테고리 정보
         category_info = {
             'daily': {'name': '일일 퀘스트', 'emoji': '📅'},
-            'online': {'name': '온라인 특별', 'emoji': '💻'},
-            'offline': {'name': '오프라인 특별', 'emoji': '🏃'},
+            'online': {'name': '온라인', 'emoji': '💻'},
+            'offline': {'name': '오프라인', 'emoji': '🏃'},
             'hidden': {'name': '히든 미션', 'emoji': '🎁'}
         }
         
