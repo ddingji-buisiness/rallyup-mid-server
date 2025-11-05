@@ -1257,7 +1257,7 @@ class EventSystemCommands(commands.Cog):
     @app_commands.command(name="이벤트순위", description="전체 팀 순위표 확인")
     async def event_rankings(self, interaction: discord.Interaction):
         """전체 팀 순위 조회 (모든 유저 사용 가능)"""
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
         
         guild_id = str(interaction.guild_id)
         
@@ -1267,7 +1267,7 @@ class EventSystemCommands(commands.Cog):
         if not rankings:
             await interaction.followup.send(
                 "📋 아직 생성된 팀이 없거나 진행 중인 이벤트가 없습니다.",
-                ephemeral=True
+                ephemeral=False
             )
             return
         
@@ -1330,7 +1330,7 @@ class EventSystemCommands(commands.Cog):
         
         embed.set_footer(text="💡 /내팀정보 명령어로 내 팀의 상세 정보를 확인하세요")
         
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=False)
 
     @app_commands.command(name="내팀정보", description="내가 속한 팀의 정보 및 점수 확인")
     async def my_team_info(self, interaction: discord.Interaction):
