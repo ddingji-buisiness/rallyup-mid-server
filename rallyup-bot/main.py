@@ -196,6 +196,15 @@ class RallyUpBot(commands.Bot):
             except Exception as e:
                 logger.error(f"❌ 음성 세션 복구 실패: {e}", exc_info=True)
 
+        # 이벤트 시스템 음성 세션 복구
+        if hasattr(self, 'voice_session_tracker') and self.voice_session_tracker:
+            try:
+                await self.voice_session_tracker.start()
+                await self.voice_session_tracker.restore_sessions_from_db()
+                logger.info("🔄 이벤트 음성 세션 복구 완료")
+            except Exception as e:
+                logger.error(f"❌ 이벤트 음성 세션 복구 실패: {e}", exc_info=True)
+
         # 스케줄러 상태 확인
         if self.bamboo_scheduler.running:
             logger.info("대나무숲 스케줄러가 실행중입니다.")

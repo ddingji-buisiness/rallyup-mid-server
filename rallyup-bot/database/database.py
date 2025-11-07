@@ -575,6 +575,27 @@ class DatabaseManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # 9. 활성 음성 세션 테이블 (봇 재시작 시 복구용)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS active_voice_sessions (
+                    session_key TEXT PRIMARY KEY,
+                    team_id TEXT NOT NULL,
+                    team_name TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    members TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    last_check_time TEXT NOT NULL,
+                    hours_awarded INTEGER DEFAULT 0,
+                    is_bonus_mode BOOLEAN DEFAULT FALSE,
+                    bonus_start_time TEXT,
+                    member_count INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE
+                )
+            ''')
             
             # 인덱스 생성
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_teams_guild ON event_teams(guild_id, is_active)')
@@ -588,6 +609,8 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_activity_log_session ON event_voice_activity_log(session_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_activity_log_team ON event_voice_activity_log(team_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_team_daily_scores_team_date ON voice_team_daily_scores(team_id, date)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_active_voice_sessions_team ON active_voice_sessions(team_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_active_voice_sessions_guild ON active_voice_sessions(guild_id)')
 
             await db.commit()
             print("✅ 이벤트 시스템 테이블 생성 완료")
@@ -12538,3 +12561,210 @@ class DatabaseManager:
                 'date': '',
                 'sessions': []
             }
+
+    async def save_active_voice_session(
+        self,
+        team_id: str,
+        team_name: str,
+        guild_id: str,
+        channel_id: str,
+        members: set,
+        start_time: str,
+        last_check_time: str,
+        hours_awarded: int,
+        is_bonus_mode: bool,
+        bonus_start_time: Optional[str],
+        member_count: int
+    ) -> bool:
+        """활성 음성 세션 저장/업데이트 (봇 재시작 대비)
+        
+        Args:
+            team_id: 팀 ID
+            team_name: 팀 이름
+            guild_id: 서버 ID
+            channel_id: 음성 채널 ID
+            members: 참여 중인 멤버 ID 세트
+            start_time: 세션 시작 시간 (ISO format)
+            last_check_time: 마지막 체크 시간 (ISO format)
+            hours_awarded: 지급된 시간 수
+            is_bonus_mode: 보너스 모드 여부
+            bonus_start_time: 보너스 모드 시작 시간 (ISO format)
+            member_count: 현재 멤버 수
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            session_key = f"{team_id}_{channel_id}"
+            members_json = json.dumps(list(members))
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO active_voice_sessions (
+                        session_key, team_id, team_name, guild_id, channel_id,
+                        members, start_time, last_check_time, hours_awarded,
+                        is_bonus_mode, bonus_start_time, member_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (
+                    session_key, team_id, team_name, guild_id, channel_id,
+                    members_json, start_time, last_check_time, hours_awarded,
+                    is_bonus_mode, bonus_start_time, member_count
+                ))
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ 활성 세션 저장 실패: {e}", exc_info=True)
+            return False
+
+    async def load_active_voice_sessions(self) -> List[Dict]:
+        """활성 음성 세션 전체 로드 (봇 시작 시)
+        
+        Returns:
+            세션 정보 딕셔너리 리스트
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        team_id, team_name, guild_id, channel_id,
+                        members, start_time, last_check_time, hours_awarded,
+                        is_bonus_mode, bonus_start_time, member_count
+                    FROM active_voice_sessions
+                ''') as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    sessions = []
+                    for row in rows:
+                        sessions.append({
+                            'team_id': row[0],
+                            'team_name': row[1],
+                            'guild_id': row[2],
+                            'channel_id': row[3],
+                            'members': set(json.loads(row[4])),
+                            'start_time': row[5],
+                            'last_check_time': row[6],
+                            'hours_awarded': row[7],
+                            'is_bonus_mode': bool(row[8]),
+                            'bonus_start_time': row[9],
+                            'member_count': row[10]
+                        })
+                    
+                    return sessions
+                    
+        except Exception as e:
+            logger.error(f"❌ 활성 세션 로드 실패: {e}", exc_info=True)
+            return []
+    
+    async def get_all_active_voice_sessions(self) -> List[dict]:
+        """모든 활성 음성 세션 조회 (봇 시작 시 복구용)
+        
+        Returns:
+            [{
+                'team_id': str,
+                'team_name': str,
+                'guild_id': str,
+                'channel_id': str,
+                'members': set[str],
+                'start_time': datetime,
+                'last_check_time': datetime,
+                'hours_awarded': int,
+                'is_bonus_mode': bool,
+                'bonus_start_time': Optional[datetime],
+                'member_count': int
+            }, ...]
+        """
+        try:
+            import json
+            from datetime import datetime
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT team_id, team_name, guild_id, channel_id, members,
+                           start_time, last_check_time, hours_awarded,
+                           is_bonus_mode, bonus_start_time, member_count
+                    FROM active_voice_sessions
+                ''') as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    sessions = []
+                    for row in rows:
+                        sessions.append({
+                            'team_id': row[0],
+                            'team_name': row[1],
+                            'guild_id': row[2],
+                            'channel_id': row[3],
+                            'members': set(json.loads(row[4])),
+                            'start_time': datetime.fromisoformat(row[5]),
+                            'last_check_time': datetime.fromisoformat(row[6]),
+                            'hours_awarded': row[7],
+                            'is_bonus_mode': bool(row[8]),
+                            'bonus_start_time': datetime.fromisoformat(row[9]) if row[9] else None,
+                            'member_count': row[10]
+                        })
+                    
+                    return sessions
+                    
+        except Exception as e:
+            logger.error(f"❌ 활성 세션 목록 조회 실패: {e}", exc_info=True)
+            return []
+    
+    async def delete_active_voice_session(self, team_id: str, channel_id: str) -> bool:
+        """활성 음성 세션 삭제 (세션 종료 시)
+        
+        Args:
+            team_id: 팀 ID
+            channel_id: 채널 ID
+        """
+        try:
+            session_key = f"{team_id}_{channel_id}"
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    DELETE FROM active_voice_sessions
+                    WHERE session_key = ?
+                ''', (session_key,))
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ 활성 세션 삭제 실패: {e}", exc_info=True)
+            return False
+    
+    async def clear_all_active_voice_sessions(self) -> bool:
+        """모든 활성 음성 세션 삭제 (초기화용)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('DELETE FROM active_voice_sessions')
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ 활성 세션 전체 삭제 실패: {e}", exc_info=True)
+            return False
+
+    async def cleanup_stale_voice_sessions(self, max_age_hours: int = 24) -> int:
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 24시간 이상 업데이트되지 않은 세션 삭제
+                result = await db.execute('''
+                    DELETE FROM active_voice_sessions
+                    WHERE datetime(updated_at) < datetime('now', '-' || ? || ' hours')
+                ''', (max_age_hours,))
+                await db.commit()
+                
+                deleted_count = result.rowcount
+                if deleted_count > 0:
+                    logger.info(f"🧹 {deleted_count}개의 오래된 세션 정리됨")
+                
+                return deleted_count
+                
+        except Exception as e:
+            logger.error(f"❌ 오래된 세션 정리 실패: {e}", exc_info=True)
+            return 0
+
+
+
+
+
+
