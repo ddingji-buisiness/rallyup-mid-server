@@ -11542,43 +11542,60 @@ class DatabaseManager:
         """서버의 전체 팀 순위 (점수 순)"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
+                # 오늘 날짜 계산 (오전 9시 기준)
+                now = datetime.now()
+                if now.hour < 9:
+                    today = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+                else:
+                    today = now.strftime('%Y-%m-%d')
+                
                 async with db.execute('''
                     SELECT 
                         t.team_id,
                         t.team_name,
-                        COALESCE(SUM(c.awarded_points), 0) as mission_score,
-                        COUNT(DISTINCT c.mission_id) as completed_missions,
-                        COUNT(DISTINCT m.user_id) as member_count
+                        COALESCE(mission_scores.total_score, 0) as mission_score,
+                        COALESCE(mission_scores.completed_missions, 0) as completed_missions,
+                        COALESCE(members.member_count, 0) as member_count,
+                        COALESCE(voice_scores.voice_score, 0) as voice_score
                     FROM event_teams t
-                    LEFT JOIN event_mission_completions c ON t.team_id = c.team_id
-                    LEFT JOIN event_team_members m ON t.team_id = m.team_id
+                    LEFT JOIN (
+                        SELECT 
+                            team_id,
+                            SUM(awarded_points) as total_score,
+                            COUNT(DISTINCT mission_id) as completed_missions
+                        FROM event_mission_completions
+                        GROUP BY team_id
+                    ) mission_scores ON t.team_id = mission_scores.team_id
+                    LEFT JOIN (
+                        SELECT 
+                            team_id,
+                            COUNT(DISTINCT user_id) as member_count
+                        FROM event_team_members
+                        GROUP BY team_id
+                    ) members ON t.team_id = members.team_id
+                    LEFT JOIN (
+                        SELECT 
+                            team_id,
+                            total_score as voice_score
+                        FROM voice_team_daily_scores
+                        WHERE date = ?
+                    ) voice_scores ON t.team_id = voice_scores.team_id
                     WHERE t.guild_id = ? AND t.is_active = TRUE
-                    GROUP BY t.team_id
-                ''', (guild_id,)) as cursor:
+                ''', (today, guild_id)) as cursor:
                     rows = await cursor.fetchall()
                     
                     rankings = []
                     for row in rows:
-                        team_id = row[0]
-                        
-                        # 음성 활동 총 점수 조회
-                        async with db.execute('''
-                            SELECT COALESCE(SUM(total_score), 0)
-                            FROM voice_team_daily_scores
-                            WHERE team_id = ?
-                        ''', (team_id,)) as voice_cursor:
-                            voice_row = await voice_cursor.fetchone()
-                            voice_score = voice_row[0] if voice_row else 0
-                        
-                        # 총 점수 = 미션 점수 + 음성 점수
-                        total_score = row[2] + voice_score
+                        mission_score = row[2]
+                        voice_score = row[5]
+                        total_score = mission_score + voice_score
                         
                         rankings.append({
                             'rank': 0,  # 나중에 정렬 후 순위 부여
-                            'team_id': team_id,
+                            'team_id': row[0],
                             'team_name': row[1],
                             'total_score': total_score,
-                            'mission_score': row[2],
+                            'mission_score': mission_score,
                             'voice_score': voice_score,
                             'completed_missions': row[3],
                             'member_count': row[4]
@@ -11595,6 +11612,8 @@ class DatabaseManager:
                     
         except Exception as e:
             print(f"❌ 팀 순위 조회 실패: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     async def get_team_rank(self, team_id: str) -> dict:
