@@ -1318,13 +1318,21 @@ class EventSystemCommands(commands.Cog):
         
         # 통계 정보
         total_points = sum(r['total_score'] for r in rankings)
+        total_mission_points = sum(r['mission_score'] for r in rankings)
+        total_voice_points = sum(r.get('voice_score', 0) for r in rankings)
         total_completions = sum(r['completed_missions'] for r in rankings)
+
+        stats_text = (
+            f"**총 획득 점수**: {total_points}점\n"
+            f"├─ 미션 점수: {total_mission_points}점\n"
+            f"└─ 음성 활동: {total_voice_points}점\n"
+            f"**총 완료 미션**: {total_completions}개\n"
+            f"**평균 점수**: {round(total_points / len(rankings), 1)}점"
+        )
         
         embed.add_field(
             name="📈 전체 통계",
-            value=f"**총 획득 점수**: {total_points}점\n"
-                f"**총 완료 미션**: {total_completions}개\n"
-                f"**평균 점수**: {round(total_points / len(rankings), 1)}점",
+            value=stats_text,
             inline=False
         )
         
@@ -1345,7 +1353,7 @@ class EventSystemCommands(commands.Cog):
         
         if not my_team:
             await interaction.followup.send(
-                ErrorMessages.NOT_IN_EVENT_TEAM,
+                ErrorMessages.NOT_IN_TEAM,
                 ephemeral=True
             )
             return
@@ -1364,6 +1372,9 @@ class EventSystemCommands(commands.Cog):
         # 카테고리별 통계
         category_stats = await self.bot.db_manager.get_team_category_stats(team_id)
         
+        # 오늘 음성 활동 점수
+        voice_today = await self.bot.db_manager.get_team_today_voice_score(team_id)
+        
         # 최근 이력
         recent_history = await self.bot.db_manager.get_team_mission_history(
             team_id,
@@ -1372,11 +1383,23 @@ class EventSystemCommands(commands.Cog):
         
         # Embed 생성
         embed = discord.Embed(
-            title=f"👥 {team_details['team_name']}",
-            description=f"**순위**: {team_rank['rank']}위 / {team_rank['total_teams']}팀\n"
-                        f"**총점**: **{team_rank['total_score']}점**",
+            title=f"💥 {team_details['team_name']}",
+            description=f"**순위**: {team_rank['rank']}위 / {team_rank['total_teams']}팀",
             color=0x0099ff,
             timestamp=datetime.now()
+        )
+        
+        # 점수 정보 (미션 + 음성 구분)
+        score_text = (
+            f"**총 점수**: {team_rank['total_score']}점\n"
+            f"├─ 미션 점수: {team_rank['mission_score']}점\n"
+            f"└─ 음성 활동: {team_rank['voice_score']}점"
+        )
+        
+        embed.add_field(
+            name="🏆 점수",
+            value=score_text,
+            inline=True
         )
         
         # 팀원 목록
@@ -1387,6 +1410,33 @@ class EventSystemCommands(commands.Cog):
         embed.add_field(
             name=f"👥 팀원 ({len(team_details['members'])}명)",
             value="\n".join(members_text) if members_text else "없음",
+            inline=True
+        )
+        
+        # 오늘의 음성 활동 상세
+        voice_text = (
+            f"**오늘 획득**: {voice_today['today_score']}/{voice_today['max_score']}점\n"
+            f"**남은 점수**: {voice_today['remaining']}점\n"
+            f"**세션 수**: {voice_today['session_count']}회"
+        )
+        
+        # 현재 활성 세션 확인
+        if self.bot.voice_session_tracker:
+            active_sessions = self.bot.voice_session_tracker.get_active_sessions_info()
+            team_session = next((s for s in active_sessions if s["team_id"] == team_id), None)
+            
+            if team_session:
+                elapsed_min = int(team_session["elapsed_seconds"] / 60)
+                if team_session["is_bonus_mode"]:
+                    bonus_elapsed = team_session.get("bonus_elapsed_seconds")
+                    bonus_min = int(bonus_elapsed / 60) if bonus_elapsed else 0
+                    voice_text += f"\n\n🎉 **보너스 모드 진행 중!**\n({team_session['member_count']}명, {bonus_min}분 경과)"
+                else:
+                    voice_text += f"\n\n🎮 **활동 중**\n({team_session['member_count']}명, {elapsed_min}분 경과)"
+        
+        embed.add_field(
+            name="🎤 오늘의 음성 활동",
+            value=voice_text + "\n\n💡 *2명+ 1시간당 1점, 5명+ 1시간 유지 시 10점!*",
             inline=False
         )
         

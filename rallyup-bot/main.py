@@ -12,6 +12,7 @@ from commands.scrim_recruitment import RecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
 from utils.balancing_session_manager import session_manager
 from utils.voice_level_tracker import VoiceLevelTracker
+from utils.voice_session_tracker import VoiceSessionTracker
 from scheduler.auto_recruitment_scheduler import AutoRecruitmentScheduler
 
 from config.settings import Settings
@@ -54,6 +55,7 @@ class RallyUpBot(commands.Bot):
         self.battle_tag_logger = None
         self.tier_change_scheduler = None  
         self.voice_level_tracker = None
+        self.voice_session_tracker = None
 
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
@@ -76,6 +78,11 @@ class RallyUpBot(commands.Bot):
             if not self.voice_level_tracker:
                 self.voice_level_tracker = VoiceLevelTracker(self)
                 logger.info("음성 레벨 트래커 시작")
+
+            if not self.voice_session_tracker:
+                self.voice_session_tracker = VoiceSessionTracker(self, self.db_manager)
+                await self.voice_session_tracker.start()
+                logger.info("음성 세션 트래커 시작 (이벤트 팀 점수 자동 지급)")
 
             if not self.recruitment_scheduler:
                 self.recruitment_scheduler = RecruitmentScheduler(self)
@@ -444,7 +451,7 @@ class RallyUpBot(commands.Bot):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         """음성 채널 상태 변경 이벤트"""
         try:
-            # 1. 기존 voice_level_tracker 처리
+            # 기존 voice_level_tracker 처리
             if self.voice_level_tracker:
                 if before.channel is None and after.channel is not None:
                     await self.voice_level_tracker.handle_voice_join(member, after.channel)
@@ -460,8 +467,12 @@ class RallyUpBot(commands.Bot):
                     await self.voice_level_tracker.handle_screen_share_change(
                         member, before.self_stream, after.self_stream
                     )
-            
-            # 2. 팀정보 업데이트 처리 추가
+
+            # voice_session_tracker 처리 (이벤트 팀 점수)
+            if self.voice_session_tracker:
+                await self.voice_session_tracker.on_voice_state_update(member, before, after)
+
+            # 팀정보 업데이트 처리 추가
             team_info_cog = self.get_cog('TeamInfoCommands')
             if team_info_cog and not member.bot:
                 guild_id = str(member.guild.id)
@@ -505,6 +516,10 @@ class RallyUpBot(commands.Bot):
             if self.voice_level_tracker:
                 self.voice_level_tracker.stop()
                 logger.info("음성 레벨 트래커 종료")
+
+            if self.voice_session_tracker:
+                await self.voice_session_tracker.stop()
+                logger.info("음성 세션 트래커 종료")
 
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")

@@ -504,7 +504,69 @@ class DatabaseManager:
                 )
             ''')
 
-            # 5. 공지 채널 설정 테이블
+            # 5. 음성 채널 활동 세션 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_voice_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    team_id TEXT NOT NULL,
+                    member_count INTEGER NOT NULL,
+                    session_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_checked TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    hours_completed INTEGER DEFAULT 0,
+                    points_awarded INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    session_end TIMESTAMP,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id)
+                )
+            ''')
+
+            # 7. 음성 채널 팀 일일 점수 테이블 (오전 9시 기준)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voice_team_daily_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_score INTEGER DEFAULT 0,
+                    sessions TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE,
+                    UNIQUE(team_id, date)
+                )
+            ''')
+
+            # 6. 음성 채널 활동 점수 로그 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS event_voice_activity_log (
+                    log_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    team_id TEXT NOT NULL,
+                    points_awarded INTEGER NOT NULL,
+                    member_count INTEGER NOT NULL,
+                    hours_at_award INTEGER NOT NULL,
+                    awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reason TEXT,
+                    FOREIGN KEY (session_id) REFERENCES event_voice_sessions(session_id),
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id)
+                )
+            ''')
+
+            # 7. 음성 채널 팀 일일 점수 테이블 (오전 9시 기준)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voice_team_daily_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_score INTEGER DEFAULT 0,
+                    sessions TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE,
+                    UNIQUE(team_id, date)
+                )
+            ''')
+
+            # 8. 공지 채널 설정 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS event_announcement_channels (
                     guild_id TEXT PRIMARY KEY,
@@ -521,7 +583,11 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_missions_guild ON event_missions(guild_id, is_active)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_completions_team ON event_mission_completions(team_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_event_completions_mission ON event_mission_completions(mission_id)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_teams_guild ON event_teams(guild_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_sessions_team ON event_voice_sessions(team_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_sessions_guild ON event_voice_sessions(guild_id, is_active)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_activity_log_session ON event_voice_activity_log(session_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_event_voice_activity_log_team ON event_voice_activity_log(team_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_voice_team_daily_scores_team_date ON voice_team_daily_scores(team_id, date)')
 
             await db.commit()
             print("✅ 이벤트 시스템 테이블 생성 완료")
@@ -10917,11 +10983,14 @@ class DatabaseManager:
             return False, str(e)
 
     async def get_user_event_team(self, guild_id: str, user_id: str) -> dict:
-        """특정 유저가 속한 팀 정보 조회"""
+        """유저가 속한 이벤트 팀 정보 조회"""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
-                    SELECT t.team_id, t.team_name
+                    SELECT 
+                        t.team_id,
+                        t.team_name,
+                        t.guild_id
                     FROM event_teams t
                     JOIN event_team_members m ON t.team_id = m.team_id
                     WHERE t.guild_id = ? AND m.user_id = ? AND t.is_active = TRUE
@@ -10929,14 +10998,39 @@ class DatabaseManager:
                     row = await cursor.fetchone()
                     
                     if row:
+                        team_id = row[0]
+                        
+                        # 팀의 총 점수 계산 (미션 + 음성)
+                        async with db.execute('''
+                            SELECT COALESCE(SUM(awarded_points), 0)
+                            FROM event_mission_completions
+                            WHERE team_id = ?
+                        ''', (team_id,)) as score_cursor:
+                            score_row = await score_cursor.fetchone()
+                            mission_score = score_row[0] if score_row else 0
+                        
+                        # 음성 점수
+                        async with db.execute('''
+                            SELECT COALESCE(SUM(total_score), 0)
+                            FROM voice_team_daily_scores
+                            WHERE team_id = ?
+                        ''', (team_id,)) as voice_cursor:
+                            voice_row = await voice_cursor.fetchone()
+                            voice_score = voice_row[0] if voice_row else 0
+                        
                         return {
-                            'team_id': row[0],
-                            'team_name': row[1]
+                            'team_id': team_id,
+                            'team_name': row[1],
+                            'guild_id': row[2],
+                            'total_score': mission_score + voice_score,
+                            'mission_score': mission_score,
+                            'voice_score': voice_score
                         }
+                    
                     return None
                     
         except Exception as e:
-            print(f"❌ 유저 팀 조회 실패: {e}")
+            print(f"❌ 유저 이벤트 팀 조회 실패: {e}")
             return None
 
     async def create_event_mission(
@@ -11452,48 +11546,55 @@ class DatabaseManager:
                     SELECT 
                         t.team_id,
                         t.team_name,
-                        COALESCE(scores.total_score, 0) as total_score,
-                        COALESCE(scores.completed_missions, 0) as completed_missions,
-                        COALESCE(members.member_count, 0) as member_count
+                        COALESCE(SUM(c.awarded_points), 0) as mission_score,
+                        COUNT(DISTINCT c.mission_id) as completed_missions,
+                        COUNT(DISTINCT m.user_id) as member_count
                     FROM event_teams t
-                    LEFT JOIN (
-                        SELECT 
-                            team_id,
-                            SUM(awarded_points) as total_score,
-                            COUNT(DISTINCT mission_id) as completed_missions
-                        FROM event_mission_completions
-                        GROUP BY team_id
-                    ) scores ON t.team_id = scores.team_id
-                    LEFT JOIN (
-                        SELECT 
-                            team_id,
-                            COUNT(DISTINCT user_id) as member_count
-                        FROM event_team_members
-                        GROUP BY team_id
-                    ) members ON t.team_id = members.team_id
+                    LEFT JOIN event_mission_completions c ON t.team_id = c.team_id
+                    LEFT JOIN event_team_members m ON t.team_id = m.team_id
                     WHERE t.guild_id = ? AND t.is_active = TRUE
                     GROUP BY t.team_id
-                    ORDER BY total_score DESC, completed_missions DESC, t.team_name
                 ''', (guild_id,)) as cursor:
                     rows = await cursor.fetchall()
                     
                     rankings = []
-                    for rank, row in enumerate(rows, 1):
+                    for row in rows:
+                        team_id = row[0]
+                        
+                        # 음성 활동 총 점수 조회
+                        async with db.execute('''
+                            SELECT COALESCE(SUM(total_score), 0)
+                            FROM voice_team_daily_scores
+                            WHERE team_id = ?
+                        ''', (team_id,)) as voice_cursor:
+                            voice_row = await voice_cursor.fetchone()
+                            voice_score = voice_row[0] if voice_row else 0
+                        
+                        # 총 점수 = 미션 점수 + 음성 점수
+                        total_score = row[2] + voice_score
+                        
                         rankings.append({
-                            'rank': rank,
-                            'team_id': row[0],
+                            'rank': 0,  # 나중에 정렬 후 순위 부여
+                            'team_id': team_id,
                             'team_name': row[1],
-                            'total_score': row[2],
+                            'total_score': total_score,
+                            'mission_score': row[2],
+                            'voice_score': voice_score,
                             'completed_missions': row[3],
                             'member_count': row[4]
                         })
+                    
+                    # 총 점수로 정렬
+                    rankings.sort(key=lambda x: (x['total_score'], x['completed_missions'], x['team_name']), reverse=True)
+                    
+                    # 순위 부여
+                    for rank, team_data in enumerate(rankings, 1):
+                        team_data['rank'] = rank
                     
                     return rankings
                     
         except Exception as e:
             print(f"❌ 팀 순위 조회 실패: {e}")
-            import traceback
-            traceback.print_exc()
             return []
 
     async def get_team_rank(self, team_id: str) -> dict:
@@ -11509,7 +11610,7 @@ class DatabaseManager:
                         return None
                     guild_id = row[0]
                 
-                # 전체 순위 조회
+                # 전체 순위 조회 (음성 점수 포함)
                 rankings = await self.get_team_rankings(guild_id)
                 
                 # 해당 팀 찾기
@@ -11520,6 +11621,8 @@ class DatabaseManager:
                             'total_teams': len(rankings),
                             'team_name': team_rank['team_name'],
                             'total_score': team_rank['total_score'],
+                            'mission_score': team_rank['mission_score'],
+                            'voice_score': team_rank['voice_score'],
                             'completed_missions': team_rank['completed_missions']
                         }
                 
@@ -11915,3 +12018,504 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 공지 채널 해제 실패: {e}")
             return False, str(e)
+
+    async def create_event_voice_session(
+        self,
+        guild_id: str,
+        channel_id: str,
+        team_id: str,
+        member_count: int
+    ) -> tuple[bool, str]:
+        """음성 채널 세션 생성
+        
+        Returns:
+            (성공여부, session_id 또는 에러메시지)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                session_id = self.generate_uuid()
+                
+                await db.execute('''
+                    INSERT INTO event_voice_sessions 
+                    (session_id, guild_id, channel_id, team_id, member_count)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (session_id, guild_id, channel_id, team_id, member_count))
+                
+                await db.commit()
+                return True, session_id
+                
+        except Exception as e:
+            print(f"❌ 음성 세션 생성 실패: {e}")
+            return False, str(e)
+    
+    async def get_active_voice_session(
+        self,
+        guild_id: str,
+        channel_id: str,
+        team_id: str
+    ) -> dict:
+        """활성 음성 채널 세션 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        session_id,
+                        member_count,
+                        session_start,
+                        last_checked,
+                        hours_completed,
+                        points_awarded
+                    FROM event_voice_sessions
+                    WHERE guild_id = ? 
+                        AND channel_id = ? 
+                        AND team_id = ?
+                        AND is_active = TRUE
+                    ORDER BY session_start DESC
+                    LIMIT 1
+                ''', (guild_id, channel_id, team_id)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'session_id': row[0],
+                            'member_count': row[1],
+                            'session_start': row[2],
+                            'last_checked': row[3],
+                            'hours_completed': row[4],
+                            'points_awarded': row[5]
+                        }
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 활성 세션 조회 실패: {e}")
+            return None
+    
+    async def update_voice_session(
+        self,
+        session_id: str,
+        member_count: int = None,
+        hours_completed: int = None,
+        points_awarded: int = None
+    ) -> bool:
+        """음성 채널 세션 업데이트"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                updates = ["last_checked = CURRENT_TIMESTAMP"]
+                params = []
+                
+                if member_count is not None:
+                    updates.append("member_count = ?")
+                    params.append(member_count)
+                
+                if hours_completed is not None:
+                    updates.append("hours_completed = ?")
+                    params.append(hours_completed)
+                
+                if points_awarded is not None:
+                    updates.append("points_awarded = ?")
+                    params.append(points_awarded)
+                
+                params.append(session_id)
+                
+                query = f'''
+                    UPDATE event_voice_sessions
+                    SET {", ".join(updates)}
+                    WHERE session_id = ?
+                '''
+                
+                await db.execute(query, params)
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 세션 업데이트 실패: {e}")
+            return False
+    
+    async def end_voice_session(self, session_id: str) -> bool:
+        """음성 채널 세션 종료"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE event_voice_sessions
+                    SET is_active = FALSE,
+                        session_end = CURRENT_TIMESTAMP
+                    WHERE session_id = ?
+                ''', (session_id,))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 세션 종료 실패: {e}")
+            return False
+    
+    async def log_voice_activity_points(
+        self,
+        session_id: str,
+        team_id: str,
+        points_awarded: int,
+        member_count: int,
+        hours_at_award: int,
+        reason: str = None
+    ) -> bool:
+        """음성 활동 점수 부여 로그 기록"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                log_id = self.generate_uuid()
+                
+                await db.execute('''
+                    INSERT INTO event_voice_activity_log
+                    (log_id, session_id, team_id, points_awarded, 
+                     member_count, hours_at_award, reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (log_id, session_id, team_id, points_awarded, 
+                      member_count, hours_at_award, reason))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 음성 활동 로그 기록 실패: {e}")
+            return False
+    
+    async def get_all_active_voice_sessions(self, guild_id: str) -> list:
+        """서버의 모든 활성 음성 세션 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        vs.session_id,
+                        vs.channel_id,
+                        vs.team_id,
+                        t.team_name,
+                        vs.member_count,
+                        vs.session_start,
+                        vs.last_checked,
+                        vs.hours_completed,
+                        vs.points_awarded
+                    FROM event_voice_sessions vs
+                    JOIN event_teams t ON vs.team_id = t.team_id
+                    WHERE vs.guild_id = ? AND vs.is_active = TRUE
+                    ORDER BY vs.session_start
+                ''', (guild_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    sessions = []
+                    for row in rows:
+                        sessions.append({
+                            'session_id': row[0],
+                            'channel_id': row[1],
+                            'team_id': row[2],
+                            'team_name': row[3],
+                            'member_count': row[4],
+                            'session_start': row[5],
+                            'last_checked': row[6],
+                            'hours_completed': row[7],
+                            'points_awarded': row[8]
+                        })
+                    
+                    return sessions
+                    
+        except Exception as e:
+            print(f"❌ 활성 세션 목록 조회 실패: {e}")
+            return []
+    
+    async def get_team_voice_activity_stats(
+        self,
+        team_id: str
+    ) -> dict:
+        """팀의 음성 활동 통계 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 전체 통계
+                async with db.execute('''
+                    SELECT 
+                        COUNT(*) as total_sessions,
+                        SUM(points_awarded) as total_points,
+                        SUM(hours_completed) as total_hours
+                    FROM event_voice_sessions
+                    WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'total_sessions': row[0] or 0,
+                            'total_points': row[1] or 0,
+                            'total_hours': row[2] or 0
+                        }
+                    return {
+                        'total_sessions': 0,
+                        'total_points': 0,
+                        'total_hours': 0
+                    }
+                    
+        except Exception as e:
+            print(f"❌ 음성 활동 통계 조회 실패: {e}")
+            return {
+                'total_sessions': 0,
+                'total_points': 0,
+                'total_hours': 0
+            }
+    
+    async def get_user_team(self, guild_id: str, user_id: str) -> dict:
+        """유저가 속한 팀 정보 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT t.team_id, t.team_name, t.guild_id
+                    FROM event_teams t
+                    JOIN event_team_members m ON t.team_id = m.team_id
+                    WHERE t.guild_id = ? 
+                        AND m.user_id = ? 
+                        AND t.is_active = TRUE
+                    LIMIT 1
+                ''', (guild_id, user_id)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'team_id': row[0],
+                            'team_name': row[1],
+                            'guild_id': row[2]
+                        }
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 유저 팀 정보 조회 실패: {e}")
+            return None
+    
+    async def get_team_members(self, team_id: str) -> list:
+        """팀의 모든 멤버 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id, username, joined_at
+                    FROM event_team_members
+                    WHERE team_id = ?
+                    ORDER BY joined_at
+                ''', (team_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    members = []
+                    for row in rows:
+                        members.append({
+                            'user_id': row[0],
+                            'username': row[1],
+                            'joined_at': row[2]
+                        })
+                    
+                    return members
+                    
+        except Exception as e:
+            print(f"❌ 팀원 목록 조회 실패: {e}")
+            return []
+    
+    async def get_team_by_id(self, team_id: str) -> dict:
+        """팀 ID로 팀 정보 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        team_id,
+                        guild_id,
+                        team_name,
+                        created_by,
+                        created_at,
+                        is_active
+                    FROM event_teams
+                    WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        return {
+                            'team_id': row[0],
+                            'guild_id': row[1],
+                            'team_name': row[2],
+                            'created_by': row[3],
+                            'created_at': row[4],
+                            'is_active': row[5]
+                        }
+                    return None
+                    
+        except Exception as e:
+            print(f"❌ 팀 정보 조회 실패: {e}")
+            return None
+        
+    async def get_voice_team_daily_score(self, team_id: str, date: str) -> int:
+        """팀의 특정 날짜 음성 활동 점수 조회
+        
+        Args:
+            team_id: 팀 ID
+            date: 날짜 (YYYY-MM-DD 형식)
+        
+        Returns:
+            해당 날짜의 총 점수
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT total_score 
+                    FROM voice_team_daily_scores
+                    WHERE team_id = ? AND date = ?
+                ''', (team_id, date)) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else 0
+        except Exception as e:
+            print(f"❌ 음성 팀 일일 점수 조회 실패: {e}")
+            return 0
+    
+    async def add_voice_team_score(
+        self, 
+        team_id: str, 
+        date: str, 
+        points: int, 
+        session_data: dict
+    ) -> bool:
+        """팀의 음성 활동 점수 추가
+        
+        Args:
+            team_id: 팀 ID
+            date: 날짜 (YYYY-MM-DD 형식)
+            points: 추가할 점수
+            session_data: 세션 정보 딕셔너리
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            import json
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 기존 레코드 확인
+                async with db.execute('''
+                    SELECT total_score, sessions
+                    FROM voice_team_daily_scores
+                    WHERE team_id = ? AND date = ?
+                ''', (team_id, date)) as cursor:
+                    row = await cursor.fetchone()
+                
+                if row:
+                    # 기존 레코드 업데이트
+                    current_score = row[0]
+                    sessions_json = row[1]
+                    
+                    # 세션 목록 파싱
+                    try:
+                        sessions = json.loads(sessions_json) if sessions_json else []
+                    except:
+                        sessions = []
+                    
+                    # 새 세션 추가
+                    sessions.append(session_data)
+                    
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE voice_team_daily_scores
+                        SET total_score = ?,
+                            sessions = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE team_id = ? AND date = ?
+                    ''', (current_score + points, json.dumps(sessions, ensure_ascii=False), team_id, date))
+                else:
+                    # 새 레코드 생성
+                    sessions = [session_data]
+                    await db.execute('''
+                        INSERT INTO voice_team_daily_scores (team_id, date, total_score, sessions)
+                        VALUES (?, ?, ?, ?)
+                    ''', (team_id, date, points, json.dumps(sessions, ensure_ascii=False)))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 음성 팀 점수 추가 실패: {e}")
+            return False
+    
+    async def get_event_team_member_ids(self, team_id: str) -> set:
+        """팀원들의 user_id 세트 반환
+        
+        Args:
+            team_id: 팀 ID
+        
+        Returns:
+            user_id들의 set
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT user_id
+                    FROM event_team_members
+                    WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return {row[0] for row in rows}
+        except Exception as e:
+            print(f"❌ 팀원 ID 목록 조회 실패: {e}")
+            return set()
+
+    async def get_team_today_voice_score(self, team_id: str) -> dict:
+        """팀의 오늘 음성 활동 점수 상세 정보
+        
+        Returns:
+            {
+                'today_score': int,
+                'max_score': int,
+                'remaining': int,
+                'session_count': int,
+                'date': str
+            }
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # 오늘 날짜 계산 (오전 9시 기준)
+            now = datetime.now()
+            if now.hour < 9:
+                today = now - timedelta(days=1)
+            else:
+                today = now
+            date_str = today.strftime('%Y-%m-%d')
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT total_score, sessions
+                    FROM voice_team_daily_scores
+                    WHERE team_id = ? AND date = ?
+                ''', (team_id, date_str)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if row:
+                        import json
+                        today_score = row[0]
+                        sessions = json.loads(row[1]) if row[1] else []
+                        
+                        return {
+                            'today_score': today_score,
+                            'max_score': 10,
+                            'remaining': max(0, 10 - today_score),
+                            'session_count': len(sessions),
+                            'date': date_str,
+                            'sessions': sessions
+                        }
+                    else:
+                        return {
+                            'today_score': 0,
+                            'max_score': 10,
+                            'remaining': 10,
+                            'session_count': 0,
+                            'date': date_str,
+                            'sessions': []
+                        }
+                        
+        except Exception as e:
+            print(f"❌ 오늘 음성 점수 조회 실패: {e}")
+            return {
+                'today_score': 0,
+                'max_score': 10,
+                'remaining': 10,
+                'session_count': 0,
+                'date': '',
+                'sessions': []
+            }
