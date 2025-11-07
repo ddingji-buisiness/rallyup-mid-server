@@ -71,7 +71,7 @@ class VoiceSession:
 class VoiceSessionTracker:
     """음성 채널 세션 추적 및 점수 지급 관리"""
     
-    TEST_MODE = True
+    TEST_MODE = False
     
     # 점수 관련 상수
     POINTS_PER_HOUR = 1  # 일반 모드 시간당 점수
