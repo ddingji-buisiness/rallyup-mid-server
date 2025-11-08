@@ -63,13 +63,6 @@ class RallyUpBot(commands.Bot):
             await self.db_manager.initialize()
             logger.info("데이터베이스 초기화 완료")
 
-            print("\n🔄 데이터베이스 마이그레이션 시작...")
-            migration_success = await self.db_manager.migrate_active_voice_sessions_table()
-            if migration_success:
-                print("✅ 마이그레이션 성공!\n")
-            else:
-                print("❌ 마이그레이션 실패! 로그를 확인하세요.\n")
-
             await self.load_commands()
 
             await self._register_persistent_views()
@@ -86,10 +79,11 @@ class RallyUpBot(commands.Bot):
                 self.voice_level_tracker = VoiceLevelTracker(self)
                 logger.info("음성 레벨 트래커 시작")
 
-            if not self.voice_session_tracker:
-                self.voice_session_tracker = VoiceSessionTracker(self, self.db_manager)
-                await self.voice_session_tracker.start()
-                logger.info("음성 세션 트래커 시작 (이벤트 팀 점수 자동 지급)")
+            # if not self.voice_session_tracker:
+            #     self.voice_session_tracker = VoiceSessionTracker(self, self.db_manager)
+            #     await self.voice_session_tracker.start()
+            #     logger.info("음성 세션 트래커 시작 (이벤트 팀 점수 자동 지급)")
+            logger.info("⚠️ 음성 세션 트래커 비활성화됨 (기획 검토 중)")
 
             if not self.recruitment_scheduler:
                 self.recruitment_scheduler = RecruitmentScheduler(self)
@@ -196,12 +190,12 @@ class RallyUpBot(commands.Bot):
         print('✅ 밸런싱 세션 자동 정리 태스크 시작됨')
 
         # 음성 세션 복구
-        if self.voice_level_tracker:
-            try:
-                await self.voice_level_tracker.restore_voice_sessions()
-                logger.info("🔄 음성 세션 복구 완료")
-            except Exception as e:
-                logger.error(f"❌ 음성 세션 복구 실패: {e}", exc_info=True)
+        # if self.voice_level_tracker:
+        #     try:
+        #         await self.voice_level_tracker.restore_voice_sessions()
+        #         logger.info("🔄 음성 세션 복구 완료")
+        #     except Exception as e:
+        #         logger.error(f"❌ 음성 세션 복구 실패: {e}", exc_info=True)
 
         # 이벤트 시스템 음성 세션 복구
         if hasattr(self, 'voice_session_tracker') and self.voice_session_tracker:
@@ -485,8 +479,8 @@ class RallyUpBot(commands.Bot):
                     )
 
             # voice_session_tracker 처리 (이벤트 팀 점수)
-            if self.voice_session_tracker:
-                await self.voice_session_tracker.on_voice_state_update(member, before, after)
+            # if self.voice_session_tracker:
+            #     await self.voice_session_tracker.on_voice_state_update(member, before, after)
 
             # 팀정보 업데이트 처리 추가
             team_info_cog = self.get_cog('TeamInfoCommands')
@@ -533,9 +527,9 @@ class RallyUpBot(commands.Bot):
                 self.voice_level_tracker.stop()
                 logger.info("음성 레벨 트래커 종료")
 
-            if self.voice_session_tracker:
-                await self.voice_session_tracker.stop()
-                logger.info("음성 세션 트래커 종료")
+            # if self.voice_session_tracker:
+            #     await self.voice_session_tracker.stop()
+            #     logger.info("음성 세션 트래커 종료")
 
         except Exception as e:
             logger.error(f"Error stopping bamboo scheduler: {e}")
