@@ -326,8 +326,8 @@ class RallyUpBot(commands.Bot):
                 is_urgent=False
             ))
 
-            self.add_view(RecruitmentView(self, ""))
-            self.add_view(VotingRecruitmentView(self, ""))
+            # self.add_view(RecruitmentView(self, ""))
+            # self.add_view(VotingRecruitmentView(self, ""))
             
             logger.info("✅ Persistent Views 등록 완료")
             
