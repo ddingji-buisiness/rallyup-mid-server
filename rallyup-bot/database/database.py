@@ -579,8 +579,7 @@ class DatabaseManager:
             # 9. 활성 음성 세션 테이블 (봇 재시작 시 복구용)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS active_voice_sessions (
-                    session_key TEXT PRIMARY KEY,
-                    team_id TEXT NOT NULL,
+                    team_id TEXT PRIMARY KEY,
                     team_name TEXT NOT NULL,
                     guild_id TEXT NOT NULL,
                     channel_id TEXT NOT NULL,
@@ -591,6 +590,7 @@ class DatabaseManager:
                     is_bonus_mode BOOLEAN DEFAULT FALSE,
                     bonus_start_time TEXT,
                     member_count INTEGER NOT NULL,
+                    channel_history TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE
@@ -12574,41 +12574,25 @@ class DatabaseManager:
         hours_awarded: int,
         is_bonus_mode: bool,
         bonus_start_time: Optional[str],
-        member_count: int
+        member_count: int,
+        channel_history: str
     ) -> bool:
-        """활성 음성 세션 저장/업데이트 (봇 재시작 대비)
-        
-        Args:
-            team_id: 팀 ID
-            team_name: 팀 이름
-            guild_id: 서버 ID
-            channel_id: 음성 채널 ID
-            members: 참여 중인 멤버 ID 세트
-            start_time: 세션 시작 시간 (ISO format)
-            last_check_time: 마지막 체크 시간 (ISO format)
-            hours_awarded: 지급된 시간 수
-            is_bonus_mode: 보너스 모드 여부
-            bonus_start_time: 보너스 모드 시작 시간 (ISO format)
-            member_count: 현재 멤버 수
-        
-        Returns:
-            성공 여부
-        """
         try:
-            session_key = f"{team_id}_{channel_id}"
             members_json = json.dumps(list(members))
             
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute('''
                     INSERT OR REPLACE INTO active_voice_sessions (
-                        session_key, team_id, team_name, guild_id, channel_id,
+                        team_id, team_name, guild_id, channel_id,
                         members, start_time, last_check_time, hours_awarded,
-                        is_bonus_mode, bonus_start_time, member_count, updated_at
+                        is_bonus_mode, bonus_start_time, member_count,
+                        channel_history, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ''', (
-                    session_key, team_id, team_name, guild_id, channel_id,
+                    team_id, team_name, guild_id, channel_id,
                     members_json, start_time, last_check_time, hours_awarded,
-                    is_bonus_mode, bonus_start_time, member_count
+                    is_bonus_mode, bonus_start_time, member_count,
+                    channel_history
                 ))
                 await db.commit()
                 return True
@@ -12657,23 +12641,6 @@ class DatabaseManager:
             return []
     
     async def get_all_active_voice_sessions(self) -> List[dict]:
-        """모든 활성 음성 세션 조회 (봇 시작 시 복구용)
-        
-        Returns:
-            [{
-                'team_id': str,
-                'team_name': str,
-                'guild_id': str,
-                'channel_id': str,
-                'members': set[str],
-                'start_time': datetime,
-                'last_check_time': datetime,
-                'hours_awarded': int,
-                'is_bonus_mode': bool,
-                'bonus_start_time': Optional[datetime],
-                'member_count': int
-            }, ...]
-        """
         try:
             import json
             from datetime import datetime
@@ -12681,8 +12648,9 @@ class DatabaseManager:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute('''
                     SELECT team_id, team_name, guild_id, channel_id, members,
-                           start_time, last_check_time, hours_awarded,
-                           is_bonus_mode, bonus_start_time, member_count
+                        start_time, last_check_time, hours_awarded,
+                        is_bonus_mode, bonus_start_time, member_count,
+                        channel_history
                     FROM active_voice_sessions
                 ''') as cursor:
                     rows = await cursor.fetchall()
@@ -12700,7 +12668,8 @@ class DatabaseManager:
                             'hours_awarded': row[7],
                             'is_bonus_mode': bool(row[8]),
                             'bonus_start_time': datetime.fromisoformat(row[9]) if row[9] else None,
-                            'member_count': row[10]
+                            'member_count': row[10],
+                            'channel_history': row[11]  # JSON string
                         })
                     
                     return sessions
@@ -12709,21 +12678,18 @@ class DatabaseManager:
             logger.error(f"❌ 활성 세션 목록 조회 실패: {e}", exc_info=True)
             return []
     
-    async def delete_active_voice_session(self, team_id: str, channel_id: str) -> bool:
+    async def delete_active_voice_session(self, team_id: str) -> bool:
         """활성 음성 세션 삭제 (세션 종료 시)
         
         Args:
             team_id: 팀 ID
-            channel_id: 채널 ID
         """
         try:
-            session_key = f"{team_id}_{channel_id}"
-            
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute('''
                     DELETE FROM active_voice_sessions
-                    WHERE session_key = ?
-                ''', (session_key,))
+                    WHERE team_id = ?
+                ''', (team_id,))
                 await db.commit()
                 return True
                 
@@ -12762,6 +12728,275 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ 오래된 세션 정리 실패: {e}", exc_info=True)
             return 0
+
+    async def get_recent_mission_completions(
+        self, 
+        guild_id: str, 
+        hours: int = 24, 
+        limit: int = 25
+    ) -> List[Dict]:
+        """최근 미션 완료 내역 조회 (점수 취소용)
+        
+        Args:
+            guild_id: 서버 ID
+            hours: 최근 몇 시간 이내 (기본 24시간)
+            limit: 최대 조회 개수 (Discord 제한 25개)
+            
+        Returns:
+            [{
+                'completion_id': str,
+                'team_id': str,
+                'team_name': str,
+                'mission_id': str,
+                'mission_name': str,
+                'awarded_points': int,
+                'participants_count': int,
+                'completed_at': str,
+                'completed_by': str,
+                'completed_by_name': str,
+                'notes': str
+            }, ...]
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT 
+                        c.completion_id,
+                        c.team_id,
+                        t.team_name,
+                        c.mission_id,
+                        m.mission_name,
+                        c.awarded_points,
+                        c.participants_count,
+                        c.completed_at,
+                        c.completed_by,
+                        c.notes
+                    FROM event_mission_completions c
+                    JOIN event_teams t ON c.team_id = t.team_id
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE t.guild_id = ?
+                        AND datetime(c.completed_at) >= datetime('now', '-' || ? || ' hours')
+                    ORDER BY c.completed_at DESC
+                    LIMIT ?
+                ''', (guild_id, hours, limit)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    completions = []
+                    for row in rows:
+                        completions.append({
+                            'completion_id': row[0],
+                            'team_id': row[1],
+                            'team_name': row[2],
+                            'mission_id': row[3],
+                            'mission_name': row[4],
+                            'awarded_points': row[5],
+                            'participants_count': row[6],
+                            'completed_at': row[7],
+                            'completed_by': row[8],
+                            'notes': row[9]
+                        })
+                    
+                    return completions
+                    
+        except Exception as e:
+            logger.error(f"❌ 최근 미션 완료 내역 조회 실패: {e}", exc_info=True)
+            return []
+
+    async def cancel_mission_completion(
+        self, 
+        completion_id: str,
+        cancelled_by: str,
+        reason: str = "관리자 취소"
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """미션 완료 취소 및 점수 롤백
+        
+        Args:
+            completion_id: 완료 기록 ID
+            cancelled_by: 취소한 관리자 ID
+            reason: 취소 사유
+            
+        Returns:
+            (성공여부, 메시지, 취소된 내역 정보)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 1. 완료 내역 조회
+                async with db.execute('''
+                    SELECT 
+                        c.completion_id,
+                        c.team_id,
+                        t.team_name,
+                        c.mission_id,
+                        m.mission_name,
+                        c.awarded_points,
+                        c.participants_count,
+                        c.completed_at,
+                        c.completed_by
+                    FROM event_mission_completions c
+                    JOIN event_teams t ON c.team_id = t.team_id
+                    JOIN event_missions m ON c.mission_id = m.mission_id
+                    WHERE c.completion_id = ?
+                ''', (completion_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return False, "해당 완료 기록을 찾을 수 없습니다.", None
+                    
+                    completion_info = {
+                        'completion_id': row[0],
+                        'team_id': row[1],
+                        'team_name': row[2],
+                        'mission_id': row[3],
+                        'mission_name': row[4],
+                        'awarded_points': row[5],
+                        'participants_count': row[6],
+                        'completed_at': row[7],
+                        'completed_by': row[8]
+                    }
+                
+                # 2. 완료 기록 삭제
+                await db.execute('''
+                    DELETE FROM event_mission_completions
+                    WHERE completion_id = ?
+                ''', (completion_id,))
+                
+                # 3. 팀 점수 롤백 (음수로 기록)
+                await db.execute('''
+                    INSERT INTO event_mission_completions (
+                        completion_id, team_id, mission_id, participants_count,
+                        awarded_points, completed_by, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    self.generate_uuid(),
+                    completion_info['team_id'],
+                    completion_info['mission_id'],
+                    0,  # 취소 기록이므로 참여자 0
+                    -completion_info['awarded_points'],  # 음수로 기록
+                    cancelled_by,
+                    f"[점수 취소] {reason} (원본: {completion_id})"
+                ))
+                
+                await db.commit()
+                
+                logger.info(
+                    f"✅ 미션 완료 취소: {completion_info['team_name']} | "
+                    f"{completion_info['mission_name']} | "
+                    f"-{completion_info['awarded_points']}점"
+                )
+                
+                return True, "점수 취소 완료", completion_info
+                
+        except Exception as e:
+            logger.error(f"❌ 미션 완료 취소 실패: {e}", exc_info=True)
+            return False, f"취소 처리 중 오류 발생: {str(e)}", None
+
+    async def migrate_active_voice_sessions_table(self):
+        """active_voice_sessions 테이블 마이그레이션
+        
+        - session_key 제거
+        - team_id를 PRIMARY KEY로 변경
+        - channel_history 필드 추가
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # WAL 모드 활성화
+                await db.execute('PRAGMA journal_mode=WAL')
+                
+                # 1. 기존 데이터 백업
+                await db.execute('''
+                    CREATE TABLE IF NOT EXISTS active_voice_sessions_backup AS 
+                    SELECT * FROM active_voice_sessions
+                ''')
+                print("✅ 1단계: 기존 데이터 백업 완료")
+                
+                # 2. 기존 테이블 삭제
+                await db.execute('DROP TABLE IF EXISTS active_voice_sessions')
+                print("✅ 2단계: 기존 테이블 삭제 완료")
+                
+                # 3. 새 스키마로 테이블 재생성
+                await db.execute('''
+                    CREATE TABLE active_voice_sessions (
+                        team_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        guild_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        members TEXT NOT NULL,
+                        start_time TEXT NOT NULL,
+                        last_check_time TEXT NOT NULL,
+                        hours_awarded INTEGER DEFAULT 0,
+                        is_bonus_mode BOOLEAN DEFAULT FALSE,
+                        bonus_start_time TEXT,
+                        member_count INTEGER NOT NULL,
+                        channel_history TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (team_id) REFERENCES event_teams(team_id) ON DELETE CASCADE
+                    )
+                ''')
+                print("✅ 3단계: 새 테이블 생성 완료")
+                
+                # 4. 데이터 복원 (team_id별 최신 데이터만)
+                await db.execute('''
+                    INSERT INTO active_voice_sessions (
+                        team_id, team_name, guild_id, channel_id, members,
+                        start_time, last_check_time, hours_awarded,
+                        is_bonus_mode, bonus_start_time, member_count,
+                        channel_history, created_at, updated_at
+                    )
+                    SELECT 
+                        team_id,
+                        team_name,
+                        guild_id,
+                        channel_id,
+                        members,
+                        start_time,
+                        last_check_time,
+                        hours_awarded,
+                        is_bonus_mode,
+                        bonus_start_time,
+                        member_count,
+                        '[]' as channel_history,
+                        created_at,
+                        updated_at
+                    FROM active_voice_sessions_backup
+                    WHERE rowid IN (
+                        SELECT MAX(rowid)
+                        FROM active_voice_sessions_backup
+                        GROUP BY team_id
+                    )
+                ''')
+                
+                # 복원된 레코드 수 확인
+                cursor = await db.execute('SELECT COUNT(*) FROM active_voice_sessions')
+                row = await cursor.fetchone()
+                restored_count = row[0] if row else 0
+                print(f"✅ 4단계: 데이터 복원 완료 ({restored_count}개 레코드)")
+                
+                # 5. 백업 테이블 삭제
+                await db.execute('DROP TABLE IF EXISTS active_voice_sessions_backup')
+                print("✅ 5단계: 백업 테이블 삭제 완료")
+                
+                # 6. 인덱스 재생성
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_active_voice_sessions_team 
+                    ON active_voice_sessions(team_id)
+                ''')
+                await db.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_active_voice_sessions_guild 
+                    ON active_voice_sessions(guild_id)
+                ''')
+                print("✅ 6단계: 인덱스 재생성 완료")
+                
+                await db.commit()
+                print("🎉 active_voice_sessions 테이블 마이그레이션 완료!")
+                return True
+                
+        except Exception as e:
+            print(f"❌ 테이블 마이그레이션 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
 
 
 

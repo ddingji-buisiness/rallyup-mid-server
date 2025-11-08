@@ -26,6 +26,7 @@ class VoiceSession:
     team_id: str
     team_name: str
     guild_id: str
+    current_channel_id: str
     members: Set[str] = field(default_factory=set)  # user_ids
     start_time: datetime = field(default_factory=datetime.now)
     member_count: int = 0
@@ -33,11 +34,14 @@ class VoiceSession:
     bonus_start_time: Optional[datetime] = None
     last_check_time: Optional[datetime] = None
     hours_awarded: int = 0
+    channel_history: List[Tuple[str, datetime]] = field(default_factory=list)
     
     def __post_init__(self):
         self.member_count = len(self.members)
         if self.last_check_time is None:
             self.last_check_time = self.start_time
+        if not self.channel_history:
+            self.channel_history.append((self.current_channel_id, self.start_time))
     
     def update_members(self, members: Set[str]):
         """멤버 업데이트 및 보너스 모드 체크"""
@@ -56,6 +60,17 @@ class VoiceSession:
             self.is_bonus_mode = False
             self.bonus_start_time = None
             logger.info(f"⚠️ 팀 '{self.team_name}' 보너스 모드 해제 ({self.member_count}명)")
+
+    def update_channel(self, new_channel_id: str):
+        """채널 이동 처리"""
+        if new_channel_id != self.current_channel_id:
+            old_channel = self.current_channel_id
+            self.current_channel_id = new_channel_id
+            self.channel_history.append((new_channel_id, datetime.now()))
+            logger.info(
+                f"🔄 팀 '{self.team_name}' 채널 이동: "
+                f"{old_channel} → {new_channel_id} (누적 시간 유지)"
+            )
     
     def get_elapsed_time(self) -> timedelta:
         """세션 시작 후 경과 시간"""
@@ -95,7 +110,7 @@ class VoiceSessionTracker:
         
         # 실시간 세션 추적
         # {team_id: {channel_id: VoiceSession}}
-        self.active_sessions: Dict[str, Dict[str, VoiceSession]] = {}
+        self.active_sessions: Dict[str, VoiceSession] = {}
         
         # Background task
         self.check_task: Optional[asyncio.Task] = None
@@ -120,6 +135,89 @@ class VoiceSessionTracker:
             except asyncio.CancelledError:
                 pass
         logger.info("🛑 음성 세션 체크 루프 종료")
+
+    async def _start_session(
+        self,
+        team_id: str,
+        team_name: str,
+        guild_id: str,
+        channel_id: str,
+        members: Set[str]
+    ):
+        """새로운 음성 세션 시작"""
+        try:
+            # 새 세션 생성
+            session = VoiceSession(
+                team_id=team_id,
+                team_name=team_name,
+                guild_id=guild_id,
+                current_channel_id=channel_id,
+                members=members
+            )
+            
+            # 메모리에 세션 추가 (팀 단위)
+            self.active_sessions[team_id] = session
+            
+            # DB에 저장
+            await self._save_session_to_db(session)
+            
+            logger.info(
+                f"🎬 새 세션 시작: 팀 '{team_name}' "
+                f"(채널: {channel_id}, 멤버: {len(members)}명)"
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ 세션 시작 실패: {e}", exc_info=True)
+
+    async def _save_session_to_db(self, session: VoiceSession):
+        """세션 정보를 DB에 저장/업데이트"""
+        try:
+            import json
+            
+            # 채널 이력을 JSON으로 직렬화
+            channel_history_json = json.dumps([
+                (ch_id, time.isoformat())
+                for ch_id, time in session.channel_history
+            ])
+            
+            await self.db.save_active_voice_session(
+                team_id=session.team_id,
+                team_name=session.team_name,
+                guild_id=session.guild_id,
+                channel_id=session.current_channel_id,
+                members=session.members,
+                start_time=session.start_time.isoformat(),
+                last_check_time=session.last_check_time.isoformat(),
+                hours_awarded=session.hours_awarded,
+                is_bonus_mode=session.is_bonus_mode,
+                bonus_start_time=(
+                    session.bonus_start_time.isoformat() 
+                    if session.bonus_start_time else None
+                ),
+                member_count=session.member_count,
+                channel_history=channel_history_json
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ 세션 DB 저장 실패: {e}", exc_info=True)
+
+    async def _get_team_members_in_voice(
+        self,
+        guild: discord.Guild,
+        team_id: str
+    ) -> Set[str]:
+        team_members_in_voice = set()
+        
+        # 팀원 ID 목록 가져오기
+        team_member_ids = await self.db.get_team_member_ids(team_id)
+        
+        # 모든 음성 채널 순회
+        for voice_channel in guild.voice_channels:
+            for member in voice_channel.members:
+                if not member.bot and str(member.id) in team_member_ids:
+                    team_members_in_voice.add(str(member.id))
+        
+        return team_members_in_voice
     
     def _get_today_date_string(self) -> str:
         """오늘 날짜 문자열 (오전 9시 기준)"""
@@ -198,11 +296,41 @@ class VoiceSessionTracker:
             guild_id, team_id, channel
         )
         
-        # 2명 이상이면 세션 생성/업데이트
+        logger.info(
+            f"   📊 '{channel.name}' 채널 내 {team_name} 팀원: "
+            f"{len(team_members_in_channel)}명"
+        )
+        
+        # 기존 세션 확인 (팀 단위)
+        session = self.active_sessions.get(team_id)
+        
+        # 2명 이상이면 세션 활성화
         if len(team_members_in_channel) >= 2:
-            await self._update_or_create_session(
-                guild_id, team_id, team_name, channel_id, team_members_in_channel
-            )
+            if session:
+                # 기존 세션이 있으면 채널 정보만 업데이트
+                old_channel = session.current_channel_id
+                session.update_channel(channel_id)
+                session.update_members(team_members_in_channel)
+                
+                # DB에 세션 상태 저장
+                await self._save_session_to_db(session)
+                
+                logger.info(
+                    f"🔄 팀 '{team_name}' 세션 채널 업데이트: "
+                    f"{old_channel} → {channel_id} "
+                    f"(경과: {session.get_elapsed_time().total_seconds():.0f}초)"
+                )
+            else:
+                # 새 세션 시작
+                await self._start_session(
+                    team_id=team_id,
+                    team_name=team_name,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    members=team_members_in_channel
+                )
+        else:
+            logger.info(f"   ⏸️ 팀원 2명 미만 - 세션 시작 조건 미달")
     
     async def _handle_member_leave(
         self,
@@ -213,19 +341,46 @@ class VoiceSessionTracker:
         channel: discord.VoiceChannel
     ):
         """멤버가 음성 채널에서 퇴장했을 때 처리"""
-        # 해당 채널에 남은 같은 팀원 수집
-        team_members_in_channel = await self._get_team_members_in_channel(
-            guild_id, team_id, channel
+        # 기존 세션 확인
+        session = self.active_sessions.get(team_id)
+        
+        if not session:
+            return  # 활성 세션 없음
+        
+        # 해당 팀의 음성 채널에 남아있는 모든 팀원 확인
+        # (채널 이동 가능성 고려하여 전체 음성 채널 스캔)
+        remaining_members = await self._get_team_members_in_voice(
+            channel.guild, team_id
         )
         
-        # 2명 미만이면 세션 종료
-        if len(team_members_in_channel) < 2:
-            await self._end_session(team_id, channel_id)
-        else:
-            # 2명 이상 남아있으면 세션 업데이트
-            await self._update_or_create_session(
-                guild_id, team_id, team_name, channel_id, team_members_in_channel
+        logger.info(
+            f"   📊 퇴장 후 음성 채널에 남은 {team_name} 팀원: "
+            f"{len(remaining_members)}명"
+        )
+        
+        if len(remaining_members) >= 2:
+            # 2명 이상 남아있으면 세션 유지, 멤버만 업데이트
+            session.update_members(remaining_members)
+            
+            # 남은 팀원들이 있는 채널 찾기
+            for vc in channel.guild.voice_channels:
+                team_in_vc = await self._get_team_members_in_channel(
+                    guild_id, team_id, vc
+                )
+                if len(team_in_vc) >= 2:
+                    session.update_channel(str(vc.id))
+                    break
+            
+            # DB 업데이트
+            await self._save_session_to_db(session)
+            
+            logger.info(
+                f"   ✅ 세션 유지 (남은 팀원 {len(remaining_members)}명)"
             )
+        else:
+            # 2명 미만 → 세션 종료
+            logger.info(f"   ⏹️ 팀원 2명 미만 - 세션 종료")
+            await self._end_session(team_id)
     
     async def _get_team_members_in_channel(
         self,
@@ -330,29 +485,37 @@ class VoiceSessionTracker:
         except Exception as e:
             logger.error(f"❌ 세션 DB 저장 실패: {e}", exc_info=True)
     
-    async def _end_session(self, team_id: str, channel_id: str):
-
-        if team_id in self.active_sessions and channel_id in self.active_sessions[team_id]:
-            session = self.active_sessions[team_id][channel_id]
-            elapsed = session.get_elapsed_time()
+    async def _end_session(self, team_id: str):
+        """음성 세션 종료"""
+        try:
+            session = self.active_sessions.get(team_id)
+            if not session:
+                return
             
+            # 경과 시간 로그
+            elapsed = session.get_elapsed_time()
             logger.info(
-                f"🛑 세션 종료: {session.team_name} "
-                f"(경과: {int(elapsed.total_seconds())}초, "
-                f"{session.hours_awarded}시간 완료)"
+                f"⏹️ 세션 종료: 팀 '{session.team_name}' "
+                f"(총 경과: {int(elapsed.total_seconds())}초, "
+                f"지급 완료: {session.hours_awarded}시간)"
             )
             
-            # 메모리에서 제거
-            del self.active_sessions[team_id][channel_id]
-            if not self.active_sessions[team_id]:
-                del self.active_sessions[team_id]
+            # 채널 이동 이력 로그
+            if len(session.channel_history) > 1:
+                logger.info(f"   🗺️ 채널 이동 이력: {len(session.channel_history)}개 채널 방문")
+                for i, (ch_id, time) in enumerate(session.channel_history, 1):
+                    logger.info(f"      {i}. 채널 {ch_id} (시각: {time.strftime('%H:%M:%S')})")
             
-            # DB에서도 삭제 (추가)
-            try:
-                await self.db.delete_active_voice_session(team_id, channel_id)
-                logger.debug(f"💾 세션 DB 삭제 완료: {session.team_name}")
-            except Exception as e:
-                logger.error(f"❌ 세션 DB 삭제 실패: {e}", exc_info=True)
+            # 메모리에서 세션 제거
+            del self.active_sessions[team_id]
+            
+            # DB에서 세션 제거
+            await self.db.delete_active_voice_session(team_id)
+            
+            logger.info(f"✅ 세션 정리 완료: {session.team_name}")
+            
+        except Exception as e:
+            logger.error(f"❌ 세션 종료 실패: {e}", exc_info=True)
     
     async def _session_check_loop(self):
         """1분마다 모든 활성 세션 체크 및 점수 지급"""
@@ -368,9 +531,8 @@ class VoiceSessionTracker:
                 logger.debug(f"🔍 세션 체크 중... (활성 팀: {len(self.active_sessions)}개)")
                 
                 # 모든 활성 세션 체크
-                for team_id, channels in list(self.active_sessions.items()):
-                    for channel_id, session in list(channels.items()):
-                        await self._check_and_award_points(session)
+                for team_id, session in list(self.active_sessions.items()):
+                    await self._check_and_award_points(session)
                 
             except asyncio.CancelledError:
                 logger.info("⏰ 세션 체크 루프 취소됨")
@@ -533,20 +695,21 @@ class VoiceSessionTracker:
     def get_active_sessions_info(self) -> List[Dict]:
         """현재 활성 세션 정보 조회 (디버깅/관리용)"""
         info = []
-        for team_id, channels in self.active_sessions.items():
-            for channel_id, session in channels.items():
-                info.append({
-                    'team_id': team_id,
-                    'team_name': session.team_name,
-                    'channel_id': channel_id,
-                    'member_count': session.member_count,
-                    'is_bonus_mode': session.is_bonus_mode,
-                    'elapsed_seconds': session.get_elapsed_time().total_seconds(),
-                    'bonus_elapsed_seconds': (
-                        session.get_bonus_elapsed_time().total_seconds()
-                        if session.get_bonus_elapsed_time() else None
-                    )
-                })
+        for team_id, session in self.active_sessions.items():
+            info.append({
+                'team_id': team_id,
+                'team_name': session.team_name,
+                'current_channel_id': session.current_channel_id,
+                'member_count': session.member_count,
+                'is_bonus_mode': session.is_bonus_mode,
+                'elapsed_seconds': session.get_elapsed_time().total_seconds(),
+                'bonus_elapsed_seconds': (
+                    session.get_bonus_elapsed_time().total_seconds()
+                    if session.get_bonus_elapsed_time() else None
+                ),
+                'hours_awarded': session.hours_awarded,
+                'channel_changes': len(session.channel_history)
+            })
         return info
     
     async def _send_voice_activity_announcement(
@@ -633,7 +796,6 @@ class VoiceSessionTracker:
             
             for session_data in saved_sessions:
                 team_id = session_data['team_id']
-                channel_id = session_data['channel_id']
                 guild_id = session_data['guild_id']
                 team_name = session_data['team_name']
                 
@@ -642,39 +804,57 @@ class VoiceSessionTracker:
                     guild = self.bot.get_guild(int(guild_id))
                     if not guild:
                         logger.warning(f"⚠️ 길드 {guild_id} 찾을 수 없음 - 세션 스킵: {team_name}")
-                        await self.db.delete_active_voice_session(team_id, channel_id)
+                        await self.db.delete_active_voice_session(team_id)
                         skipped_count += 1
                         continue
                     
-                    channel = guild.get_channel(int(channel_id))
-                    if not channel or not isinstance(channel, discord.VoiceChannel):
-                        logger.warning(f"⚠️ 채널 {channel_id} 찾을 수 없음 - 세션 스킵: {team_name}")
-                        await self.db.delete_active_voice_session(team_id, channel_id)
-                        skipped_count += 1
-                        continue
-                    
-                    # 현재 채널에 있는 팀원 확인
-                    current_members = await self._get_team_members_in_channel(
-                        guild_id, team_id, channel
+                    # 팀원들이 음성 채널에 있는지 확인
+                    remaining_members = await self._get_team_members_in_voice(
+                        guild, team_id
                     )
                     
-                    if len(current_members) < 2:
-                        logger.info(f"⚠️ 채널에 2명 미만 ({len(current_members)}명) - 세션 종료: {team_name}")
-                        await self.db.delete_active_voice_session(team_id, channel_id)
+                    if len(remaining_members) < 2:
+                        logger.info(f"⚠️ 음성 채널에 팀원 2명 미만 ({len(remaining_members)}명) - 세션 종료: {team_name}")
+                        await self.db.delete_active_voice_session(team_id)
+                        skipped_count += 1
+                        continue
+                    
+                    # 팀원들이 있는 채널 찾기
+                    current_channel_id = None
+                    for vc in guild.voice_channels:
+                        team_in_vc = await self._get_team_members_in_channel(
+                            guild_id, team_id, vc
+                        )
+                        if len(team_in_vc) >= 2:
+                            current_channel_id = str(vc.id)
+                            break
+                    
+                    if not current_channel_id:
+                        logger.warning(f"⚠️ 유효한 채널을 찾을 수 없음 - 세션 스킵: {team_name}")
+                        await self.db.delete_active_voice_session(team_id)
                         skipped_count += 1
                         continue
                     
                     # 세션 복구
                     session = VoiceSession(
-                        channel_id=channel_id,
                         team_id=team_id,
                         team_name=team_name,
                         guild_id=guild_id,
-                        members=current_members,  # 현재 실제 멤버로 업데이트
+                        current_channel_id=current_channel_id,
+                        members=remaining_members,
                         start_time=session_data['start_time'],
                         last_check_time=session_data['last_check_time'],
                         hours_awarded=session_data['hours_awarded']
                     )
+                    
+                    # 채널 이력 복구
+                    if 'channel_history' in session_data and session_data['channel_history']:
+                        import json
+                        history_data = json.loads(session_data['channel_history'])
+                        session.channel_history = [
+                            (ch_id, datetime.fromisoformat(time_str))
+                            for ch_id, time_str in history_data
+                        ]
                     
                     # 보너스 모드 복구
                     if session_data['is_bonus_mode'] and session_data['bonus_start_time']:
@@ -683,21 +863,19 @@ class VoiceSessionTracker:
                         logger.info(f"   🎉 보너스 모드도 복구됨 (시작: {session.bonus_start_time})")
                     
                     # 메모리에 세션 추가
-                    if team_id not in self.active_sessions:
-                        self.active_sessions[team_id] = {}
-                    self.active_sessions[team_id][channel_id] = session
+                    self.active_sessions[team_id] = session
                     
                     restored_count += 1
                     elapsed = session.get_elapsed_time()
                     logger.info(
                         f"✅ 세션 복구: {team_name} "
-                        f"({len(current_members)}명, 경과: {int(elapsed.total_seconds())}초, "
-                        f"{session.hours_awarded}시간 완료)"
+                        f"({len(remaining_members)}명, 경과: {int(elapsed.total_seconds())}초, "
+                        f"{session.hours_awarded}시간 완료, 채널 이동: {len(session.channel_history)}회)"
                     )
                     
                 except Exception as e:
                     logger.error(f"❌ 세션 복구 중 오류 ({team_name}): {e}", exc_info=True)
-                    await self.db.delete_active_voice_session(team_id, channel_id)
+                    await self.db.delete_active_voice_session(team_id)
                     skipped_count += 1
             
             logger.info(

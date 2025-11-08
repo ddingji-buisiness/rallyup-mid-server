@@ -2,7 +2,7 @@ import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import List
+from typing import Dict, List
 from datetime import datetime
 from config.settings import Settings, EventSystemSettings
 
@@ -64,6 +64,208 @@ class InfoMessages:
     MEMBERS_SELECTED = "✅ {count}명의 팀원이 선택되었습니다.\n'팀 생성 완료' 버튼을 눌러주세요."
     CONFIRM_CREATION = "'팀 생성 완료' 버튼을 눌러주세요."
     CANCELLED = "❌ 점수 부여가 취소되었습니다."
+
+class CancelPointsView(discord.ui.View):
+    """점수 취소용 View"""
+    
+    def __init__(self, bot, guild_id: str, completions: List[Dict], admin_id: str):
+        super().__init__(timeout=ViewConstants.TIMEOUT)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.completions = completions
+        self.admin_id = admin_id
+        self.selected_completion_id = None
+        
+        # 드롭다운 추가
+        self._add_completion_select()
+    
+    def _add_completion_select(self):
+        """완료 내역 선택 드롭다운"""
+        options = []
+        
+        for completion in self.completions[:25]:  # Discord 제한 25개
+            # 시간 표시 형식
+            from datetime import datetime
+            completed_time = datetime.fromisoformat(completion['completed_at'])
+            now = datetime.now()
+            time_diff = now - completed_time
+            
+            if time_diff.total_seconds() < 3600:  # 1시간 미만
+                time_str = f"{int(time_diff.total_seconds() / 60)}분 전"
+            elif time_diff.total_seconds() < 86400:  # 24시간 미만
+                time_str = f"{int(time_diff.total_seconds() / 3600)}시간 전"
+            else:
+                time_str = completed_time.strftime("%m/%d %H:%M")
+            
+            label = f"[{time_str}] {completion['team_name']} | +{completion['awarded_points']}점"
+            description = f"{completion['mission_name']} (참여: {completion['participants_count']}명)"
+            
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],  # Discord 제한
+                    description=description[:100],
+                    value=completion['completion_id']
+                )
+            )
+        
+        if not options:
+            # 내역이 없으면 더미 옵션
+            options.append(
+                discord.SelectOption(
+                    label="취소할 내역이 없습니다",
+                    value="none",
+                    description="최근 24시간 내 점수 부여 내역이 없습니다"
+                )
+            )
+        
+        select = discord.ui.Select(
+            placeholder="취소할 점수 부여 내역을 선택하세요",
+            options=options,
+            custom_id="cancel_points_select"
+        )
+        select.callback = self.completion_selected
+        self.add_item(select)
+    
+    async def completion_selected(self, interaction: discord.Interaction):
+        """완료 내역 선택됨"""
+        if interaction.data['values'][0] == "none":
+            await interaction.response.send_message(
+                "❌ 취소할 내역이 없습니다.",
+                ephemeral=True
+            )
+            return
+        
+        self.selected_completion_id = interaction.data['values'][0]
+        
+        # 선택된 완료 내역 찾기
+        selected = next(
+            (c for c in self.completions if c['completion_id'] == self.selected_completion_id),
+            None
+        )
+        
+        if not selected:
+            await interaction.response.send_message(
+                "❌ 선택한 내역을 찾을 수 없습니다.",
+                ephemeral=True
+            )
+            return
+        
+        # 확인 버튼으로 View 업데이트
+        self.clear_items()
+        
+        # 확인 버튼
+        confirm_btn = discord.ui.Button(
+            label="✅ 점수 취소 확정",
+            style=discord.ButtonStyle.danger,
+            custom_id="confirm_cancel"
+        )
+        confirm_btn.callback = self.confirm_cancel
+        self.add_item(confirm_btn)
+        
+        # 다시 선택 버튼
+        reselect_btn = discord.ui.Button(
+            label="🔄 다시 선택",
+            style=discord.ButtonStyle.secondary,
+            custom_id="reselect"
+        )
+        reselect_btn.callback = self.reselect
+        self.add_item(reselect_btn)
+        
+        # 취소 버튼
+        cancel_btn = discord.ui.Button(
+            label="❌ 취소",
+            style=discord.ButtonStyle.secondary,
+            custom_id="cancel_action"
+        )
+        cancel_btn.callback = self.cancel_action
+        self.add_item(cancel_btn)
+        
+        completed_time = datetime.fromisoformat(selected['completed_at'])
+        
+        await interaction.response.edit_message(
+            content=f"**다음 점수 부여를 취소하시겠습니까?**\n\n"
+                    f"🎯 **팀**: {selected['team_name']}\n"
+                    f"📋 **미션**: {selected['mission_name']}\n"
+                    f"💰 **점수**: +{selected['awarded_points']}점\n"
+                    f"👥 **참여 인원**: {selected['participants_count']}명\n"
+                    f"⏰ **부여 시간**: <t:{int(completed_time.timestamp())}:F>\n\n"
+                    f"⚠️ **경고**: 이 작업은 되돌릴 수 없습니다!",
+            view=self
+        )
+    
+    async def confirm_cancel(self, interaction: discord.Interaction):
+        """점수 취소 확정"""
+        await interaction.response.defer()
+        
+        # DB에서 취소 처리
+        success, message, cancelled_info = await self.bot.db_manager.cancel_mission_completion(
+            completion_id=self.selected_completion_id,
+            cancelled_by=self.admin_id,
+            reason="관리자 수동 취소"
+        )
+        
+        if success:
+            embed = discord.Embed(
+                title="✅ 점수 취소 완료",
+                description=f"**{cancelled_info['team_name']}** 팀의 점수가 취소되었습니다.",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="📋 취소된 내역",
+                value=f"**미션**: {cancelled_info['mission_name']}\n"
+                      f"**점수**: -{cancelled_info['awarded_points']}점\n"
+                      f"**참여**: {cancelled_info['participants_count']}명",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"취소자: {interaction.user.name}")
+            
+            # View 비활성화
+            self.clear_items()
+            await interaction.followup.edit_message(
+                message_id=interaction.message.id,
+                content=None,
+                embed=embed,
+                view=self
+            )
+            
+            # 공지 채널에도 알림 (선택사항)
+            channel_id = await self.bot.db_manager.get_event_announcement_channel(self.guild_id)
+            if channel_id:
+                channel = interaction.guild.get_channel(int(channel_id))
+                if channel:
+                    try:
+                        await channel.send(
+                            f"⚠️ **{cancelled_info['team_name']}** 팀의 "
+                            f"**{cancelled_info['mission_name']}** 미션 점수 "
+                            f"**({cancelled_info['awarded_points']}점)**가 취소되었습니다."
+                        )
+                    except:
+                        pass
+        else:
+            await interaction.followup.send(
+                f"❌ 점수 취소 실패: {message}",
+                ephemeral=True
+            )
+    
+    async def reselect(self, interaction: discord.Interaction):
+        """다시 선택"""
+        self.clear_items()
+        self._add_completion_select()
+        
+        await interaction.response.edit_message(
+            content="취소할 점수 부여 내역을 선택하세요:",
+            view=self
+        )
+    
+    async def cancel_action(self, interaction: discord.Interaction):
+        """작업 취소"""
+        await interaction.response.edit_message(
+            content="❌ 점수 취소 작업이 취소되었습니다.",
+            view=None
+        )
 
 class TeamManagementView(discord.ui.View):
     """팀 생성 시 팀원 선택용 View (UserSelect 사용)"""
@@ -1113,6 +1315,64 @@ class EventSystemCommands(commands.Cog):
         await interaction.response.send_message(
             "🎯 **미션 완료 점수 부여**\n"
             "1단계: 점수를 부여할 팀을 선택하세요",
+            view=view,
+            ephemeral=True
+        )
+
+    @app_commands.command(name="이벤트점수취소", description="[관리자] 잘못 부여된 점수를 취소합니다")
+    @app_commands.default_permissions(manage_guild=True)
+    async def cancel_event_points(self, interaction: discord.Interaction):
+        """점수 취소 명령어"""
+        if not await self.is_admin(interaction):
+            await interaction.response.send_message(
+                ErrorMessages.ADMIN_ONLY,
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        guild_id = str(interaction.guild_id)
+        
+        # 최근 24시간 내역 조회
+        completions = await self.bot.db_manager.get_recent_mission_completions(
+            guild_id=guild_id,
+            hours=24,
+            limit=25
+        )
+        
+        if not completions:
+            embed = discord.Embed(
+                title="ℹ️ 취소할 내역 없음",
+                description="최근 24시간 내 점수 부여 내역이 없습니다.",
+                color=EventSystemSettings.Colors.INFO
+            )
+            
+            embed.set_footer(text="💡 점수 부여 후 24시간 이내만 취소 가능합니다")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        # View 생성
+        view = CancelPointsView(
+            bot=self.bot,
+            guild_id=guild_id,
+            completions=completions,
+            admin_id=str(interaction.user.id)
+        )
+        
+        embed = discord.Embed(
+            title="🔄 점수 취소",
+            description=f"최근 24시간 내 **{len(completions)}개**의 점수 부여 내역이 있습니다.\n"
+                        f"취소할 내역을 선택해주세요.",
+            color=EventSystemSettings.Colors.WARNING,
+            timestamp=datetime.now()
+        )
+        
+        embed.set_footer(text="⚠️ 점수 취소는 되돌릴 수 없습니다")
+        
+        await interaction.followup.send(
+            embed=embed,
             view=view,
             ephemeral=True
         )

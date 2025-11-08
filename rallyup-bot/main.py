@@ -63,6 +63,13 @@ class RallyUpBot(commands.Bot):
             await self.db_manager.initialize()
             logger.info("데이터베이스 초기화 완료")
 
+            print("\n🔄 데이터베이스 마이그레이션 시작...")
+            migration_success = await self.db_manager.migrate_active_voice_sessions_table()
+            if migration_success:
+                print("✅ 마이그레이션 성공!\n")
+            else:
+                print("❌ 마이그레이션 실패! 로그를 확인하세요.\n")
+
             await self.load_commands()
 
             await self._register_persistent_views()
