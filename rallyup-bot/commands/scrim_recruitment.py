@@ -140,25 +140,1376 @@ class DateTimeModal(discord.ui.Modal):
         self.add_item(self.content_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        """Modal 제출 시 날짜/시간 선택 단계로 진행"""
+        """Modal 제출 시 모집 타입 선택 단계로 진행"""
         
-        # View 생성
-        view = DateTimeSelectionView(
+        # 🆕 모집 타입 선택 View 생성
+        view = RecruitmentTypeSelectView(
             self.bot, 
             self.channel_id,
             self.title_input.value,
             self.content_input.value or "내전 참가자를 모집합니다!"
         )
         
-        #메시지 전송 후 View에 메시지 참조 저장
         await interaction.response.send_message(
-            "📅 내전 날짜와 시간을 선택해주세요:",
+            "📋 **내전 모집 방식을 선택해주세요:**\n\n"
+            "🕐 **고정 시간**: 관리자가 지정한 시간에 모집\n"
+            "🗳️ **시간대 투표**: 유저들이 가능한 시간대를 투표하여 자동 확정",
             view=view,
             ephemeral=True
         )
         
-        # 전송된 메시지 가져오기
+        # 전송된 메시지 참조 저장
         view.message = await interaction.original_response()
+
+class RecruitmentTypeSelectView(discord.ui.View):
+    """모집 타입 선택 View (고정 시간 vs 시간대 투표)"""
+    
+    def __init__(self, bot, channel_id: str, title: str, description: str):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.channel_id = channel_id
+        self.title = title
+        self.description = description
+        self.message = None
+    
+    @discord.ui.button(
+        label="고정 시간 모집",
+        style=discord.ButtonStyle.primary,
+        emoji="🕐",
+        custom_id="fixed_time_recruitment"
+    )
+    async def fixed_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """고정 시간 모집 선택"""
+        # 기존 DateTimeSelectionView로 이동
+        view = DateTimeSelectionView(
+            self.bot,
+            self.channel_id,
+            self.title,
+            self.description
+        )
+        
+        await interaction.response.edit_message(
+            content="📅 내전 날짜와 시간을 선택해주세요:",
+            view=view
+        )
+        
+        view.message = await interaction.original_response()
+    
+    @discord.ui.button(
+        label="시간대 투표 모집",
+        style=discord.ButtonStyle.success,
+        emoji="🗳️",
+        custom_id="voting_time_recruitment"
+    )
+    async def voting_time_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """시간대 투표 모집 선택"""
+        view = VotingConfigView(self.bot, self.channel_id, self.title, self.description)
+        
+        await interaction.response.edit_message(
+            content="🗳️ **시간대 투표 모집 설정**\n\n"
+                "아래에서 순서대로 설정을 선택해주세요:",
+            view=view
+        )
+        
+        view.message = await interaction.original_response()
+    
+    async def on_timeout(self):
+        """타임아웃 처리"""
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="⏱️ 시간 초과로 모집 등록이 취소되었습니다.",
+                    view=None
+                )
+            except:
+                pass
+
+class VotingConfigView(discord.ui.View):
+    """투표 방식 모집 설정 View (시간대 직접 선택)"""
+    
+    def __init__(self, bot, channel_id: str, title: str, description: str):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.channel_id = channel_id
+        self.recruitment_title = title
+        self.recruitment_description = description
+        self.message = None
+        
+        # 선택된 값들
+        self.selected_base_time = None  # 기준 시간
+        self.selected_time_slots = []   # 선택된 시간대들
+        self.selected_deadline = None
+        
+        # 고정값
+        self.min_participants = 10  # 고정
+        
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        """UI 초기 설정"""
+        # 1. 기준 시간 선택
+        self.base_time_select = discord.ui.Select(
+            placeholder="🕐 기준 시간을 선택하세요",
+            options=self._generate_base_time_options(),
+            custom_id="base_time_select",
+            row=0
+        )
+        self.base_time_select.callback = self.base_time_callback
+        self.add_item(self.base_time_select)
+        
+        # 2. 시간대 선택 (다중 선택, 비활성)
+        self.time_slots_select = discord.ui.Select(
+            placeholder="⏰ 먼저 기준 시간을 선택하세요",
+            options=[discord.SelectOption(label="먼저 기준 시간을 선택하세요", value="placeholder")],
+            min_values=1,
+            max_values=1,
+            disabled=True,
+            custom_id="time_slots_select",
+            row=1
+        )
+        self.time_slots_select.callback = self.time_slots_callback
+        self.add_item(self.time_slots_select)
+        
+        # 3. 마감 시간 선택 (비활성)
+        self.deadline_select = discord.ui.Select(
+            placeholder="⏰ 먼저 시간대를 선택하세요",
+            options=[discord.SelectOption(label="먼저 시간대를 선택하세요", value="placeholder")],
+            disabled=True,
+            custom_id="deadline_select",
+            row=2
+        )
+        self.deadline_select.callback = self.deadline_callback
+        self.add_item(self.deadline_select)
+        
+        # 4. 등록 버튼 (비활성)
+        self.register_button = discord.ui.Button(
+            label="📝 모집 등록",
+            style=discord.ButtonStyle.success,
+            disabled=True
+        )
+        self.register_button.callback = self.register_callback
+        self.add_item(self.register_button)
+    
+    def _generate_base_time_options(self) -> List[discord.SelectOption]:
+        """기준 시간 선택 옵션"""
+        options = []
+        for hour in range(17, 24):
+            time_str = f"{hour:02d}:00"
+            display = f"오후 {hour-12}시" if hour > 12 else "정오" if hour == 12 else f"오전 {hour}시"
+            options.append(
+                discord.SelectOption(
+                    label=time_str,
+                    value=time_str,
+                    description=display,
+                    emoji="🕐"
+                )
+            )
+        
+        options.append(
+            discord.SelectOption(
+                label="직접 입력",
+                value="custom",
+                description="원하는 시간을 직접 입력합니다",
+                emoji="⌨️"
+            )
+        )
+        
+        return options
+    
+    def _generate_time_slots_options(self, base_hour: int, base_minute: int) -> List[discord.SelectOption]:
+        """기준 시간 기준으로 주변 시간대 생성"""
+        from datetime import datetime, timedelta
+        
+        # 기준 시간
+        base_time = datetime.now().replace(hour=base_hour, minute=base_minute, second=0, microsecond=0)
+        
+        options = []
+        
+        # 기준 시간 기준으로 -90분 ~ +90분 (30분 간격, 총 7개)
+        for offset in range(-90, 120, 30):
+            slot_time = base_time + timedelta(minutes=offset)
+            hour = slot_time.hour
+            minute = slot_time.minute
+            
+            # 시간 제한 없이 모든 시간대 허용 (새벽 시간대도 포함)
+            # 단, 너무 이른 오전 시간(0~13시)은 제외하되, 23시 이후는 자정을 넘어가도 허용
+            if hour < 14 and base_hour >= 17:
+                # 기준 시간이 17시 이후인데 슬롯이 오전/이른 오후라면
+                # 이는 자정을 넘어간 다음날 새벽 시간대
+                if hour >= 14:  # 오후 2시 이전은 스킵
+                    continue
+                # 0~2시(새벽)는 허용
+                if hour > 2:
+                    continue
+            
+            time_str = f"{hour:02d}:{minute:02d}"
+            
+            # 기준 시간 표시
+            if offset == 0:
+                label = f"⭐ {time_str} (기준)"
+                emoji = "⭐"
+            else:
+                label = time_str
+                # 자정 이후 시간대는 특별 이모지
+                if hour < 3:
+                    emoji = "🌙"
+                else:
+                    emoji = "🕐"
+            
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=time_str,
+                    emoji=emoji
+                )
+            )
+        
+        return options[:25]  # Discord 최대 25개 제한
+    
+    def _generate_deadline_options(self) -> List[discord.SelectOption]:
+        """마감 시간 옵션 (고정 시간 모집과 동일)"""
+        from datetime import datetime
+        
+        if not self.selected_time_slots:
+            return [discord.SelectOption(label="시간대를 먼저 선택하세요", value="placeholder")]
+        
+        # 첫 번째 시간대 기준
+        first_slot = self.selected_time_slots[0]
+        hour, minute = map(int, first_slot.split(':'))
+        scrim_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # 고정 시간 모집과 동일한 옵션들
+        deadline_options = [
+            ("10min_before", "🔥 내전 10분 전 (깜짝 내전)", scrim_time - timedelta(minutes=10)),
+            ("30min_before", "🔥 내전 30분 전 (깜짝 내전)", scrim_time - timedelta(minutes=30)),
+            ("1hour_before", "내전 1시간 전", scrim_time - timedelta(hours=1)),
+            ("2hour_before", "내전 2시간 전", scrim_time - timedelta(hours=2)),
+            ("3hour_before", "내전 3시간 전", scrim_time - timedelta(hours=3)),
+            ("1day_before", "내전 하루 전", scrim_time - timedelta(days=1)),
+            ("same_day_3pm", "내전 당일 오후 3시", scrim_time.replace(hour=15, minute=0)),
+            ("same_day_4pm", "내전 당일 오후 4시", scrim_time.replace(hour=16, minute=0)),
+            ("same_day_5pm", "내전 당일 오후 5시", scrim_time.replace(hour=17, minute=0)),
+            ("same_day_6pm", "내전 당일 오후 6시", scrim_time.replace(hour=18, minute=0)),
+            ("6hour_before", "내전 6시간 전", scrim_time - timedelta(hours=6)),
+            ("12hour_before", "내전 12시간 전", scrim_time - timedelta(hours=12)),
+        ]
+        
+        options = []
+        for value, label, deadline_time in deadline_options:
+            # 마감 시간이 현재보다 미래인 것만
+            if deadline_time > datetime.now():
+                # 10분전, 30분전은 특별한 이모지와 설명 추가
+                if value in ["10min_before", "30min_before"]:
+                    emoji = "⚡"
+                    desc = "긴급 모집용" if value == "10min_before" else "빠른 모집용"
+                else:
+                    emoji = "⏰"
+                    desc = deadline_time.strftime('%m월 %d일 %H:%M')
+                
+                options.append(
+                    discord.SelectOption(
+                        label=label,
+                        value=value,
+                        description=desc,
+                        emoji=emoji
+                    )
+                )
+        
+        # 커스텀 옵션
+        options.append(
+            discord.SelectOption(
+                label="🛠️ 정확한 시간 입력",
+                value="custom",
+                description="원하는 시간을 직접 입력합니다",
+                emoji="📅"
+            )
+        )
+        
+        return options
+    
+    async def base_time_callback(self, interaction: discord.Interaction):
+        """기준 시간 선택"""
+        selected_value = self.base_time_select.values[0]
+        
+        if selected_value == "custom":
+            modal = CustomStartTimeModal(self)
+            await interaction.response.send_modal(modal)
+        else:
+            self.selected_base_time = selected_value
+            hour, minute = map(int, selected_value.split(':'))
+            
+            # 시간대 선택 활성화
+            self.time_slots_select.disabled = False
+            self.time_slots_select.placeholder = "⏰ 참가 가능한 시간대들을 선택하세요 (여러 개 가능)"
+            self.time_slots_select.options = self._generate_time_slots_options(hour, minute)
+            self.time_slots_select.min_values = 2  # 최소 2개
+            self.time_slots_select.max_values = min(len(self.time_slots_select.options), 7)  # 최대 7개
+            
+            await interaction.response.edit_message(
+                content=f"✅ **기준 시간**: {selected_value}\n"
+                       f"⏰ 이제 참가 가능한 시간대들을 선택해주세요 (2개 이상):",
+                view=self
+            )
+    
+    async def time_slots_callback(self, interaction: discord.Interaction):
+        """시간대 선택"""
+        self.selected_time_slots = sorted(self.time_slots_select.values)
+        
+        # 마감 시간 선택 활성화
+        self.deadline_select.disabled = False
+        self.deadline_select.placeholder = "⏰ 모집 마감 시간을 선택하세요"
+        self.deadline_select.options = self._generate_deadline_options()
+        
+        # 선택된 시간대 표시
+        slots_display = '\n'.join([f"🕐 {slot}" for slot in self.selected_time_slots])
+        
+        await interaction.response.edit_message(
+            content=f"✅ **기준 시간**: {self.selected_base_time}\n"
+                   f"✅ **선택된 시간대** ({len(self.selected_time_slots)}개):\n{slots_display}\n"
+                   f"👥 **필요 인원**: 10명 (고정)\n\n"
+                   f"⏰ 마지막으로 모집 마감 시간을 선택해주세요:",
+            view=self
+        )
+    
+    async def deadline_callback(self, interaction: discord.Interaction):
+        """마감 시간 선택"""
+        from datetime import datetime, timedelta
+        
+        selected_value = self.deadline_select.values[0]
+        
+        if selected_value == "custom":
+            modal = CustomDeadlineTimeModal(self)
+            await interaction.response.send_modal(modal)
+        else:
+            # 첫 번째 시간대 기준으로 마감 시간 계산
+            first_slot = self.selected_time_slots[0]
+            hour, minute = map(int, first_slot.split(':'))
+            scrim_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            # 마감 시간 계산 (고정시간 모집과 동일)
+            deadline_map = {
+                "10min_before": timedelta(minutes=-10),
+                "30min_before": timedelta(minutes=-30),
+                "1hour_before": timedelta(hours=-1),
+                "2hour_before": timedelta(hours=-2),
+                "3hour_before": timedelta(hours=-3),
+                "6hour_before": timedelta(hours=-6),
+                "12hour_before": timedelta(hours=-12),
+                "1day_before": timedelta(days=-1),
+                "same_day_3pm": None,  # 특별 처리
+                "same_day_4pm": None,  # 특별 처리
+                "same_day_5pm": None,  # 특별 처리
+                "same_day_6pm": None,  # 특별 처리
+            }
+            
+            # 당일 고정 시간 처리
+            if selected_value == "same_day_3pm":
+                self.selected_deadline = scrim_time.replace(hour=15, minute=0)
+            elif selected_value == "same_day_4pm":
+                self.selected_deadline = scrim_time.replace(hour=16, minute=0)
+            elif selected_value == "same_day_5pm":
+                self.selected_deadline = scrim_time.replace(hour=17, minute=0)
+            elif selected_value == "same_day_6pm":
+                self.selected_deadline = scrim_time.replace(hour=18, minute=0)
+            else:
+                self.selected_deadline = scrim_time + deadline_map[selected_value]
+            
+            # 등록 버튼 활성화
+            self.register_button.disabled = False
+            
+            slots_display = '\n'.join([f"🕐 {slot}" for slot in self.selected_time_slots])
+            
+            await interaction.response.edit_message(
+                content=f"✅ **기준 시간**: {self.selected_base_time}\n"
+                    f"✅ **선택된 시간대** ({len(self.selected_time_slots)}개):\n{slots_display}\n"
+                    f"✅ **필요 인원**: 10명 (고정)\n"
+                    f"✅ **마감 시간**: {self.selected_deadline.strftime('%m월 %d일 %H:%M')}\n\n"
+                    f"🎯 모든 설정이 완료되었습니다! **모집 등록** 버튼을 눌러주세요.",
+                view=self
+            )
+    
+    async def register_callback(self, interaction: discord.Interaction):
+        """최종 등록"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # 시간 간격 계산
+            from datetime import datetime
+            times = [datetime.strptime(t, "%H:%M") for t in self.selected_time_slots]
+            intervals = [(times[i+1] - times[i]).seconds // 60 for i in range(len(times)-1)]
+            avg_interval = sum(intervals) // len(intervals) if intervals else 30
+            
+            # DB에 투표 모집 생성
+            guild_id = str(interaction.guild_id)
+            recruitment_id = await self.bot.db_manager.create_voting_recruitment_with_slots(
+                guild_id=guild_id,
+                title=self.recruitment_title,
+                description=self.recruitment_description,
+                time_slots=self.selected_time_slots,
+                deadline=self.selected_deadline,
+                created_by=str(interaction.user.id),
+                min_participants=self.min_participants
+            )
+            
+            # 채널에 투표 메시지 발송
+            channel = self.bot.get_channel(int(self.channel_id))
+            if not channel:
+                await interaction.followup.send(
+                    "❌ 공지 채널을 찾을 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # Embed와 View 생성
+            embed, view = await self._create_voting_embed_and_view(recruitment_id)
+            
+            # View의 Select Menu 옵션 업데이트
+            await view.update_select_options()
+            
+            # 메시지 발송
+            message = await channel.send(embed=embed, view=view)
+            
+            # 메시지 ID 저장
+            await self.bot.db_manager.update_recruitment_message_info(
+                recruitment_id, str(message.id), str(channel.id)
+            )
+            
+            # 성공 메시지
+            slots_display = '\n'.join([f"🕐 {slot}" for slot in self.selected_time_slots])
+            
+            await interaction.followup.send(
+                f"✅ **시간대 투표 모집이 등록되었습니다!**\n\n"
+                f"📋 **모집**: {self.recruitment_title}\n"
+                f"📊 **시간대** ({len(self.selected_time_slots)}개):\n{slots_display}\n"
+                f"👥 **필요 인원**: {self.min_participants}명\n"
+                f"⏰ **마감**: {self.selected_deadline.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"🔗 {channel.mention}에 투표 공지가 게시되었습니다!",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 모집 등록 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+            import traceback
+            traceback.print_exc()
+    
+    async def _create_voting_embed_and_view(self, recruitment_id: str):
+        """투표 Embed와 View 생성"""
+        recruitment = await self.bot.db_manager.get_voting_recruitment_info(recruitment_id)
+        
+        embed = discord.Embed(
+            title=f"🗳️ {recruitment['title']}",
+            description=f"{recruitment['description']}\n\n"
+                       f"**참가 가능한 시간대를 모두 선택해주세요!**",
+            color=0x00ff88
+        )
+        
+        embed.add_field(
+            name="⏰ 투표 마감",
+            value=self.selected_deadline.strftime('%Y년 %m월 %d일 (%A) %H:%M'),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👥 필요 인원",
+            value=f"{self.min_participants}명",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 현재 상태",
+            value="🟢 투표 진행 중",
+            inline=True
+        )
+        
+        # 시간대별 투표 현황
+        time_slots_text = ""
+        for slot in recruitment['time_slots']:
+            time_slots_text += f"🕐 **{slot['time_slot']}** ░░░░░░░░░░ 0명\n"
+        
+        embed.add_field(
+            name="⏱️ 시간대별 참가 현황",
+            value=time_slots_text,
+            inline=False
+        )
+        
+        embed.set_footer(text=f"모집 ID: {recruitment_id} | 중복 선택 가능")
+        
+        # View 생성
+        view = VotingRecruitmentView(self.bot, recruitment_id)
+        
+        return embed, view
+    
+    async def on_timeout(self):
+        """타임아웃 처리"""
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="⏱️ 시간 초과로 모집 등록이 취소되었습니다.",
+                    view=None
+                )
+            except:
+                pass
+
+
+class CustomStartTimeModal(discord.ui.Modal):
+    """커스텀 시작 시간 입력 Modal"""
+    
+    def __init__(self, parent_view):
+        super().__init__(title="⌨️ 시작 시간 직접 입력")
+        self.parent_view = parent_view
+        
+        self.time_input = discord.ui.TextInput(
+            label="시작 시간 (24시간 형식)",
+            placeholder="예: 21:00",
+            required=True,
+            max_length=5
+        )
+        self.add_item(self.time_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """시간 입력 제출"""
+        time_str = self.time_input.value.strip()
+        
+        # 검증
+        if not self._validate_time_format(time_str):
+            await interaction.response.send_message(
+                "❌ 올바른 시간 형식이 아닙니다. (예: 21:00)",
+                ephemeral=True
+            )
+            return
+        
+        # VotingConfigView인 경우
+        if hasattr(self.parent_view, 'selected_base_time'):
+            self.parent_view.selected_base_time = time_str
+            hour, minute = map(int, time_str.split(':'))
+            
+            # 시간대 선택 활성화
+            self.parent_view.time_slots_select.disabled = False
+            self.parent_view.time_slots_select.placeholder = "⏰ 참가 가능한 시간대들을 선택하세요 (여러 개 가능)"
+            self.parent_view.time_slots_select.options = self.parent_view._generate_time_slots_options(hour, minute)
+            self.parent_view.time_slots_select.min_values = 2  # 최소 2개
+            self.parent_view.time_slots_select.max_values = min(len(self.parent_view.time_slots_select.options), 7)  # 최대 7개
+            
+            await interaction.response.edit_message(
+                content=f"✅ **기준 시간**: {time_str}\n"
+                       f"⏰ 이제 참가 가능한 시간대들을 선택해주세요 (2개 이상):",
+                view=self.parent_view
+            )
+        # 다른 View인 경우 (기존 로직)
+        else:
+            self.parent_view.selected_start_time = time_str
+            
+            # 다음 단계 활성화
+            self.parent_view.interval_select.disabled = False
+            self.parent_view.interval_select.placeholder = "⏱️ 시간 간격을 선택하세요"
+            self.parent_view.interval_select.options = self.parent_view._generate_interval_options()
+            
+            await interaction.response.edit_message(
+                content=f"✅ **시작 시간**: {time_str}\n⏱️ 이제 시간 간격을 선택해주세요:",
+                view=self.parent_view
+            )
+    
+    def _validate_time_format(self, time_str: str) -> bool:
+        """시간 형식 검증"""
+        import re
+        pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        return bool(re.match(pattern, time_str))
+
+
+class CustomDeadlineTimeModal(discord.ui.Modal):
+    """커스텀 마감 시간 입력 Modal"""
+    
+    def __init__(self, parent_view):
+        super().__init__(title="⌨️ 마감 시간 직접 입력")
+        self.parent_view = parent_view
+        
+        self.datetime_input = discord.ui.TextInput(
+            label="마감 시간",
+            placeholder="예: 18:00 (오늘) 또는 12-25 18:00",
+            required=True,
+            max_length=20
+        )
+        self.add_item(self.datetime_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """마감 시간 입력 제출"""
+        from datetime import datetime, timedelta
+        
+        datetime_str = self.datetime_input.value.strip()
+        
+        # 파싱
+        parsed_datetime = self._parse_deadline(datetime_str)
+        if not parsed_datetime:
+            await interaction.response.send_message(
+                "❌ 올바른 형식이 아닙니다.\n"
+                "형식: 18:00 (오늘) 또는 12-25 18:00",
+                ephemeral=True
+            )
+            return
+        
+        if parsed_datetime <= datetime.now():
+            await interaction.response.send_message(
+                "❌ 마감 시간은 현재 시간보다 미래여야 합니다.",
+                ephemeral=True
+            )
+            return
+        
+        self.parent_view.selected_deadline = parsed_datetime
+        
+        # 등록 버튼 활성화
+        self.parent_view.register_button.disabled = False
+        
+        preview = self.parent_view._generate_time_slots_preview()
+        
+        await interaction.response.edit_message(
+            content=f"✅ **시작 시간**: {self.parent_view.selected_start_time}\n"
+                   f"✅ **시간 간격**: {self.parent_view.selected_interval}분\n"
+                   f"✅ **시간대 개수**: {self.parent_view.selected_slot_count}개\n"
+                   f"✅ **최소 인원**: {self.parent_view.selected_min_participants}명\n"
+                   f"✅ **마감 시간**: {parsed_datetime.strftime('%m월 %d일 %H:%M')}\n\n"
+                   f"📋 **시간대 미리보기**:\n{preview}\n\n"
+                   f"🎯 모든 설정이 완료되었습니다! **모집 등록** 버튼을 눌러주세요.",
+            view=self.parent_view
+        )
+    
+    def _parse_deadline(self, datetime_str: str):
+        """마감 시간 파싱"""
+        import re
+        from datetime import datetime, timedelta
+        
+        # HH:MM (오늘)
+        pattern1 = r'^(\d{1,2}):(\d{2})$'
+        match1 = re.match(pattern1, datetime_str)
+        if match1:
+            hour, minute = map(int, match1.groups())
+            result = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if result < datetime.now():
+                result += timedelta(days=1)
+            return result
+        
+        # MM-DD HH:MM
+        pattern2 = r'^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$'
+        match2 = re.match(pattern2, datetime_str)
+        if match2:
+            month, day, hour, minute = map(int, match2.groups())
+            year = datetime.now().year
+            result = datetime(year, month, day, hour, minute)
+            if result < datetime.now():
+                result = datetime(year + 1, month, day, hour, minute)
+            return result
+        
+        return None
+
+class VotingConfigModal(discord.ui.Modal):
+    """투표 방식 모집 설정 Modal"""
+    def __init__(self, bot, channel_id: str, title: str, description: str):
+        super().__init__(title="시간대 투표 설정")
+        self.bot = bot
+        self.channel_id = channel_id
+        self.recruitment_title = title
+        self.recruitment_description = description
+        
+        # 시작 시간 입력
+        self.start_time_input = discord.ui.TextInput(
+            label="시작 시간 (24시간 형식)",
+            placeholder="예: 21:00",
+            required=True,
+            max_length=5
+        )
+        self.add_item(self.start_time_input)
+        
+        # 시간 간격 입력
+        self.interval_input = discord.ui.TextInput(
+            label="시간 간격 (분)",
+            placeholder="기본값: 30분 (15~120분)",
+            required=False,
+            default="30",
+            max_length=3
+        )
+        self.add_item(self.interval_input)
+        
+        # 시간대 개수 입력
+        self.slot_count_input = discord.ui.TextInput(
+            label="시간대 개수",
+            placeholder="기본값: 4개 (2~8개)",
+            required=False,
+            default="4",
+            max_length=1
+        )
+        self.add_item(self.slot_count_input)
+        
+        # 최소 참가 인원 입력
+        self.min_participants_input = discord.ui.TextInput(
+            label="최소 참가 인원",
+            placeholder="기본값: 10명 (4~20명)",
+            required=False,
+            default="10",
+            max_length=2
+        )
+        self.add_item(self.min_participants_input)
+        
+        # 마감 시간 입력
+        self.deadline_input = discord.ui.TextInput(
+            label="모집 마감 날짜와 시간",
+            placeholder="예: 12-25 18:00 (오늘이면 생략 가능: 18:00)",
+            required=True,
+            max_length=20
+        )
+        self.add_item(self.deadline_input)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """투표 설정 제출 처리"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # 1. 시작 시간 검증
+            start_time = self.start_time_input.value.strip()
+            if not self._validate_time_format(start_time):
+                await interaction.followup.send(
+                    "❌ 시작 시간 형식이 올바르지 않습니다.\n"
+                    "24시간 형식으로 입력해주세요. (예: 21:00)",
+                    ephemeral=True
+                )
+                return
+            
+            # 2. 시간 간격 검증
+            try:
+                interval = int(self.interval_input.value.strip() or "30")
+                if not (15 <= interval <= 120):
+                    raise ValueError
+            except ValueError:
+                await interaction.followup.send(
+                    "❌ 시간 간격은 15~120분 사이여야 합니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 3. 시간대 개수 검증
+            try:
+                slot_count = int(self.slot_count_input.value.strip() or "4")
+                if not (2 <= slot_count <= 8):
+                    raise ValueError
+            except ValueError:
+                await interaction.followup.send(
+                    "❌ 시간대 개수는 2~8개 사이여야 합니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 4. 최소 인원 검증
+            try:
+                min_participants = int(self.min_participants_input.value.strip() or "10")
+                if not (4 <= min_participants <= 20):
+                    raise ValueError
+            except ValueError:
+                await interaction.followup.send(
+                    "❌ 최소 참가 인원은 4~20명 사이여야 합니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 5. 마감 시간 검증
+            deadline = self._parse_deadline_datetime(self.deadline_input.value.strip())
+            if not deadline:
+                await interaction.followup.send(
+                    "❌ 마감 시간 형식이 올바르지 않습니다.\n"
+                    "형식: MM-DD HH:MM 또는 YYYY-MM-DD HH:MM\n"
+                    "예: 12-25 18:00",
+                    ephemeral=True
+                )
+                return
+            
+            if deadline <= datetime.now():
+                await interaction.followup.send(
+                    "❌ 마감 시간은 현재 시간보다 미래여야 합니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # 6. DB에 투표 모집 생성
+            guild_id = str(interaction.guild_id)
+            recruitment_id = await self.bot.db_manager.create_voting_recruitment(
+                guild_id=guild_id,
+                title=self.recruitment_title,
+                description=self.recruitment_description,
+                start_time=start_time,
+                deadline=deadline,
+                created_by=str(interaction.user.id),
+                time_interval_minutes=interval,
+                time_slot_count=slot_count,
+                min_participants=min_participants
+            )
+            
+            # 7. 채널에 투표 메시지 발송
+            channel = self.bot.get_channel(int(self.channel_id))
+            if not channel:
+                await interaction.followup.send(
+                    "❌ 공지 채널을 찾을 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # Embed와 View 생성
+            embed, view = await self._create_voting_embed_and_view(recruitment_id)
+
+            await view.update_select_options()
+            
+            # 메시지 발송
+            message = await channel.send(embed=embed, view=view)
+            
+            # 메시지 ID 저장
+            await self.bot.db_manager.update_recruitment_message_info(
+                recruitment_id, str(message.id), str(channel.id)
+            )
+            
+            # 성공 메시지
+            await interaction.followup.send(
+                f"✅ **시간대 투표 모집이 등록되었습니다!**\n\n"
+                f"📋 모집: {self.recruitment_title}\n"
+                f"🕐 시작 시간: {start_time}\n"
+                f"⏱️ 간격: {interval}분\n"
+                f"📊 시간대: {slot_count}개\n"
+                f"👥 최소 인원: {min_participants}명\n"
+                f"⏰ 마감: {deadline.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"🔗 {channel.mention}에 투표 공지가 게시되었습니다!",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 모집 등록 중 오류가 발생했습니다: {str(e)}",
+                ephemeral=True
+            )
+
+    async def _create_voting_embed_and_view(self, recruitment_id: str):
+        """투표 Embed와 View 생성"""
+        recruitment = await self.bot.db_manager.get_voting_recruitment_info(recruitment_id)
+        
+        embed = discord.Embed(
+            title=f"🗳️ {recruitment['title']}",
+            description=f"{recruitment['description']}\n\n"
+                    f"**참가 가능한 시간대를 모두 선택해주세요!**",
+            color=0x00ff88
+        )
+        
+        deadline = datetime.fromisoformat(recruitment['deadline'])
+        embed.add_field(
+            name="⏰ 투표 마감",
+            value=deadline.strftime('%Y년 %m월 %d일 (%A) %H:%M'),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👥 필요 인원",
+            value=f"{recruitment['min_participants']}명",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 현재 상태",
+            value="🟢 투표 진행 중",
+            inline=True
+        )
+        
+        # 시간대별 투표 현황
+        time_slots_text = ""
+        for slot in recruitment['time_slots']:
+            bar = self._create_vote_bar(slot['vote_count'], recruitment['min_participants'])
+            time_slots_text += f"🕐 **{slot['time_slot']}** {bar} {slot['vote_count']}명\n"
+        
+        embed.add_field(
+            name="⏱️ 시간대별 참가 현황",
+            value=time_slots_text or "아직 투표가 없습니다.",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"모집 ID: {recruitment_id} | 중복 선택 가능")
+        
+        # View 생성
+        view = VotingRecruitmentView(self.bot, recruitment_id)
+        
+        return embed, view
+
+
+    def _create_vote_bar(self, current: int, target: int) -> str:
+        """투표 진행 바 생성"""
+        if target == 0:
+            return "░░░░░░░░░░"
+        
+        ratio = min(current / target, 1.0)
+        filled = int(ratio * 10)
+        empty = 10 - filled
+        
+        if current >= target:
+            return "🟢" + "█" * filled + "░" * empty
+        else:
+            return "█" * filled + "░" * empty
+    
+    def _validate_time_format(self, time_str: str) -> bool:
+        """시간 형식 검증 (HH:MM)"""
+        import re
+        pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+        if not re.match(pattern, time_str):
+            return False
+        
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except ValueError:
+            return False
+    
+    def _parse_deadline_datetime(self, datetime_str: str) -> Optional[datetime]:
+        """마감 시간 파싱"""
+        import re
+        
+        # 패턴 0: HH:MM (오늘 날짜로 간주)
+        pattern0 = r'^(\d{1,2}):(\d{2})$'
+        match0 = re.match(pattern0, datetime_str)
+        
+        if match0:
+            hour, minute = map(int, match0.groups())
+            target_date = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            # 이미 지난 시간이면 내일로
+            if target_date < datetime.now():
+                target_date += timedelta(days=1)
+            
+            return target_date
+        
+        # 패턴 1: MM-DD HH:MM
+        pattern1 = r'^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$'
+        match1 = re.match(pattern1, datetime_str)
+        
+        if match1:
+            month, day, hour, minute = map(int, match1.groups())
+            year = datetime.now().year
+            
+            # 월/일이 이미 지났으면 내년으로
+            target_date = datetime(year, month, day, hour, minute)
+            if target_date < datetime.now():
+                target_date = datetime(year + 1, month, day, hour, minute)
+            
+            return target_date
+        
+        # 패턴 2: YYYY-MM-DD HH:MM
+        pattern2 = r'^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$'
+        match2 = re.match(pattern2, datetime_str)
+        
+        if match2:
+            year, month, day, hour, minute = map(int, match2.groups())
+            return datetime(year, month, day, hour, minute)
+        
+        return None
+    
+class VotingRecruitmentView(discord.ui.View):
+    """시간대 투표 View"""
+    
+    def __init__(self, bot, recruitment_id: str):
+        super().__init__(timeout=None)  # 타임아웃 없음
+        self.bot = bot
+        self.recruitment_id = recruitment_id
+        
+        # Select Menu 추가
+        self.time_slot_select = TimeSlotSelect(bot, recruitment_id)
+        self.add_item(self.time_slot_select)
+
+    async def update_select_options(self):
+        """Select Menu 옵션 업데이트 (View 생성 직후 호출)"""
+        await self.time_slot_select.update_options()
+    
+    @discord.ui.button(
+        label="내 투표 확인",
+        style=discord.ButtonStyle.secondary,
+        emoji="📋",
+        custom_id="check_my_votes"
+    )
+    async def check_votes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """내가 투표한 시간대 확인"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            time_slots = await self.bot.db_manager.get_time_slots_by_recruitment(self.recruitment_id)
+            user_id = str(interaction.user.id)
+            
+            voted_slots = []
+            for slot in time_slots:
+                voters = slot['voter_ids'].split(',') if slot['voter_ids'] else []
+                if user_id in voters:
+                    voted_slots.append(slot['time_slot'])
+            
+            if voted_slots:
+                slots_text = '\n'.join([f"🕐 {slot}" for slot in voted_slots])
+                await interaction.followup.send(
+                    f"**📋 내가 투표한 시간대:**\n\n{slots_text}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "아직 투표하지 않았습니다.\n위의 메뉴에서 참가 가능한 시간대를 선택해주세요!",
+                    ephemeral=True
+                )
+                
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 투표 확인 중 오류: {str(e)}",
+                ephemeral=True
+            )
+    
+    @discord.ui.button(
+        label="참가자 목록",
+        style=discord.ButtonStyle.primary,
+        emoji="👥",
+        custom_id="show_voters_list"
+    )
+    async def show_voters_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """시간대별 참가자 목록 표시"""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # 모집 정보 및 시간대 조회
+            recruitment = await self.bot.db_manager.get_voting_recruitment_info(self.recruitment_id)
+            if not recruitment:
+                await interaction.followup.send(
+                    "❌ 모집 정보를 찾을 수 없습니다.", ephemeral=True
+                )
+                return
+            
+            time_slots = recruitment.get('time_slots', [])
+            
+            if not time_slots:
+                await interaction.followup.send(
+                    "❌ 시간대 정보를 찾을 수 없습니다.", ephemeral=True
+                )
+                return
+            
+            # 임베드 생성
+            embed = discord.Embed(
+                title=f"👥 {recruitment['title']} - 시간대별 참가자 목록",
+                description=f"**필요 인원**: {recruitment['min_participants']}명",
+                color=0x00ff88
+            )
+            
+            # 확정된 시간대가 있는 경우
+            if recruitment.get('confirmed_time'):
+                embed.add_field(
+                    name="✅ 확정된 시간",
+                    value=f"**{recruitment['confirmed_time']}**",
+                    inline=False
+                )
+            
+            # 각 시간대별 투표자 목록
+            for slot in sorted(time_slots, key=lambda x: x['time_slot']):
+                time_slot = slot['time_slot']
+                vote_count = slot['vote_count']
+                voter_names = slot.get('voter_names', '').split(',') if slot.get('voter_names') else []
+                
+                # 필요 인원 달성 여부에 따라 이모지 변경
+                if vote_count >= recruitment['min_participants']:
+                    emoji = "✅"
+                    status = "확정 가능!"
+                else:
+                    emoji = "🕐"
+                    status = f"{vote_count}/{recruitment['min_participants']}명"
+                
+                # 투표자가 있는 경우
+                if voter_names and voter_names[0]:
+                    # 최대 10명까지만 표시
+                    if len(voter_names) <= 10:
+                        voters_text = '\n'.join([f"{i}. {name}" for i, name in enumerate(voter_names, 1)])
+                    else:
+                        voters_text = '\n'.join([f"{i}. {name}" for i, name in enumerate(voter_names[:10], 1)])
+                        voters_text += f"\n... 외 {len(voter_names) - 10}명"
+                    
+                    field_value = f"{emoji} **{status}**\n{voters_text}"
+                else:
+                    field_value = f"{emoji} **{status}**\n아직 투표자가 없습니다."
+                
+                embed.add_field(
+                    name=f"🕐 {time_slot}",
+                    value=field_value,
+                    inline=False
+                )
+            
+            # 마감 시간 정보
+            deadline = datetime.fromisoformat(recruitment['deadline'])
+            embed.add_field(
+                name="⏰ 투표 마감",
+                value=deadline.strftime('%Y년 %m월 %d일 %H:%M'),
+                inline=False
+            )
+            
+            embed.set_footer(text=f"모집 ID: {self.recruitment_id}")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 참가자 목록 조회 중 오류가 발생했습니다: {str(e)}", 
+                ephemeral=True
+            )
+            import traceback
+            traceback.print_exc()
+
+
+class TimeSlotSelect(discord.ui.Select):
+    """시간대 선택 Select Menu"""
+    
+    def __init__(self, bot, recruitment_id: str):
+        self.bot = bot
+        self.recruitment_id = recruitment_id
+        
+        # 초기 옵션 (실제 옵션은 View가 생성될 때 업데이트됨)
+        options = [
+            discord.SelectOption(
+                label="로딩 중...",
+                value="loading",
+                description="시간대를 불러오는 중입니다"
+            )
+        ]
+        
+        super().__init__(
+            placeholder="참가 가능한 시간대를 선택하세요 (여러 개 선택 가능)",
+            min_values=0, 
+            max_values=1,
+            options=options,
+        )
+
+    async def update_options(self):
+        """시간대 옵션 업데이트"""
+        try:
+            recruitment = await self.bot.db_manager.get_voting_recruitment_info(self.recruitment_id)
+            
+            if not recruitment:
+                return
+            
+            # 확정된 경우 비활성화
+            if recruitment.get('confirmed_time'):
+                self.disabled = True
+                self.placeholder = f"✅ {recruitment['confirmed_time']}에 확정되었습니다"
+                return
+            
+            time_slots = recruitment.get('time_slots', [])
+            
+            if not time_slots:
+                return
+            
+            # 옵션 생성
+            options = []
+            for slot in time_slots:
+                vote_count = slot['vote_count']
+                min_participants = recruitment['min_participants']
+                
+                # 투표 진행 상태 표시
+                if vote_count >= min_participants:
+                    emoji = "✅"
+                    description = f"참가 가능 ({vote_count}명) - 확정 가능!"
+                else:
+                    emoji = "🕐"
+                    description = f"참가 가능 ({vote_count}/{min_participants}명)"
+                
+                options.append(
+                    discord.SelectOption(
+                        label=f"{slot['time_slot']}",
+                        value=slot['time_slot'],
+                        description=description,
+                        emoji=emoji
+                    )
+                )
+            
+            # 옵션 업데이트
+            self.options = options
+            self.max_values = len(options)  # 모든 시간대 선택 가능
+            
+        except Exception as e:
+            print(f"❌ 시간대 옵션 업데이트 오류: {e}")
+    
+    async def callback(self, interaction: discord.Interaction):
+        """시간대 선택 콜백"""
+        await interaction.response.defer()
+        
+        try:
+            user_id = str(interaction.user.id)
+            username = interaction.user.display_name
+            
+            # 선택된 시간대들
+            selected_slots = self.values
+            
+            # 모든 시간대 조회
+            all_slots = await self.bot.db_manager.get_time_slots_by_recruitment(self.recruitment_id)
+            
+            # 기존 투표 제거 (선택하지 않은 시간대)
+            for slot in all_slots:
+                if slot['time_slot'] not in selected_slots:
+                    await self.bot.db_manager.remove_time_slot_vote(
+                        self.recruitment_id, slot['time_slot'], user_id
+                    )
+            
+            # 새로운 투표 추가
+            for slot_time in selected_slots:
+                await self.bot.db_manager.add_time_slot_vote(
+                    self.recruitment_id, slot_time, user_id, username
+                )
+            
+            # 자동 확정 체크
+            confirmed_time = await self.bot.db_manager.check_and_confirm_time_slot(self.recruitment_id)
+            
+            # 메시지 업데이트
+            await self._update_voting_message(interaction, confirmed_time)
+            
+            # 확정되었으면 알림
+            if confirmed_time:
+                await self._send_confirmation_notification(interaction, confirmed_time)
+            
+        except Exception as e:
+            print(f"❌ 시간대 투표 처리 오류: {e}")
+    
+    async def _update_voting_message(self, interaction: discord.Interaction, confirmed_time: Optional[str]):
+        """투표 메시지 업데이트"""
+        from datetime import datetime, timedelta
+
+        try:
+            recruitment = await self.bot.db_manager.get_voting_recruitment_info(self.recruitment_id)
+            
+            if confirmed_time:
+                # 확정됨
+                embed = discord.Embed(
+                    title=f"✅ {recruitment['title']} - 시간 확정!",
+                    description=f"{recruitment['description']}\n\n"
+                            f"**🎉 {confirmed_time}에 내전이 확정되었습니다!**",
+                    color=0x00ff00
+                )
+                
+                # 확정된 시간대의 투표자 목록
+                confirmed_slot = next((s for s in recruitment['time_slots'] if s['time_slot'] == confirmed_time), None)
+                if confirmed_slot:
+                    voter_count = confirmed_slot['vote_count']
+                    embed.add_field(
+                        name="👥 참가 확정 인원",
+                        value=f"{voter_count}명",
+                        inline=True
+                    )
+                
+                embed.add_field(
+                    name="🕐 확정 시간",
+                    value=confirmed_time,
+                    inline=True
+                )
+                
+                # 🆕 예상 내전 날짜 표시
+                deadline_str = recruitment['deadline']
+                from datetime import datetime, timedelta
+                deadline_dt = datetime.fromisoformat(deadline_str)
+                base_date = deadline_dt.date()
+                hour, minute = map(int, confirmed_time.split(':'))
+                scrim_dt = datetime.combine(base_date, datetime.min.time().replace(hour=hour, minute=minute))
+                if scrim_dt <= deadline_dt:
+                    scrim_dt += timedelta(days=1)
+                
+                embed.add_field(
+                    name="📅 내전 일시",
+                    value=scrim_dt.strftime('%Y년 %m월 %d일 (%A) %H:%M'),
+                    inline=False
+                )
+                
+                embed.set_footer(text=f"모집 ID: {self.recruitment_id} | 확정 완료")
+                
+                # View 비활성화
+                view = discord.ui.View()
+                
+            else:
+                # 아직 미확정
+                embed = discord.Embed(
+                    title=f"🗳️ {recruitment['title']}",
+                    description=f"{recruitment['description']}\n\n"
+                            f"**참가 가능한 시간대를 모두 선택해주세요!**",
+                    color=0x00ff88
+                )
+                
+                deadline = datetime.fromisoformat(recruitment['deadline'])
+                embed.add_field(
+                    name="⏰ 투표 마감",
+                    value=deadline.strftime('%Y년 %m월 %d일 %H:%M'),
+                    inline=True
+                )
+                
+                embed.add_field(
+                    name="👥 필요 인원",
+                    value=f"{recruitment['min_participants']}명",
+                    inline=True
+                )
+                
+                embed.add_field(
+                    name="📊 현재 상태",
+                    value="🟢 투표 진행 중",
+                    inline=True
+                )
+                
+                # 시간대별 투표 현황
+                time_slots_text = ""
+                for slot in recruitment['time_slots']:
+                    bar = self._create_vote_bar(slot['vote_count'], recruitment['min_participants'])
+                    emoji = "✅" if slot['vote_count'] >= recruitment['min_participants'] else "🕐"
+                    time_slots_text += f"{emoji} **{slot['time_slot']}** {bar} {slot['vote_count']}명\n"
+                
+                embed.add_field(
+                    name="⏱️ 시간대별 참가 현황",
+                    value=time_slots_text,
+                    inline=False
+                )
+                
+                embed.set_footer(text=f"모집 ID: {self.recruitment_id} | 중복 선택 가능")
+                
+                # View 재생성 및 옵션 업데이트
+                view = VotingRecruitmentView(self.bot, self.recruitment_id)
+                await view.update_select_options()
+            
+            # 메시지 수정
+            await interaction.message.edit(embed=embed, view=view)
+            
+        except Exception as e:
+            print(f"❌ 메시지 업데이트 오류: {e}")
+    
+    async def _send_confirmation_notification(self, interaction: discord.Interaction, confirmed_time: str):
+        """확정 알림 발송"""
+        try:
+            # 확정된 시간대에 투표한 사람들 조회
+            voters = await self.bot.db_manager.get_time_slot_voters(self.recruitment_id, confirmed_time)
+            
+            if not voters:
+                return
+            
+            # 멘션 생성
+            mentions = ' '.join([f"<@{voter_id}>" for voter_id in voters])
+            
+            # 채널에 알림 발송
+            await interaction.channel.send(
+                f"🎉 **내전 시간이 확정되었습니다!**\n\n"
+                f"🕐 확정 시간: **{confirmed_time}**\n"
+                f"👥 참가 확정: {len(voters)}명\n\n"
+                f"{mentions}\n\n"
+                f"내전 10분 전에 다시 알림드리겠습니다!"
+            )
+            
+        except Exception as e:
+            print(f"❌ 확정 알림 발송 오류: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _create_vote_bar(self, current: int, target: int) -> str:
+        """투표 진행 바 생성"""
+        if target == 0:
+            return "░░░░░░░░░░"
+        
+        ratio = min(current / target, 1.0)
+        filled = int(ratio * 10)
+        empty = 10 - filled
+        
+        if current >= target:
+            return "🟢" + "█" * filled + "░" * empty
+        else:
+            return "█" * filled + "░" * empty
 
 class CustomTimeModal(discord.ui.Modal):
     """커스텀 시간 입력을 위한 Modal"""
@@ -176,7 +1527,7 @@ class CustomTimeModal(discord.ui.Modal):
         self.add_item(self.time_input)
     
     async def on_submit(self, interaction: discord.Interaction):
-        """시간 입력 처리 - 수정됨"""
+        """시간 입력 처리"""
         time_str = self.time_input.value.strip()
         
         # 시간 형식 검증
@@ -190,7 +1541,6 @@ class CustomTimeModal(discord.ui.Modal):
         
         # 부모 뷰에 선택된 시간 전달
         self.parent_view.selected_time = time_str
-        print(f"DEBUG: CustomTimeModal에서 시간 설정됨: {time_str}")
         
         # UI 상태 업데이트
         self.parent_view._update_ui_state()
@@ -2043,32 +3393,63 @@ class ScrimRecruitmentCommands(commands.Cog):
         # 데이터베이스에서 관리자 확인
         return await self.bot.db_manager.is_server_admin(guild_id, user_id)
 
-    @app_commands.command(name="내전공지등록", description="[관리자] 새로운 내전 모집 공지를 등록합니다")
-    @app_commands.describe(채널="모집 공지를 게시할 채널 (생략 시 기본 설정 채널 사용)")
+    @app_commands.command(name="내전공지등록", description="[관리자] 내전 공지를 등록합니다")
+    @app_commands.describe(채널="내전 공지를 게시할 채널")
     @app_commands.default_permissions(manage_guild=True)
-    async def register_recruitment_new(
-        self, 
-        interaction: discord.Interaction, 
+    async def register_recruitment(
+        self,
+        interaction: discord.Interaction,
         채널: discord.TextChannel = None
     ):
+        """내전 공지 등록 - 3초 타임아웃 방지"""
+        
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
+                ephemeral=True
             )
             return
         
-        if not 채널:
-            default_channel_id = await self.bot.db_manager.get_recruitment_channel(str(interaction.guild_id))
+        if 채널:
+            modal = DateTimeModal(self.bot, str(채널.id))
+            await interaction.response.send_modal(modal)
+            return
+        
+        try:
+            default_channel_id = await self.bot.db_manager.get_recruitment_channel(
+                str(interaction.guild_id)
+            )
+            
             if not default_channel_id:
                 await interaction.response.send_message(
                     "❌ 채널을 지정하거나 `/내전공지채널설정`으로 기본 채널을 설정해주세요.", 
                     ephemeral=True
                 )
                 return
-            채널 = interaction.guild.get_channel(int(default_channel_id))
-        
-        modal = DateTimeModal(self.bot, str(채널.id))
-        await interaction.response.send_modal(modal)
+            
+            target_channel = interaction.guild.get_channel(int(default_channel_id))
+            if not target_channel:
+                await interaction.response.send_message(
+                    "❌ 설정된 기본 채널을 찾을 수 없습니다. 다시 설정해주세요.",
+                    ephemeral=True
+                )
+                return
+            
+            # Modal 전송
+            modal = DateTimeModal(self.bot, str(target_channel.id))
+            await interaction.response.send_modal(modal)
+            
+        except discord.errors.NotFound:
+            logger.warning(f"⚠️ Interaction timeout in register_recruitment for guild {interaction.guild_id}")
+        except Exception as e:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ 오류가 발생했습니다: {str(e)}",
+                        ephemeral=True
+                    )
+            except:
+                logger.error(f"❌ register_recruitment 에러: {e}")
 
     @app_commands.command(name="내전공지채널설정", description="[관리자] 내전 공지가 게시될 채널을 설정합니다")
     @app_commands.describe(채널="내전 공지 채널")
@@ -2080,29 +3461,40 @@ class ScrimRecruitmentCommands(commands.Cog):
     ):
         if not await self.is_admin(interaction):
             await interaction.response.send_message(
-                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-
-        try:
-            await self.bot.db_manager.set_recruitment_channel(
-                str(interaction.guild_id), str(채널.id)
-            )
-
-            embed = discord.Embed(
-                title="✅ 내전 공지 채널 설정 완료",
-                description=f"내전 모집 공지가 {채널.mention} 채널에 게시됩니다.",
-                color=0x00ff88,
-                timestamp=datetime.now()
-            )
-
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ 채널 설정 중 오류가 발생했습니다: {str(e)}",
+                "❌ 이 명령어는 관리자만 사용할 수 있습니다.", 
                 ephemeral=True
             )
+            return
+        
+        target_channel = None
+        
+        if 채널:
+            target_channel = 채널
+        else:
+            cached_channel_id = self.bot.recruitment_channels_cache.get(str(interaction.guild_id))
+            
+            if cached_channel_id:
+                target_channel = interaction.guild.get_channel(int(cached_channel_id))
+            else:
+                try:
+                    default_channel_id = await self.bot.db_manager.get_recruitment_channel(
+                        str(interaction.guild_id)
+                    )
+                    if default_channel_id:
+                        self.bot.recruitment_channels_cache[str(interaction.guild_id)] = default_channel_id
+                        target_channel = interaction.guild.get_channel(int(default_channel_id))
+                except:
+                    pass
+        
+        if not target_channel:
+            await interaction.response.send_message(
+                "❌ 채널을 지정하거나 `/내전공지채널설정`으로 기본 채널을 설정해주세요.", 
+                ephemeral=True
+            )
+            return
+        
+        modal = DateTimeModal(self.bot, str(target_channel.id))
+        await interaction.response.send_modal(modal)
 
     @app_commands.command(
         name="정기내전설정", 

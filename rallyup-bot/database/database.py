@@ -18,7 +18,7 @@ class DatabaseManager:
         self.db_path = db_path
 
     def get_connection(self):
-        """데이터베이스 연결 반환 (연속형 챌린지용)"""
+        """데이터베이스 연결 반환"""
         return aiosqlite.connect(self.db_path)
 
     def generate_uuid(self) -> str:
@@ -265,6 +265,12 @@ class DatabaseManager:
                     channel_id TEXT,
                     message_id TEXT,
                     status TEXT DEFAULT 'active',
+                    recruitment_type TEXT DEFAULT 'fixed' CHECK (recruitment_type IN ('fixed', 'voting')),
+                    time_interval_minutes INTEGER DEFAULT 30,
+                    time_slot_count INTEGER DEFAULT 4,
+                    min_participants INTEGER DEFAULT 10,
+                    confirmed_time TEXT,
+                    notification_sent INTEGER DEFAULT 0,
                     created_by TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -285,6 +291,23 @@ class DatabaseManager:
                 )
             ''')
 
+            # recruitment_time_slots 테이블
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS recruitment_time_slots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recruitment_id TEXT NOT NULL,
+                    time_slot TEXT NOT NULL,
+                    voter_ids TEXT DEFAULT '',
+                    voter_names TEXT DEFAULT '',
+                    vote_count INTEGER DEFAULT 0,
+                    is_confirmed INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (recruitment_id) REFERENCES scrim_recruitments(id),
+                    UNIQUE(recruitment_id, time_slot)
+                )
+            ''')
+            
             # match_results 테이블
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS match_results (
@@ -438,6 +461,9 @@ class DatabaseManager:
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_daily_threads_guild_date ON tts_daily_threads(guild_id, date)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_user_tts_prefs ON user_tts_preferences(guild_id, user_id)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_tts_channel_guild ON tts_channel_settings(guild_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_recruitment_time_slots_recruitment ON recruitment_time_slots(recruitment_id)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_recruitment_time_slots_confirmed ON recruitment_time_slots(is_confirmed)')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_scrim_recruitments_type ON scrim_recruitments(recruitment_type)')
 
             await db.commit()
 
@@ -13223,6 +13249,492 @@ class DatabaseManager:
             logger.error(f"❌ 음성 점수 취소 실패: {e}", exc_info=True)
             return False, f"취소 처리 중 오류: {str(e)}", None
 
+    async def create_voting_recruitment(self, guild_id: str, title: str, description: str, 
+                                    start_time: str, deadline: datetime, created_by: str,
+                                    time_interval_minutes: int, time_slot_count: int, 
+                                    min_participants: int) -> str:
+        """투표 방식 내전 모집 생성"""
+        try:
+            recruitment_id = str(uuid.uuid4())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 모집 정보 저장
+                await db.execute('''
+                    INSERT INTO scrim_recruitments 
+                    (id, guild_id, title, description, scrim_date, deadline, created_by,
+                    recruitment_type, time_interval_minutes, time_slot_count, min_participants)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'voting', ?, ?, ?)
+                ''', (
+                    recruitment_id,
+                    guild_id,
+                    title,
+                    description,
+                    start_time,  # 시작 시간을 임시로 저장
+                    deadline.isoformat(),
+                    created_by,
+                    time_interval_minutes,
+                    time_slot_count,
+                    min_participants
+                ))
+                
+                # 시간대 생성
+                from datetime import datetime, timedelta
+                
+                # 🆕 deadline의 날짜를 기준으로 시간대 생성
+                # deadline이 "오늘 18:00"이면 내전은 "오늘 이후"로 설정
+                base_date = deadline.date()
+                
+                # 시작 시간 파싱
+                hour, minute = map(int, start_time.split(':'))
+                base_datetime = datetime.combine(base_date, datetime.min.time().replace(hour=hour, minute=minute))
+                
+                # deadline보다 이전이면 다음날로
+                if base_datetime <= deadline:
+                    base_datetime += timedelta(days=1)
+                
+                # 각 시간대 생성
+                for i in range(time_slot_count):
+                    slot_datetime = base_datetime + timedelta(minutes=time_interval_minutes * i)
+                    time_slot_str = slot_datetime.strftime('%H:%M')
+                    
+                    await db.execute('''
+                        INSERT INTO recruitment_time_slots 
+                        (recruitment_id, time_slot, voter_ids, vote_count, is_confirmed)
+                        VALUES (?, ?, '', 0, 0)
+                    ''', (recruitment_id, time_slot_str))
+                
+                await db.commit()
+                
+            return recruitment_id
+            
+        except Exception as e:
+            print(f"❌ 투표 방식 모집 생성 실패: {e}")
+            raise
+
+
+    async def add_time_slot_vote(self, recruitment_id: str, time_slot: str, 
+                                    user_id: str, username: str) -> bool:
+        """시간대에 투표 추가 (중복 투표 가능)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 현재 투표자 목록 조회
+                async with db.execute('''
+                    SELECT voter_ids, voter_names, vote_count FROM recruitment_time_slots 
+                    WHERE recruitment_id = ? AND time_slot = ?
+                ''', (recruitment_id, time_slot)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if not result:
+                        return False
+                    
+                    voter_ids_str, voter_names_str, vote_count = result
+                    voter_ids = voter_ids_str.split(',') if voter_ids_str else []
+                    voter_names = voter_names_str.split(',') if voter_names_str else []
+                    
+                    # 이미 투표했는지 확인 (중복 방지)
+                    if user_id in voter_ids:
+                        return True  # 이미 투표함
+                    
+                    # 투표자 추가
+                    voter_ids.append(user_id)
+                    voter_names.append(username)  # 🆕 이름도 추가!
+                    
+                    new_voter_ids_str = ','.join(voter_ids)
+                    new_voter_names_str = ','.join(voter_names)  # 🆕
+                    
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE recruitment_time_slots 
+                        SET voter_ids = ?, voter_names = ?, vote_count = ?
+                        WHERE recruitment_id = ? AND time_slot = ?
+                    ''', (new_voter_ids_str, new_voter_names_str, len(voter_ids), recruitment_id, time_slot))
+                    
+                    await db.commit()
+                    
+            return True
+            
+        except Exception as e:
+            print(f"❌ 시간대 투표 추가 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    async def remove_time_slot_vote(self, recruitment_id: str, time_slot: str, 
+                                        user_id: str) -> bool:
+        """시간대에서 투표 제거"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 현재 투표자 목록 조회
+                async with db.execute('''
+                    SELECT voter_ids, voter_names, vote_count FROM recruitment_time_slots 
+                    WHERE recruitment_id = ? AND time_slot = ?
+                ''', (recruitment_id, time_slot)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if not result:
+                        return False
+                    
+                    voter_ids_str, voter_names_str, vote_count = result
+                    voter_ids = voter_ids_str.split(',') if voter_ids_str else []
+                    voter_names = voter_names_str.split(',') if voter_names_str else []
+                    
+                    # 투표자 제거
+                    if user_id in voter_ids:
+                        # ⭐ 같은 인덱스의 이름도 제거 (핵심!)
+                        idx = voter_ids.index(user_id)
+                        voter_ids.remove(user_id)
+                        if idx < len(voter_names):
+                            voter_names.pop(idx)
+                    
+                    new_voter_ids_str = ','.join(voter_ids)
+                    new_voter_names_str = ','.join(voter_names)  # ⭐ 추가!
+                    
+                    # 업데이트
+                    await db.execute('''
+                        UPDATE recruitment_time_slots 
+                        SET voter_ids = ?, voter_names = ?, vote_count = ?
+                        WHERE recruitment_id = ? AND time_slot = ?
+                    ''', (new_voter_ids_str, new_voter_names_str, len(voter_ids), recruitment_id, time_slot))
+                    
+                    await db.commit()
+                    
+            return True
+            
+        except Exception as e:
+            print(f"❌ 시간대 투표 제거 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    async def get_time_slots_by_recruitment(self, recruitment_id: str) -> List[Dict]:
+        """특정 모집의 시간대 목록 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM recruitment_time_slots 
+                    WHERE recruitment_id = ?
+                    ORDER BY time_slot ASC
+                ''', (recruitment_id,)) as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 시간대 목록 조회 실패: {e}")
+            return []
+
+
+    async def get_time_slot_voters(self, recruitment_id: str, time_slot: str) -> List[str]:
+        """특정 시간대의 투표자 ID 목록"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT voter_ids FROM recruitment_time_slots 
+                    WHERE recruitment_id = ? AND time_slot = ?
+                ''', (recruitment_id, time_slot)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if result and result[0]:
+                        return result[0].split(',')
+                    
+                    return []
+                    
+        except Exception as e:
+            print(f"❌ 투표자 목록 조회 실패: {e}")
+            return []
+
+
+    async def check_and_confirm_time_slot(self, recruitment_id: str) -> Optional[str]:
+        """
+        최소 인원을 만족하는 시간대가 있으면 자동 확정
+        반환: 확정된 시간대 (없으면 None)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 모집 정보 조회
+                async with db.execute('''
+                    SELECT min_participants, confirmed_time FROM scrim_recruitments 
+                    WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    recruitment = await cursor.fetchone()
+                    
+                    if not recruitment:
+                        return None
+                    
+                    min_participants, confirmed_time = recruitment
+                    
+                    # 이미 확정되었으면 반환
+                    if confirmed_time:
+                        return confirmed_time
+                
+                # 최소 인원 이상인 시간대 찾기
+                async with db.execute('''
+                    SELECT time_slot, vote_count 
+                    FROM recruitment_time_slots 
+                    WHERE recruitment_id = ? AND vote_count >= ? AND is_confirmed = 0
+                    ORDER BY vote_count DESC, time_slot ASC
+                ''', (recruitment_id, min_participants)) as cursor:
+                    results = await cursor.fetchall()
+                    
+                    if not results:
+                        return None
+                    
+                    # 가장 많은 투표를 받은 시간대 선택 (동점이면 가장 빠른 시간)
+                    confirmed_slot = results[0][0]
+                    
+                    # 확정 처리
+                    await db.execute('''
+                        UPDATE recruitment_time_slots 
+                        SET is_confirmed = 1 
+                        WHERE recruitment_id = ? AND time_slot = ?
+                    ''', (recruitment_id, confirmed_slot))
+                    
+                    # 모집 정보에 확정 시간 업데이트
+                    await db.execute('''
+                        UPDATE scrim_recruitments 
+                        SET confirmed_time = ?, status = 'confirmed'
+                        WHERE id = ?
+                    ''', (confirmed_slot, recruitment_id))
+                    
+                    await db.commit()
+                    
+                    return confirmed_slot
+                    
+        except Exception as e:
+            print(f"❌ 시간대 자동 확정 실패: {e}")
+            return None
+
+    async def close_voting_recruitment_on_deadline(self, recruitment_id: str) -> str:
+        """
+        마감 시간 도달 시 투표 모집 종료 처리
+        반환: 'confirmed' (확정됨), 'closed' (인원 미달), 'already_confirmed' (이미 확정됨)
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 모집 정보 조회
+                async with db.execute('''
+                    SELECT status, confirmed_time, min_participants 
+                    FROM scrim_recruitments 
+                    WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if not result:
+                        return 'not_found'
+                    
+                    status, confirmed_time, min_participants = result
+                    
+                    # 이미 확정되었으면
+                    if confirmed_time:
+                        return 'already_confirmed'
+                
+                # 최소 인원 이상인 시간대가 있는지 확인
+                async with db.execute('''
+                    SELECT time_slot, vote_count 
+                    FROM recruitment_time_slots 
+                    WHERE recruitment_id = ? AND vote_count >= ?
+                    ORDER BY vote_count DESC, time_slot ASC
+                    LIMIT 1
+                ''', (recruitment_id, min_participants)) as cursor:
+                    best_slot = await cursor.fetchone()
+                
+                if best_slot:
+                    # 확정 가능
+                    time_slot, vote_count = best_slot
+                    
+                    await db.execute('''
+                        UPDATE recruitment_time_slots 
+                        SET is_confirmed = 1 
+                        WHERE recruitment_id = ? AND time_slot = ?
+                    ''', (recruitment_id, time_slot))
+                    
+                    await db.execute('''
+                        UPDATE scrim_recruitments 
+                        SET confirmed_time = ?, status = 'confirmed', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (time_slot, recruitment_id))
+                    
+                    await db.commit()
+                    return 'confirmed'
+                else:
+                    # 인원 미달로 종료
+                    await db.execute('''
+                        UPDATE scrim_recruitments 
+                        SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (recruitment_id,))
+                    
+                    await db.commit()
+                    return 'closed'
+                    
+        except Exception as e:
+            print(f"❌ 투표 모집 종료 처리 실패: {e}")
+            return 'error'
+
+
+    async def get_pending_voting_recruitments(self) -> List[Dict]:
+        """마감 시간이 지났지만 아직 처리되지 않은 투표 모집 조회"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments 
+                    WHERE recruitment_type = 'voting' 
+                    AND status = 'active' 
+                    AND datetime(deadline) <= datetime('now')
+                ''') as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    return [dict(zip(columns, row)) for row in results]
+                    
+        except Exception as e:
+            print(f"❌ 마감된 투표 모집 조회 실패: {e}")
+            return []
+
+
+    async def get_confirmed_recruitments_for_notification(self, minutes_before: int = 10) -> List[Dict]:
+        """
+        시작 N분 전 알림이 필요한 확정된 모집 조회
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments 
+                    WHERE recruitment_type = 'voting' 
+                    AND status = 'confirmed' 
+                    AND notification_sent = 0
+                    AND confirmed_time IS NOT NULL
+                ''') as cursor:
+                    results = await cursor.fetchall()
+                    columns = [description[0] for description in cursor.description]
+                    
+                    recruitments = []
+                    for row in results:
+                        recruitment = dict(zip(columns, row))
+                        
+                        # 확정 시간 파싱
+                        confirmed_time = recruitment['confirmed_time']
+                        deadline_str = recruitment['deadline']
+                        
+                        from datetime import datetime, timedelta
+                        deadline_dt = datetime.fromisoformat(deadline_str)
+                        
+                        # 🆕 개선된 날짜 계산
+                        # deadline의 날짜를 기준으로 시작
+                        base_date = deadline_dt.date()
+                        
+                        # 확정 시간으로 datetime 생성
+                        hour, minute = map(int, confirmed_time.split(':'))
+                        scrim_datetime = datetime.combine(base_date, datetime.min.time().replace(hour=hour, minute=minute))
+                        
+                        # deadline보다 이전이면 다음 날로
+                        if scrim_datetime <= deadline_dt:
+                            scrim_datetime += timedelta(days=1)
+                        
+                        # N분 전 시간 계산
+                        notification_time = scrim_datetime - timedelta(minutes=minutes_before)
+                        
+                        # 현재 시간이 알림 시간을 지나고, 내전 시작 시간 전이면 추가
+                        now = datetime.now()
+                        if notification_time <= now < scrim_datetime:
+                            recruitment['scrim_datetime'] = scrim_datetime
+                            recruitments.append(recruitment)
+                    
+                    return recruitments
+                    
+        except Exception as e:
+            print(f"❌ 알림 대상 조회 실패: {e}")
+            return []
+
+
+    async def mark_notification_sent(self, recruitment_id: str) -> bool:
+        """알림 발송 완료 표시"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute('''
+                    UPDATE scrim_recruitments 
+                    SET notification_sent = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (recruitment_id,))
+                
+                await db.commit()
+                return True
+                
+        except Exception as e:
+            print(f"❌ 알림 발송 표시 실패: {e}")
+            return False
+
+
+    async def get_voting_recruitment_info(self, recruitment_id: str) -> Optional[Dict]:
+        """투표 방식 모집의 상세 정보 조회 (시간대 포함)"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 모집 정보
+                async with db.execute('''
+                    SELECT * FROM scrim_recruitments WHERE id = ?
+                ''', (recruitment_id,)) as cursor:
+                    result = await cursor.fetchone()
+                    
+                    if not result:
+                        return None
+                    
+                    columns = [description[0] for description in cursor.description]
+                    recruitment = dict(zip(columns, result))
+                
+                # 시간대 정보
+                time_slots = await self.get_time_slots_by_recruitment(recruitment_id)
+                recruitment['time_slots'] = time_slots
+                
+                return recruitment
+                
+        except Exception as e:
+            print(f"❌ 투표 모집 정보 조회 실패: {e}")
+            return None
+
+    async def create_voting_recruitment_with_slots(self, guild_id: str, title: str, description: str, 
+                                                time_slots: List[str], deadline: datetime, 
+                                                created_by: str, min_participants: int) -> str:
+        """투표 방식 내전 모집 생성 (시간대 직접 지정)"""
+        try:
+            recruitment_id = str(uuid.uuid4())
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 모집 정보 저장
+                await db.execute('''
+                    INSERT INTO scrim_recruitments 
+                    (id, guild_id, title, description, scrim_date, deadline, created_by,
+                    recruitment_type, time_slot_count, min_participants)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'voting', ?, ?)
+                ''', (
+                    recruitment_id,
+                    guild_id,
+                    title,
+                    description,
+                    time_slots[0],  # 첫 번째 시간대를 대표 시간으로
+                    deadline.isoformat(),
+                    created_by,
+                    len(time_slots),
+                    min_participants
+                ))
+                
+                # 각 시간대 생성
+                for time_slot in time_slots:
+                    await db.execute('''
+                        INSERT INTO recruitment_time_slots 
+                        (recruitment_id, time_slot, voter_ids, vote_count, is_confirmed)
+                        VALUES (?, ?, '', 0, 0)
+                    ''', (recruitment_id, time_slot))
+                
+                await db.commit()
+                
+            return recruitment_id
+            
+        except Exception as e:
+            print(f"❌ 투표 방식 모집 생성 실패: {e}")
+            raise
 
 
 

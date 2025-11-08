@@ -8,12 +8,13 @@ from database.database import DatabaseManager
 from scheduler.bamboo_scheduler import BambooForestScheduler
 from scheduler.recruitment_scheduler import RecruitmentScheduler
 from scheduler.scrim_scheduler import ScrimScheduler
-from commands.scrim_recruitment import RecruitmentView
+from commands.scrim_recruitment import RecruitmentView, VotingRecruitmentView
 from utils.battle_tag_logger import BattleTagLogger
 from utils.balancing_session_manager import session_manager
 from utils.voice_level_tracker import VoiceLevelTracker
 from utils.voice_session_tracker import VoiceSessionTracker
 from scheduler.auto_recruitment_scheduler import AutoRecruitmentScheduler
+from scheduler.voting_notification_scheduler import VotingNotificationScheduler
 
 from config.settings import Settings
 
@@ -42,6 +43,7 @@ class RallyUpBot(commands.Bot):
         self.scrim_scheduler = None
         self.wordle_scheduler = None
         self.auto_recruitment_scheduler = None
+        self.voting_notification_scheduler = None
 
         self.korean_api = None
         self.similarity_calc = None
@@ -57,11 +59,15 @@ class RallyUpBot(commands.Bot):
         self.voice_level_tracker = None
         self.voice_session_tracker = None
 
+        self.recruitment_channels_cache = {}
+
     async def setup_hook(self):
         """봇 시작시 실행되는 설정"""
         try:
             await self.db_manager.initialize()
             logger.info("데이터베이스 초기화 완료")
+
+            await self._load_recruitment_channels_cache()
 
             await self.load_commands()
 
@@ -93,7 +99,12 @@ class RallyUpBot(commands.Bot):
             if not self.auto_recruitment_scheduler:
                 self.auto_recruitment_scheduler = AutoRecruitmentScheduler(self)
                 await self.auto_recruitment_scheduler.start()
-                logger.info("✅ 정기 내전 자동 등록 스케줄러 시작")
+                logger.info("정기 내전 자동 등록 스케줄러 시작")
+
+            if not self.voting_notification_scheduler:
+                self.voting_notification_scheduler = VotingNotificationScheduler(self)
+                self.voting_notification_scheduler.start()
+                logger.info("투표 알림 스케줄러 시작")
 
             if not self.scrim_scheduler:
                 self.scrim_scheduler = ScrimScheduler(self)
@@ -231,6 +242,21 @@ class RallyUpBot(commands.Bot):
 
         await self.restore_recruitment_views()
 
+    async def _load_recruitment_channels_cache(self):
+        """모든 길드의 모집 채널을 캐시에 로드"""
+        try:
+            for guild in self.guilds:
+                try:
+                    channel_id = await self.db_manager.get_recruitment_channel(str(guild.id))
+                    if channel_id:
+                        self.recruitment_channels_cache[str(guild.id)] = channel_id
+                except Exception as e:
+                    logger.error(f"길드 {guild.name} 채널 캐시 로드 실패: {e}")
+            
+            logger.info(f"✅ {len(self.recruitment_channels_cache)}개 길드의 모집 채널 캐시 로드 완료")
+        except Exception as e:
+            logger.error(f"❌ 모집 채널 캐시 로드 실패: {e}")
+
     async def _consultation_cleanup_loop(self):
         """상담 자동 정리 루프 (24시간마다 실행)"""
         await self.wait_until_ready()
@@ -299,8 +325,11 @@ class RallyUpBot(commands.Bot):
                 content="",
                 is_urgent=False
             ))
+
+            self.add_view(RecruitmentView(self, ""))
+            self.add_view(VotingRecruitmentView(self, ""))
             
-            logger.info("📋 문의 시스템 Persistent Views 등록 완료")
+            logger.info("✅ Persistent Views 등록 완료")
             
         except Exception as e:
             logger.error(f"❌ Persistent Views 등록 실패: {e}", exc_info=True)
@@ -310,6 +339,7 @@ class RallyUpBot(commands.Bot):
         logger.info("✅ 문의 View 복원 완료")
 
     async def restore_recruitment_views(self):
+        """봇 재시작 후 모집 View 복원 - 고정시간/투표 모두 지원"""
         try:
             restored_count = 0
             
@@ -317,37 +347,72 @@ class RallyUpBot(commands.Bot):
                 try:
                     active_recruitments = await self.db_manager.get_active_recruitments(str(guild.id))
                     logger.info(f"길드 {guild.name}에서 {len(active_recruitments)}개의 활성 모집 발견")
-                    for recruitment in active_recruitments:                        
-                        if recruitment.get('message_id') and recruitment.get('channel_id'):
-                            try:
-                                channel = self.get_channel(int(recruitment['channel_id']))
-                                if channel:
-                                    try:
-                                        from commands.scrim_recruitment import RecruitmentView
-                                    except ImportError as e:
-                                        logger.error(f"RecruitmentView import 실패: {e}")
-                                        continue
-                                    
-                                    view = RecruitmentView(self, recruitment['id'])
-                                    
-                                    self.add_view(view)
-                                    restored_count += 1
-                                else:
-                                    logger.warning(f"채널을 찾을 수 없음: {recruitment['channel_id']}")
-                                    
-                            except Exception as e:
-                                logger.error(f"개별 recruitment view 복원 실패 {recruitment['id']}: {e}")
-                                import traceback
-                                logger.error(traceback.format_exc())
-                        else:
+                    
+                    for recruitment in active_recruitments:
+                        # message_id와 channel_id 체크
+                        if not recruitment.get('message_id') or not recruitment.get('channel_id'):
                             logger.warning(f"message_id 또는 channel_id가 없음: {recruitment['id']}")
+                            continue
+                        
+                        try:
+                            # 채널 가져오기
+                            channel = self.get_channel(int(recruitment['channel_id']))
+                            if not channel:
+                                logger.warning(f"채널을 찾을 수 없음: {recruitment['channel_id']}")
+                                continue
+                            
+                            # 메시지 가져오기 (이게 핵심!)
+                            try:
+                                message = await channel.fetch_message(int(recruitment['message_id']))
+                            except discord.NotFound:
+                                logger.warning(f"메시지를 찾을 수 없음 (삭제됨): {recruitment['id']}")
+                                continue
+                            except discord.Forbidden:
+                                logger.warning(f"메시지 접근 권한 없음: {recruitment['id']}")
+                                continue
+                            
+                            # RecruitmentView import
+                            try:
+                                from commands.scrim_recruitment import RecruitmentView, VotingRecruitmentView
+                            except ImportError as e:
+                                logger.error(f"View import 실패: {e}")
+                                continue
+                            
+                            # recruitment_type에 따라 다른 View 사용
+                            recruitment_type = recruitment.get('recruitment_type', 'fixed')
+                            
+                            if recruitment_type == 'voting':
+                                # 시간대 투표 모집
+                                logger.info(f"투표 모집 View 복원 중: {recruitment['title']}")
+                                view = VotingRecruitmentView(self, recruitment['id'])
                                 
+                                # Select 옵션 업데이트 (중요!)
+                                try:
+                                    await view.update_select_options()
+                                except Exception as e:
+                                    logger.error(f"투표 모집 옵션 업데이트 실패: {e}")
+                                    continue
+                            else:
+                                # 고정시간 모집 (기본)
+                                logger.info(f"고정시간 모집 View 복원 중: {recruitment['title']}")
+                                view = RecruitmentView(self, recruitment['id'])
+                            
+                            # 메시지에 View 다시 연결 (핵심!)
+                            await message.edit(view=view)
+                            restored_count += 1
+                            logger.info(f"✅ View 복원 성공: {recruitment['title']} (type: {recruitment_type})")
+                            
+                        except Exception as e:
+                            logger.error(f"개별 recruitment view 복원 실패 {recruitment['id']}: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            
                 except Exception as e:
                     logger.error(f"길드 {guild.name}의 recruitment view 복원 중 오류: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
-                    
-            logger.info(f"✅ {restored_count}개의 Recruitment View가 복원되었습니다.")
+            
+            logger.info(f"🎉 총 {restored_count}개의 Recruitment View가 복원되었습니다.")
             
         except Exception as e:
             logger.error(f"❌ Recruitment View 복원 중 전체 오류: {e}")
@@ -515,6 +580,10 @@ class RallyUpBot(commands.Bot):
             if self.auto_recruitment_scheduler:
                 await self.auto_recruitment_scheduler.stop()
                 logger.info("정기 내전 자동 등록 스케줄러 종료")
+
+            if self.voting_notification_scheduler:
+                self.voting_notification_scheduler.stop()
+                logger.info("투표 알림 스케줄러 종료")
 
             if self.scrim_scheduler:
                 await self.scrim_scheduler.stop()
