@@ -12997,6 +12997,232 @@ class DatabaseManager:
             traceback.print_exc()
             return False
 
+    async def get_recent_voice_scores(
+        self, 
+        guild_id: str, 
+        hours: int = 24,
+        limit: int = 25
+    ) -> List[Dict]:
+        """최근 음성 활동 점수 내역 조회 (취소용)
+        
+        Args:
+            guild_id: 서버 ID
+            hours: 최근 몇 시간 이내
+            limit: 최대 조회 개수
+            
+        Returns:
+            [{
+                'type': 'voice',
+                'team_id': str,
+                'team_name': str,
+                'date': str,
+                'points': int,
+                'member_count': int,
+                'is_bonus': bool,
+                'hours_completed': int,
+                'awarded_at': str,
+                'channel_id': str
+            }, ...]
+        """
+        try:
+            import json
+            from datetime import datetime, timedelta
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 최근 X시간 내의 날짜들 계산
+                now = datetime.now()
+                cutoff_time = now - timedelta(hours=hours)
+                
+                # 해당 기간의 모든 음성 점수 레코드 조회
+                async with db.execute('''
+                    SELECT 
+                        v.team_id,
+                        t.team_name,
+                        v.date,
+                        v.sessions,
+                        t.guild_id
+                    FROM voice_team_daily_scores v
+                    JOIN event_teams t ON v.team_id = t.team_id
+                    WHERE t.guild_id = ?
+                        AND datetime(v.updated_at) >= datetime('now', '-' || ? || ' hours')
+                    ORDER BY v.updated_at DESC
+                ''', (guild_id, hours)) as cursor:
+                    rows = await cursor.fetchall()
+                    
+                    voice_scores = []
+                    
+                    for row in rows:
+                        team_id = row[0]
+                        team_name = row[1]
+                        date = row[2]
+                        sessions_json = row[3]
+                        
+                        # 세션 JSON 파싱
+                        try:
+                            sessions = json.loads(sessions_json) if sessions_json else []
+                        except:
+                            sessions = []
+                        
+                        # 각 세션을 개별 항목으로
+                        for session in sessions:
+                            awarded_at_str = session.get('awarded_at', '')
+                            
+                            # awarded_at이 cutoff_time 이후인지 확인
+                            try:
+                                awarded_time = datetime.fromisoformat(awarded_at_str)
+                                if awarded_time < cutoff_time:
+                                    continue
+                            except:
+                                continue
+                            
+                            # 취소된 세션은 제외 (cancelled 플래그가 있으면)
+                            if session.get('cancelled', False):
+                                continue
+                            
+                            voice_scores.append({
+                                'type': 'voice',
+                                'team_id': team_id,
+                                'team_name': team_name,
+                                'date': date,
+                                'points': session.get('hours_completed', 1),  # 일반 모드는 시간당 1점
+                                'member_count': session.get('member_count', 0),
+                                'is_bonus': session.get('is_bonus', False),
+                                'hours_completed': session.get('hours_completed', 0),
+                                'awarded_at': awarded_at_str,
+                                'channel_id': session.get('channel_id', ''),
+                                'start_time': session.get('start_time', '')
+                            })
+                            
+                            if len(voice_scores) >= limit:
+                                break
+                        
+                        if len(voice_scores) >= limit:
+                            break
+                    
+                    # awarded_at 기준 정렬
+                    voice_scores.sort(key=lambda x: x['awarded_at'], reverse=True)
+                    
+                    return voice_scores[:limit]
+                    
+        except Exception as e:
+            logger.error(f"❌ 최근 음성 점수 조회 실패: {e}", exc_info=True)
+            return []
+
+    async def cancel_voice_score(
+        self,
+        team_id: str,
+        date: str,
+        awarded_at: str,
+        cancelled_by: str,
+        reason: str = "관리자 취소"
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """음성 활동 점수 취소
+        
+        Args:
+            team_id: 팀 ID
+            date: 날짜 (YYYY-MM-DD)
+            awarded_at: 점수 부여 시간 (ISO format, 고유 키로 사용)
+            cancelled_by: 취소한 관리자 ID
+            reason: 취소 사유
+            
+        Returns:
+            (성공여부, 메시지, 취소된 정보)
+        """
+        try:
+            import json
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 1. 해당 날짜의 세션 데이터 조회
+                async with db.execute('''
+                    SELECT total_score, sessions
+                    FROM voice_team_daily_scores
+                    WHERE team_id = ? AND date = ?
+                ''', (team_id, date)) as cursor:
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return False, "해당 날짜의 점수 기록을 찾을 수 없습니다.", None
+                    
+                    total_score = row[0]
+                    sessions_json = row[1]
+                
+                # 2. 세션 목록 파싱
+                try:
+                    sessions = json.loads(sessions_json) if sessions_json else []
+                except:
+                    return False, "세션 데이터 파싱 실패", None
+                
+                # 3. awarded_at으로 해당 세션 찾기
+                target_session = None
+                target_index = -1
+                
+                for i, session in enumerate(sessions):
+                    if session.get('awarded_at') == awarded_at:
+                        target_session = session
+                        target_index = i
+                        break
+                
+                if not target_session:
+                    return False, "해당 점수 기록을 찾을 수 없습니다.", None
+                
+                # 이미 취소된 세션인지 확인
+                if target_session.get('cancelled', False):
+                    return False, "이미 취소된 점수입니다.", None
+                
+                # 4. 점수 계산
+                if target_session.get('is_bonus', False):
+                    points_to_deduct = 10  # 보너스는 10점
+                else:
+                    points_to_deduct = target_session.get('hours_completed', 1)  # 일반은 시간당 1점
+                
+                # 5. 세션에 취소 마킹
+                sessions[target_index]['cancelled'] = True
+                sessions[target_index]['cancelled_by'] = cancelled_by
+                sessions[target_index]['cancelled_at'] = datetime.now().isoformat()
+                sessions[target_index]['cancel_reason'] = reason
+                
+                # 6. DB 업데이트
+                new_total = max(0, total_score - points_to_deduct)
+                
+                await db.execute('''
+                    UPDATE voice_team_daily_scores
+                    SET total_score = ?,
+                        sessions = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE team_id = ? AND date = ?
+                ''', (new_total, json.dumps(sessions, ensure_ascii=False), team_id, date))
+                
+                await db.commit()
+                
+                # 7. 팀 이름 조회
+                async with db.execute('''
+                    SELECT team_name FROM event_teams WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    team_row = await cursor.fetchone()
+                    team_name = team_row[0] if team_row else "Unknown"
+                
+                cancelled_info = {
+                    'team_id': team_id,
+                    'team_name': team_name,
+                    'points': points_to_deduct,
+                    'member_count': target_session.get('member_count', 0),
+                    'is_bonus': target_session.get('is_bonus', False),
+                    'hours_completed': target_session.get('hours_completed', 0),
+                    'awarded_at': awarded_at
+                }
+                
+                logger.info(
+                    f"✅ 음성 점수 취소: {team_name} | "
+                    f"-{points_to_deduct}점 | "
+                    f"{'보너스' if target_session.get('is_bonus') else '일반'}"
+                )
+                
+                return True, "음성 점수 취소 완료", cancelled_info
+                
+        except Exception as e:
+            logger.error(f"❌ 음성 점수 취소 실패: {e}", exc_info=True)
+            return False, f"취소 처리 중 오류: {str(e)}", None
+
 
 
 
