@@ -11307,12 +11307,10 @@ class DatabaseManager:
         completed_by: str,
         notes: str = None
     ) -> tuple[bool, str, int]:
-        """미션 완료 기록 및 점수 부여
-        
-        Returns:
-            (성공여부, 메시지, 부여된점수)
-        """
+        """미션 완료 기록 및 점수 부여"""
         try:
+            from datetime import datetime
+            
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute('PRAGMA journal_mode=WAL')
                 
@@ -11325,82 +11323,147 @@ class DatabaseManager:
                 if participants_count < mission['min_participants']:
                     return False, f"최소 {mission['min_participants']}명 이상 참여해야 합니다", 0
                 
-                # 1. 일일 퀘스트인 경우 하루 1회 제한 체크
+                today = datetime.now().strftime('%Y-%m-%d')
+                print(f"📅 오늘 날짜: {today}")
+                
+                # ✅ 1. 일일 퀘스트 중복 완료 체크
                 if mission['category'] == 'daily':
-                    from datetime import datetime
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    # 🔍 디버깅: 기존 완료 기록 확인
+                    async with db.execute('''
+                        SELECT c.mission_id, m.mission_name, c.completed_at, DATE(c.completed_at) as date_only
+                        FROM event_mission_completions c
+                        JOIN event_missions m ON c.mission_id = m.mission_id
+                        WHERE c.team_id = ? AND c.mission_id = ?
+                    ''', (team_id, mission_id)) as cursor:
+                        existing = await cursor.fetchall()
+                        print(f"🔍 '{mission['mission_name']}' 기존 완료 기록: {existing}")
                     
-                    already_completed = await self.check_daily_mission_completed(
-                        team_id, mission_id, today
-                    )
-                    
-                    if already_completed:
-                        return False, "❌ 오늘 이미 완료한 미션입니다", 0
+                    async with db.execute('''
+                        SELECT COUNT(*) 
+                        FROM event_mission_completions c
+                        WHERE c.team_id = ? 
+                        AND c.mission_id = ?
+                        AND DATE(c.completed_at) = ?
+                    ''', (team_id, mission_id, today)) as cursor:
+                        row = await cursor.fetchone()
+                        dup_count = row[0] if row else 0
+                        print(f"🔍 중복 체크 결과: {dup_count}개 (오늘: {today})")
+                        
+                        if dup_count > 0:
+                            print(f"⚠️ 이미 완료한 미션: {mission['mission_name']}")
+                            return False, f"❌ '{mission['mission_name']}'은(는) 오늘 이미 완료한 미션입니다", 0
                 
                 # 2. 기본 점수
                 awarded_points = mission['base_points']
                 
-                # 3. 일일 퀘스트 4명 이상 참여 보너스
+                # 3. 일일 퀘스트 5명 이상 참여 보너스
                 if mission['category'] == 'daily' and participants_count >= 5:
                     awarded_points += 1
                     print(f"🎁 5명 이상 참여 보너스: +1점")
                 
                 # 4. 완료 ID 생성
                 completion_id = self.generate_uuid()
+                current_time = datetime.now().isoformat()
                 
                 # 5. 완료 기록 저장
                 await db.execute('''
                     INSERT INTO event_mission_completions (
                         completion_id, team_id, mission_id,
                         participants_count, awarded_points,
-                        completed_by, notes
+                        completed_by, notes, completed_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (completion_id, team_id, mission_id,
                     participants_count, awarded_points,
-                    completed_by, notes))
+                    completed_by, notes, current_time))
                 
                 await db.commit()
+                print(f"✅ 미션 완료 기록 저장됨:")
+                print(f"   - 미션: {mission['mission_name']} (ID: {mission_id})")
+                print(f"   - 팀: {team_id}")
+                print(f"   - 시간: {current_time}")
+                print(f"   - DATE(): {datetime.now().strftime('%Y-%m-%d')}")
                 
-                # 6. 일일 퀘스트 올클리어 보너스 체크 (하루 1회만)
+                # ✅ 6. 일일 퀘스트 올클리어 보너스 체크
                 bonus_message = ""
                 if mission['category'] == 'daily':
-                    # 올클리어 달성 체크
-                    all_clear, bonus = await self.check_daily_all_clear_bonus(team_id)
+                    # 🔍 디버깅: 모든 완료 기록 확인
+                    async with db.execute('''
+                        SELECT c.mission_id, c.completed_at, DATE(c.completed_at) as date_only
+                        FROM event_mission_completions c
+                        WHERE c.team_id = ?
+                    ''', (team_id,)) as cursor:
+                        all_completions = await cursor.fetchall()
+                        print(f"🔍 팀의 전체 완료 기록: {all_completions}")
                     
-                    if all_clear:
-                        # 오늘 이미 보너스를 받았는지 체크
-                        from datetime import datetime
-                        today = datetime.now().strftime('%Y-%m-%d')
-                        already_given = await self.check_daily_all_clear_bonus_already_given(
-                            team_id, today
-                        )
+                    # 방금 저장한 것 포함해서 오늘 완료한 일일 미션 개수 확인
+                    async with db.execute('''
+                        SELECT COUNT(DISTINCT c.mission_id)
+                        FROM event_mission_completions c
+                        JOIN event_missions m ON c.mission_id = m.mission_id
+                        WHERE c.team_id = ? 
+                        AND m.category = 'daily'
+                        AND DATE(c.completed_at) = ?
+                        AND c.mission_id != 'daily_all_clear_bonus'
+                    ''', (team_id, today)) as cursor:
+                        row = await cursor.fetchone()
+                        completed_count = row[0] if row else 0
+                        print(f"🔍 오늘 완료한 일일 미션 (쿼리 결과): {completed_count}개")
+                    
+                    # 전체 일일 미션 개수
+                    async with db.execute('''
+                        SELECT COUNT(*) 
+                        FROM event_missions m
+                        JOIN event_teams t ON m.guild_id = t.guild_id
+                        WHERE t.team_id = ? 
+                        AND m.category = 'daily' 
+                        AND m.is_active = TRUE
+                    ''', (team_id,)) as cursor:
+                        row = await cursor.fetchone()
+                        total_count = row[0] if row else 0
+                        print(f"🔍 등록된 전체 일일 미션: {total_count}개")
+                    
+                    print(f"🔍 올클리어 체크: {completed_count}/{total_count} 완료")
+                    
+                    # 올클리어 달성!
+                    if completed_count >= total_count and total_count > 0:
+                        # 오늘 이미 보너스 받았는지 체크
+                        async with db.execute('''
+                            SELECT COUNT(*) 
+                            FROM event_mission_completions
+                            WHERE team_id = ? 
+                            AND mission_id = 'daily_all_clear_bonus'
+                            AND DATE(completed_at) = ?
+                        ''', (team_id, today)) as cursor:
+                            row = await cursor.fetchone()
+                            already_given = (row[0] if row else 0) > 0
                         
                         if not already_given:
-                            # 올클리어 보너스 별도 기록 (하루 1회만)
+                            bonus_points = 5
                             bonus_completion_id = self.generate_uuid()
                             
                             await db.execute('''
                                 INSERT INTO event_mission_completions (
                                     completion_id, team_id, mission_id,
                                     participants_count, awarded_points,
-                                    completed_by, notes
+                                    completed_by, notes, completed_at
                                 )
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             ''', (bonus_completion_id, team_id, 
-                                'daily_all_clear_bonus',  # 특수 ID
-                                participants_count, bonus,
-                                completed_by, '일일 퀘스트 올클리어 보너스'))
+                                'daily_all_clear_bonus',
+                                participants_count, bonus_points,
+                                completed_by, '일일 퀘스트 올클리어 보너스',
+                                current_time))
                             
                             await db.commit()
                             
-                            awarded_points += bonus
-                            bonus_message = f"\n🎉 일일 퀘스트 올클리어! 보너스 +{bonus}점 추가!"
-                            print(f"🎉 일일 올클리어 보너스: +{bonus}점")
+                            awarded_points += bonus_points
+                            bonus_message = f"\n\n🎉 **일일 퀘스트 올클리어!** 보너스 +{bonus_points}점 추가!"
+                            print(f"🎉 일일 올클리어 보너스 지급: +{bonus_points}점")
                         else:
                             print(f"ℹ️ 올클리어 보너스는 오늘 이미 지급됨")
                 
-                print(f"✅ 미션 완료 기록: {mission['mission_name']} - {awarded_points}점")
+                print(f"✅ 미션 완료 처리 완료: {mission['mission_name']} - 총 {awarded_points}점")
                 return True, f"미션 완료 처리되었습니다{bonus_message}", awarded_points
                 
         except Exception as e:
@@ -11552,12 +11615,14 @@ class DatabaseManager:
                 completion_date = datetime.now().strftime('%Y-%m-%d')
             
             async with aiosqlite.connect(self.db_path) as db:
-                # 해당 서버의 일일 퀘스트 총 개수
+                # 1. 해당 서버의 일일 퀘스트 총 개수 (등록된 전체)
                 async with db.execute('''
                     SELECT COUNT(*) 
                     FROM event_missions m
                     JOIN event_teams t ON m.guild_id = t.guild_id
-                    WHERE t.team_id = ? AND m.category = 'daily' AND m.is_active = TRUE
+                    WHERE t.team_id = ? 
+                    AND m.category = 'daily' 
+                    AND m.is_active = TRUE
                 ''', (team_id,)) as cursor:
                     row = await cursor.fetchone()
                     total_daily = row[0] if row[0] else 0
@@ -11565,7 +11630,7 @@ class DatabaseManager:
                 if total_daily == 0:
                     return False, 0
                 
-                # 해당 날짜에 팀이 완료한 일일 퀘스트 개수 (중복 제거)
+                # 2. 해당 날짜에 팀이 완료한 일일 퀘스트 개수 (중복 제거)
                 async with db.execute('''
                     SELECT COUNT(DISTINCT c.mission_id)
                     FROM event_mission_completions c
@@ -11573,18 +11638,24 @@ class DatabaseManager:
                     WHERE c.team_id = ? 
                     AND m.category = 'daily'
                     AND DATE(c.completed_at) = ?
+                    AND c.mission_id != 'daily_all_clear_bonus'
                 ''', (team_id, completion_date)) as cursor:
                     row = await cursor.fetchone()
                     completed_daily = row[0] if row[0] else 0
                 
-                # ✅ 전체 완료 시 보너스 (5점)
+                print(f"🔍 올클리어 체크: {completed_daily}/{total_daily} 완료")
+                
+                # 전체 완료 시 보너스 (5점)
                 if completed_daily >= total_daily:
+                    print(f"🎉 올클리어 달성! 보너스 5점")
                     return True, 5
                 
                 return False, 0
                 
         except Exception as e:
             print(f"❌ 일일 전체 완료 보너스 체크 실패: {e}")
+            import traceback
+            traceback.print_exc()
             return False, 0
 
     async def get_team_rankings(self, guild_id: str) -> list:
@@ -13735,6 +13806,68 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ 투표 방식 모집 생성 실패: {e}")
             raise
+
+    async def manual_adjust_team_score(
+        self,
+        team_id: str,
+        score_adjustment: int,
+        adjusted_by: str,
+        reason: str
+    ) -> tuple[bool, str]:
+        """팀 점수 수동 조정
+        
+        Args:
+            team_id: 팀 ID
+            score_adjustment: 조정할 점수 (양수: 추가, 음수: 차감)
+            adjusted_by: 조정한 관리자 ID
+            reason: 조정 사유
+        
+        Returns:
+            (성공여부, 메시지)
+        """
+        try:
+            from datetime import datetime
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                # 팀 존재 확인
+                async with db.execute('''
+                    SELECT team_name FROM event_teams WHERE team_id = ?
+                ''', (team_id,)) as cursor:
+                    team = await cursor.fetchone()
+                    
+                    if not team:
+                        return False, "팀을 찾을 수 없습니다"
+                
+                # 조정 기록 저장
+                completion_id = self.generate_uuid()
+                
+                await db.execute('''
+                    INSERT INTO event_mission_completions (
+                        completion_id, team_id, mission_id,
+                        participants_count, awarded_points,
+                        completed_by, notes
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    completion_id,
+                    team_id,
+                    'manual_adjustment',  # 특수 ID
+                    0,  # 참여 인원 없음
+                    score_adjustment,
+                    adjusted_by,
+                    f"[수동 조정] {reason}"
+                ))
+                
+                await db.commit()
+                
+                print(f"✅ 팀 점수 수동 조정: {team[0]} ({'+' if score_adjustment > 0 else ''}{score_adjustment}점)")
+                return True, "점수 조정이 완료되었습니다"
+                
+        except Exception as e:
+            print(f"❌ 팀 점수 조정 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, str(e)
 
 
 

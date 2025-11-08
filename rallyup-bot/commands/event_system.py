@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, time
 from config.settings import Settings, EventSystemSettings
 
 logger = logging.getLogger(__name__)
@@ -1157,41 +1157,281 @@ class ParticipantsModal(discord.ui.Modal, title="참여 인원 입력"):
             import traceback
             traceback.print_exc()
 
+class ManualScoreAdjustmentView(discord.ui.View):
+    """팀 선택용 View"""
+    
+    def __init__(self, bot, guild_id: str):
+        super().__init__(timeout=ViewConstants.TIMEOUT)
+        self.bot = bot
+        self.guild_id = guild_id
+    
+    async def setup_team_select(self):
+        """팀 선택 드롭다운 설정"""
+        teams = await self.bot.db_manager.get_event_teams(self.guild_id)
+        
+        if not teams:
+            return False
+        
+        options = []
+        for team in teams[:25]:  # Discord 제한
+            # 현재 점수 조회
+            total_score = await self.bot.db_manager.get_team_total_score(team['team_id'])
+            
+            options.append(
+                discord.SelectOption(
+                    label=team['team_name'],
+                    value=team['team_id'],
+                    description=f"현재 점수: {total_score}점 | 팀원: {team['member_count']}명",
+                    emoji="🎯"
+                )
+            )
+        
+        select = discord.ui.Select(
+            placeholder="점수를 조정할 팀을 선택하세요",
+            options=options,
+            custom_id="select_team_for_adjustment"
+        )
+        select.callback = self.team_selected
+        self.add_item(select)
+        
+        return True
+    
+    async def team_selected(self, interaction: discord.Interaction):
+        """팀 선택 완료 → Modal 표시"""
+        team_id = interaction.data['values'][0]
+        
+        # 선택된 팀 정보
+        team_info = await self.bot.db_manager.get_event_team_details(team_id)
+        
+        if not team_info:
+            await interaction.response.send_message(
+                "❌ 팀을 찾을 수 없습니다.",
+                ephemeral=True
+            )
+            return
+        
+        # Modal 표시
+        modal = ManualScoreModal(self, team_id, team_info['team_name'])
+        await interaction.response.send_modal(modal)
+
+class ManualScoreModal(discord.ui.Modal, title="팀 점수 수동 조정"):
+    """점수와 사유를 입력받는 Modal"""
+    
+    score_input = discord.ui.TextInput(
+        label="점수 (양수: 추가, 음수: 차감)",
+        placeholder="예: +10, -5, 15",
+        max_length=5,
+        required=True
+    )
+    
+    reason = discord.ui.TextInput(
+        label="조정 사유",
+        placeholder="예: 특별 보너스, 규칙 위반 페널티",
+        style=discord.TextStyle.paragraph,
+        max_length=200,
+        required=True
+    )
+    
+    def __init__(self, parent_view, team_id: str, team_name: str):
+        super().__init__()
+        self.parent_view = parent_view
+        self.team_id = team_id
+        self.team_name = team_name
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # 점수 파싱 (+/- 부호 처리)
+            score_str = self.score_input.value.strip()
+            if score_str.startswith('+'):
+                score_str = score_str[1:]
+            
+            score = int(score_str)
+            
+            if score == 0:
+                await interaction.followup.send(
+                    "❌ 0점은 조정할 수 없습니다.",
+                    ephemeral=True
+                )
+                return
+            
+            # DB에 기록
+            success, message = await self.parent_view.bot.db_manager.manual_adjust_team_score(
+                team_id=self.team_id,
+                score_adjustment=score,
+                adjusted_by=str(interaction.user.id),
+                reason=self.reason.value
+            )
+            
+            if success:
+                # 현재 총점 조회
+                total_score = await self.parent_view.bot.db_manager.get_team_total_score(
+                    self.team_id
+                )
+                
+                # 임베드 생성
+                embed = discord.Embed(
+                    title="✅ 팀 점수 수동 조정 완료",
+                    description=f"**{self.team_name}** 팀의 점수가 조정되었습니다.",
+                    color=discord.Color.green() if score > 0 else discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                
+                embed.add_field(
+                    name="📊 조정 내역",
+                    value=f"**점수 변동**: {'+' if score > 0 else ''}{score}점\n"
+                          f"**현재 총점**: {total_score}점",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="📝 사유",
+                    value=self.reason.value,
+                    inline=False
+                )
+                
+                embed.set_footer(text=f"조정자: {interaction.user.display_name}")
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+                # 공지 채널에 알림
+                channel_id = await self.parent_view.bot.db_manager.get_event_announcement_channel(
+                    self.parent_view.guild_id
+                )
+                
+                if channel_id:
+                    channel = interaction.guild.get_channel(int(channel_id))
+                    if channel:
+                        emoji = "📈" if score > 0 else "📉"
+                        sign = "+" if score > 0 else ""
+                        await channel.send(
+                            f"{emoji} **{self.team_name}** 팀의 점수가 **{sign}{score}점** 조정되었습니다.\n"
+                            f"💡 사유: {self.reason.value}"
+                        )
+            else:
+                await interaction.followup.send(
+                    f"❌ 점수 조정 실패: {message}",
+                    ephemeral=True
+                )
+                
+        except ValueError:
+            await interaction.followup.send(
+                "❌ 점수는 숫자로 입력해주세요.",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"❌ 수동 점수 조정 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(
+                "❌ 점수 조정 중 오류가 발생했습니다.",
+                ephemeral=True
+            )
+
 class EventSystemCommands(commands.Cog):
     """이벤트 시스템 관리 명령어"""
     
     def __init__(self, bot):
         self.bot = bot
+        self._admin_cache = {}  # {(guild_id, user_id): (is_admin, timestamp)}
+        self._cache_ttl = 300  # 5분 캐시
+
+    async def safe_defer(self, interaction: discord.Interaction) -> bool:
+        """안전한 defer (타임아웃 시 False 반환)"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            return True
+        except discord.NotFound:
+            print(f"⚠️ Interaction timeout for /{interaction.command.name}, continuing...")
+            return False
+        except Exception as e:
+            print(f"⚠️ Defer failed for /{interaction.command.name}: {e}, continuing...")
+            return False
+
+    async def safe_send(
+        self, 
+        interaction: discord.Interaction, 
+        use_followup: bool, 
+        content: str = None, 
+        embed: discord.Embed = None, 
+        view: discord.ui.View = None,
+        ephemeral: bool = True
+    ):
+        """안전한 메시지 전송 (followup 또는 channel)"""
+        if use_followup:
+            await interaction.followup.send(
+                content=content,
+                embed=embed,
+                view=view,
+                ephemeral=ephemeral
+            )
+        else:
+            # 타임아웃 시 채널에 직접
+            if content or embed:
+                await interaction.channel.send(
+                    content=f"{interaction.user.mention}\n{content}" if content else None,
+                    embed=embed,
+                    view=view
+                )
     
     async def is_admin(self, interaction: discord.Interaction) -> bool:
         """관리자 권한 확인"""
         guild_id = str(interaction.guild_id)
         user_id = str(interaction.user.id)
+        cache_key = (guild_id, user_id)
         
         if interaction.user.id == interaction.guild.owner_id:
             return True
+
+        # 캐시 확인
+        if cache_key in self._admin_cache:
+            is_admin, timestamp = self._admin_cache[cache_key]
+            if time() - timestamp < self._cache_ttl:
+                return is_admin
+
+        # DB 조회
+        is_admin = await self.bot.db_manager.is_server_admin(guild_id, user_id)
         
-        return await self.bot.db_manager.is_server_admin(guild_id, user_id)
+        # 캐시 저장
+        self._admin_cache[cache_key] = (is_admin, time())
+        
+        return is_admin
     
     @app_commands.command(name="이벤트팀생성", description="[관리자] 이벤트 팀 생성")
     @app_commands.describe(팀명="팀 이름 (예: 1조, A팀)")
     @app_commands.default_permissions(manage_guild=True)
     async def create_team(self, interaction: discord.Interaction, 팀명: str):
         """이벤트 팀 생성"""
+        # ✅ defer 시도 (실패해도 계속 진행)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            use_followup = True
+        except discord.NotFound:
+            # 이미 타임아웃됐지만 계속 진행
+            print("⚠️ Interaction timeout, but continuing...")
+            use_followup = False
+        except Exception as e:
+            print(f"⚠️ Defer failed: {e}, but continuing...")
+            use_followup = False
+        
         if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                ErrorMessages.ADMIN_ONLY,
-                ephemeral=True
-            )
+            error_msg = ErrorMessages.ADMIN_ONLY
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                # 타임아웃 시 그냥 로그만
+                print(f"⚠️ Admin check failed for {interaction.user.name}")
             return
         
         members = [m for m in interaction.guild.members if not m.bot]
         
         if not members:
-            await interaction.response.send_message(
-                ErrorMessages.NO_MEMBERS,
-                ephemeral=True
-            )
+            error_msg = ErrorMessages.NO_MEMBERS
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                print(f"⚠️ No members found in guild")
             return
         
         view = TeamManagementView(
@@ -1201,12 +1441,19 @@ class EventSystemCommands(commands.Cog):
             str(interaction.user.id)
         )
         
-        await interaction.response.send_message(
+        content = (
             f"**{팀명}** 팀의 팀원을 선택해주세요:\n"
-            f"💡 Discord의 유저 선택 UI를 사용합니다 (자동완성 지원)",
-            view=view,
-            ephemeral=True
+            f"💡 Discord의 유저 선택 UI를 사용합니다 (자동완성 지원)"
         )
+        
+        if use_followup:
+            await interaction.followup.send(content, view=view, ephemeral=True)
+        else:
+            # 타임아웃 시 채널에 직접 메시지 (fallback)
+            await interaction.channel.send(
+                f"{interaction.user.mention}\n{content}",
+                view=view
+            )
     
     @app_commands.command(name="이벤트팀목록", description="[관리자] 생성된 팀 목록 확인")
     @app_commands.default_permissions(manage_guild=True)
@@ -1484,11 +1731,23 @@ class EventSystemCommands(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     async def award_score(self, interaction: discord.Interaction):
         """팀에 미션 완료 점수 부여"""
+        # ✅ defer 시도 (실패해도 계속 진행)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            use_followup = True
+        except discord.NotFound:
+            print("⚠️ Interaction timeout (award_score), but continuing...")
+            use_followup = False
+        except Exception as e:
+            print(f"⚠️ Defer failed (award_score): {e}, but continuing...")
+            use_followup = False
+        
         if not await self.is_admin(interaction):
-            await interaction.response.send_message(
-                ErrorMessages.ADMIN_ONLY,
-                ephemeral=True
-            )
+            error_msg = ErrorMessages.ADMIN_ONLY
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                print(f"⚠️ Admin check failed for {interaction.user.name}")
             return
         
         guild_id = str(interaction.guild_id)
@@ -1496,22 +1755,24 @@ class EventSystemCommands(commands.Cog):
         # 팀이 있는지 확인
         teams = await self.bot.db_manager.get_event_teams(guild_id)
         if not teams:
-            await interaction.response.send_message(
-                ErrorMessages.NO_TEAMS,
-                ephemeral=True
-            )
+            error_msg = ErrorMessages.NO_TEAMS
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                print(f"⚠️ No teams found in guild {guild_id}")
             return
         
         # 미션이 있는지 확인
         missions = await self.bot.db_manager.get_event_missions(guild_id)
         if not missions:
-            await interaction.response.send_message(
-                ErrorMessages.NO_MISSIONS,
-                ephemeral=True
-            )
+            error_msg = ErrorMessages.NO_MISSIONS
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                print(f"⚠️ No missions found in guild {guild_id}")
             return
         
-        # ✅ View 생성 후 setup 완료 확인
+        # View 생성 후 setup 완료 확인
         view = ScoreAwardView(
             self.bot,
             guild_id,
@@ -1521,17 +1782,64 @@ class EventSystemCommands(commands.Cog):
         setup_success = await view.setup_team_select()
         
         if not setup_success:
-            await interaction.response.send_message(
-                ErrorMessages.SETUP_ERROR,
-                ephemeral=True
+            error_msg = ErrorMessages.SETUP_ERROR
+            if use_followup:
+                await interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                print(f"⚠️ Setup error for award_score")
+            return
+        
+        content = (
+            "🎯 **미션 완료 점수 부여**\n"
+            "1단계: 점수를 부여할 팀을 선택하세요"
+        )
+        
+        if use_followup:
+            await interaction.followup.send(content, view=view, ephemeral=True)
+        else:
+            # 타임아웃 시 채널에 직접 메시지 (fallback)
+            await interaction.channel.send(
+                f"{interaction.user.mention}\n{content}",
+                view=view
+            )
+
+    @app_commands.command(name="이벤트점수조정", description="[관리자] 팀 점수 수동 조정 (추가/차감)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def adjust_team_score(self, interaction: discord.Interaction):
+        """팀 점수 수동 조정"""
+        use_followup = await self.safe_defer(interaction)
+        
+        if not await self.is_admin(interaction):
+            await self.safe_send(interaction, use_followup, ErrorMessages.ADMIN_ONLY)
+            return
+        
+        guild_id = str(interaction.guild_id)
+        
+        # 팀 확인
+        teams = await self.bot.db_manager.get_event_teams(guild_id)
+        if not teams:
+            await self.safe_send(interaction, use_followup, ErrorMessages.NO_TEAMS)
+            return
+        
+        # View 생성
+        view = ManualScoreAdjustmentView(self.bot, guild_id)
+        setup_success = await view.setup_team_select()
+        
+        if not setup_success:
+            await self.safe_send(
+                interaction,
+                use_followup,
+                "❌ 팀 선택 설정에 실패했습니다."
             )
             return
         
-        await interaction.response.send_message(
-            "🎯 **미션 완료 점수 부여**\n"
-            "1단계: 점수를 부여할 팀을 선택하세요",
-            view=view,
-            ephemeral=True
+        await self.safe_send(
+            interaction,
+            use_followup,
+            "🔧 **팀 점수 수동 조정**\n"
+            "점수를 조정할 팀을 선택하세요.\n"
+            "💡 양수(+)는 점수 추가, 음수(-)는 점수 차감",
+            view=view
         )
 
     @app_commands.command(name="이벤트점수취소", description="[관리자] 잘못 부여된 점수를 취소합니다 (미션 + 음성 활동)")
