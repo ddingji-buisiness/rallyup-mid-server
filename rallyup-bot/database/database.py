@@ -11356,10 +11356,10 @@ class DatabaseManager:
                 # 2. 기본 점수
                 awarded_points = mission['base_points']
                 
-                # 3. 일일 퀘스트 5명 이상 참여 보너스
-                if mission['category'] == 'daily' and participants_count >= 5:
+                # 3. 일일 퀘스트 4명 이상 참여 보너스
+                if mission['category'] == 'daily' and participants_count >= 4:
                     awarded_points += 1
-                    print(f"🎁 5명 이상 참여 보너스: +1점")
+                    print(f"🎁 4명 이상 참여 보너스: +1점")
                 
                 # 4. 완료 ID 생성
                 completion_id = self.generate_uuid()
