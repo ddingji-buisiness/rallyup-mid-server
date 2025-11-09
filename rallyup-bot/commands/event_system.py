@@ -3,7 +3,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Dict, List
-from datetime import datetime, time
+from datetime import datetime
+from time import time
 from config.settings import Settings, EventSystemSettings
 
 logger = logging.getLogger(__name__)
