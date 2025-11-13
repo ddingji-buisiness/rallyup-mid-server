@@ -1404,7 +1404,6 @@ class EventSystemCommands(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     async def create_team(self, interaction: discord.Interaction, 팀명: str):
         """이벤트 팀 생성"""
-        # ✅ defer 시도 (실패해도 계속 진행)
         try:
             await interaction.response.defer(ephemeral=True)
             use_followup = True
@@ -2077,7 +2076,7 @@ class EventSystemCommands(commands.Cog):
 
     @app_commands.command(name="이벤트순위", description="전체 팀 순위표 확인")
     async def event_rankings(self, interaction: discord.Interaction):
-        """전체 팀 순위 조회 (모든 유저 사용 가능)"""
+        """전체 팀 순위 조회 (개선된 레이아웃)"""
         await interaction.response.defer(ephemeral=False)
         
         guild_id = str(interaction.guild_id)
@@ -2106,26 +2105,34 @@ class EventSystemCommands(commands.Cog):
             3: "🥉"
         }
         
-        # 상위 10개 팀만 표시
+        # ⭐ 상위 10개 팀 - 2줄 구조 (옵션 B)
         ranking_text = []
         for team_rank in rankings[:DisplayConstants.TOP_TEAMS_DISPLAY]:
             rank_emoji = rank_emojis.get(team_rank['rank'], f"{team_rank['rank']}.")
             
-            # 막대 그래프 효과
-            max_score = rankings[0]['total_score'] if rankings else 1
-            bar_length = int((team_rank['total_score'] / max(max_score, 1)) * 10)
-            bar = "█" * bar_length + "░" * (10 - bar_length)
+            # 1줄: 팀명 + 총점
+            line1 = f"{rank_emoji} **{team_rank['team_name']}** - **{team_rank['total_score']}점**"
             
-            ranking_text.append(
-                f"{rank_emoji} **{team_rank['team_name']}**\n"
-                f"   {bar} **{team_rank['total_score']}점**\n"
-                f"   └ 완료: {team_rank['completed_missions']}개 | "
-                f"팀원: {team_rank['member_count']}명"
+            # 2줄: 상세 정보 (들여쓰기로 시각적 구분)
+            all_clear_display = ""
+            if team_rank['all_clear_count'] >= 10:
+                all_clear_display = f" | 올클: {team_rank['all_clear_count']}회 🔥🔥"
+            elif team_rank['all_clear_count'] >= 5:
+                all_clear_display = f" | 올클: {team_rank['all_clear_count']}회 🔥"
+            elif team_rank['all_clear_count'] > 0:
+                all_clear_display = f" | 올클: {team_rank['all_clear_count']}회"
+            
+            line2 = (
+                f"   └ 완료: {team_rank['completed_missions']}개"
+                f"{all_clear_display}"
+                f" | 팀원: {team_rank['member_count']}명"
             )
+            
+            ranking_text.append(f"{line1}\n{line2}")
         
         embed.add_field(
             name="📊 순위",
-            value="\n\n".join(ranking_text),
+            value="\n\n".join(ranking_text),  # 팀 간 줄바꿈 2개로 구분
             inline=False
         )
         
@@ -2139,15 +2146,13 @@ class EventSystemCommands(commands.Cog):
         
         # 통계 정보
         total_points = sum(r['total_score'] for r in rankings)
-        total_mission_points = sum(r['mission_score'] for r in rankings)
-        total_voice_points = sum(r.get('voice_score', 0) for r in rankings)
         total_completions = sum(r['completed_missions'] for r in rankings)
+        total_all_clears = sum(r['all_clear_count'] for r in rankings)
 
         stats_text = (
             f"**총 획득 점수**: {total_points}점\n"
-            f"├─ 미션 점수: {total_mission_points}점\n"
-            f"└─ 음성 활동: {total_voice_points}점\n"
             f"**총 완료 미션**: {total_completions}개\n"
+            f"**총 올클리어**: {total_all_clears}회 🔥\n"
             f"**평균 점수**: {round(total_points / len(rankings), 1)}점"
         )
         
