@@ -679,8 +679,8 @@ class TeamManagementView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-class MissionCreateModal(discord.ui.Modal, title="미션 등록"):
-    """미션 생성용 Modal"""
+class MissionCreateModal(discord.ui.Modal):
+    """미션 생성용 Modal (카테고리별 최적화)"""
     
     mission_name = discord.ui.TextInput(
         label="미션 이름",
@@ -697,13 +697,6 @@ class MissionCreateModal(discord.ui.Modal, title="미션 등록"):
         required=False
     )
     
-    base_points = discord.ui.TextInput(
-        label="기본 점수",
-        placeholder="예: 10",
-        max_length=5,
-        required=True
-    )
-    
     min_participants = discord.ui.TextInput(
         label="최소 참여 인원",
         placeholder="예: 1 (기본값)",
@@ -713,23 +706,41 @@ class MissionCreateModal(discord.ui.Modal, title="미션 등록"):
     )
     
     def __init__(self, bot, guild_id: str, category: str):
-        super().__init__()
+        super().__init__(title="미션 등록")
         self.bot = bot
         self.guild_id = guild_id
         self.category = category
+        
+        # 🔥 일일 퀘스트가 아닐 때만 점수 입력 필드 추가
+        if category != 'daily':
+            self.base_points = discord.ui.TextInput(
+                label="기본 점수",
+                placeholder="예: 10",
+                max_length=5,
+                required=True
+            )
+            self.add_item(self.base_points)
+        else:
+            # 일일 퀘스트는 자동으로 증분 방식 적용 (점수 입력 불필요)
+            self.base_points = None
     
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # 점수 검증
-            points = int(self.base_points.value)
-            if points <= 0:
-                await interaction.followup.send(
-                    ErrorMessages.POSITIVE_NUMBER.format(field="점수"),
-                    ephemeral=True
-                )
-                return
+            # 점수 처리
+            if self.category == 'daily':
+                # 일일 퀘스트: 더미 값 (실제로는 record_mission_completion에서 무시됨)
+                points = 0  
+            else:
+                # 일반 미션: 사용자 입력값 검증
+                points = int(self.base_points.value)
+                if points <= 0:
+                    await interaction.followup.send(
+                        ErrorMessages.POSITIVE_NUMBER.format(field="점수"),
+                        ephemeral=True
+                    )
+                    return
             
             # 최소 인원 검증
             min_part = int(self.min_participants.value or "1")
@@ -750,50 +761,84 @@ class MissionCreateModal(discord.ui.Modal, title="미션 등록"):
                 min_participants=min_part
             )
             
-            if success:
-                # 카테고리 이모지 매핑
-                category_emoji = {
-                    'daily': '📅',
-                    'online': '💻',
-                    'offline': '🏃',
-                    'hidden': '🎁'
-                }
-                
-                category_name = {
-                    'daily': '일일 퀘스트',
-                    'online': '온라인',
-                    'offline': '오프라인',
-                    'hidden': '히든 미션'
-                }
-                
-                embed = discord.Embed(
-                    title=SuccessMessages.MISSION_CREATED,
-                    description=f"{category_emoji.get(self.category, '📋')} **{self.mission_name.value}**",
-                    color=0x00ff88,
-                    timestamp=datetime.now()
-                )
-                
-                embed.add_field(
-                    name="📋 미션 정보",
-                    value=f"**카테고리**: {category_name.get(self.category, self.category)}\n"
-                          f"**기본 점수**: {points}점\n"
-                          f"**최소 인원**: {min_part}명\n"
-                          f"**설명**: {self.description.value or '없음'}",
-                    inline=False
-                )
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
+            if not success:
                 await interaction.followup.send(
                     f"❌ 미션 등록 실패: {result}",
                     ephemeral=True
                 )
-                
-        except ValueError:
+                return
+            
+            # 성공 메시지 (카테고리별 안내 추가)
+            category_emoji = {
+                'daily': '📅',
+                'online': '💻',
+                'offline': '🏃',
+                'hidden': '🎁'
+            }
+            
+            category_names = {
+                'daily': '일일 퀘스트',
+                'online': '온라인',
+                'offline': '오프라인',
+                'hidden': '히든 미션'
+            }
+            
+            embed = discord.Embed(
+                title="✅ 미션 등록 완료",
+                color=0x00ff00,
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="📝 미션 정보",
+                value=f"{category_emoji[self.category]} **{self.mission_name.value}**\n"
+                      f"카테고리: {category_names[self.category]}\n"
+                      f"최소 참여: {min_part}명",
+                inline=False
+            )
+            
+            # 점수 정보 (카테고리별 다른 안내)
+            if self.category == 'daily':
+                score_info = (
+                    "📊 **점수 체계** (자동 적용)\n"
+                    "• 1번째 완료: +5점\n"
+                    "• 2번째 완료: +5점 (누적 10점)\n"
+                    "• 3번째 완료: +5점 (누적 15점)\n"
+                    "• 4번째 이상: +0점 (상한선 도달)\n\n"
+                    "⚠️ 2명 이상 참여 필수 | 하루 1회 중복 불가"
+                )
+            else:
+                score_info = f"💰 **기본 점수**: {points}점"
+            
+            embed.add_field(
+                name="점수 안내",
+                value=score_info,
+                inline=False
+            )
+            
+            if self.description.value:
+                embed.add_field(
+                    name="📋 설명",
+                    value=self.description.value,
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"미션 ID: {result}")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except ValueError as e:
             await interaction.followup.send(
-                ErrorMessages.INVALID_NUMBER.format(field="점수 또는 최소 참여 인원"),
+                f"❌ 입력값 오류: 숫자만 입력 가능합니다",
                 ephemeral=True
             )
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 오류 발생: {str(e)}",
+                ephemeral=True
+            )
+            import traceback
+            traceback.print_exc()
 
 class ScoreAwardView(discord.ui.View):
     """미션 완료 점수 부여용 View"""
